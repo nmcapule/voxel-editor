@@ -5,18 +5,26 @@ import type Stats from 'stats.js';
 import { createGridHelper, createPlane, createSkybox } from './helpers/create';
 
 export default class Game {
-  renderer = new THREE.WebGLRenderer({ canvas: this.canvas });
-  scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(75, this.width / this.height, 1, 10000);
-  controls = new OrbitControls(this.camera, this.canvas);
-  clock = new THREE.Clock();
-  raycaster = new THREE.Raycaster(this.camera.position);
+  renderer: THREE.Renderer;
+  scene: THREE.Scene;
+  camera: THREE.Camera;
+  controls: OrbitControls;
+  clock: THREE.Clock;
+  raycaster: THREE.Raycaster;
 
-  attachables: Array<THREE.Mesh> = [];
-
+  attachables: Array<THREE.Mesh>;
   rolloverMesh: THREE.Mesh;
 
   constructor(readonly canvas: HTMLCanvasElement, readonly stats?: Stats) {
+    this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas });
+    this.scene = new THREE.Scene();
+    this.camera = new THREE.PerspectiveCamera(75, this.width / this.height, 1, 10000);
+    this.controls = new OrbitControls(this.camera, this.canvas);
+    this.clock = new THREE.Clock();
+    this.raycaster = new THREE.Raycaster(this.camera.position);
+
+    this.attachables = [];
+
     this.resize();
 
     this.camera.position.set(500, 800, 1300);

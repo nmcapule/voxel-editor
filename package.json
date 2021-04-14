@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "description": "A voxel-based editor",
   "scripts": {
-    "start": "parcel index.html",
+    "start": "parcel serve index.html",
     "build": "parcel build index.html --public-url ./",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

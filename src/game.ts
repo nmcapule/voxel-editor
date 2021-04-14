@@ -25,11 +25,10 @@ export default class Game {
 
     this.attachables = [];
 
-    this.resize();
-
     this.camera.position.set(500, 800, 1300);
     this.controls.enableKeys = true;
 
+    this.resize();
     this.initObjects();
 
     this.canvas.addEventListener('pointerdown', this.onPointerDown.bind(this));
@@ -68,6 +67,11 @@ export default class Game {
     this.rolloverMesh = new THREE.Mesh(geometry, material);
 
     this.scene.add(this.rolloverMesh);
+
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+    directionalLight.position.set(20, 10, 0);
+    directionalLight.castShadow = true;
+    this.scene.add(directionalLight);
   }
 
   private resize() {
@@ -99,6 +103,11 @@ export default class Game {
     const intersects = this.raycaster.intersectObjects(this.attachables);
 
     const voxel = this.rolloverMesh.clone();
+    voxel.material = new THREE.MeshPhysicalMaterial({
+      color: 0x0000ff,
+    });
+    voxel.castShadow = true;
+    voxel.receiveShadow = true;
     this.scene.add(voxel);
     this.attachables.push(voxel);
 

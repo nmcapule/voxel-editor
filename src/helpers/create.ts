@@ -37,7 +37,9 @@ export function createPlane(w = 1000, h = 1000) {
   const geometry = new THREE.PlaneGeometry(w, h);
   geometry.rotateX(-Math.PI / 2);
 
-  return new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ visible: false }));
+  const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+
+  return mesh;
 }
 
 export function createGridHelper(size = 10, divisions = 10) {

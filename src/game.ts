@@ -2,10 +2,10 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
 import type Stats from 'stats.js';
 
-import { createGridHelper, createPlane, createSkybox } from './helpers/create';
+import { createGridHelper, createPlane, createSkybox, createSpotLight } from './helpers/create';
 
 export default class Game {
-  renderer: THREE.Renderer;
+  renderer: THREE.WebGLRenderer;
   scene: THREE.Scene;
   camera: THREE.Camera;
   controls: OrbitControls;
@@ -25,8 +25,11 @@ export default class Game {
 
     this.attachables = [];
 
+    this.scene.background = new THREE.Color(0xf0f0f0);
     this.camera.position.set(500, 800, 1300);
     this.controls.enableKeys = true;
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
 
     this.resize();
     this.initObjects();
@@ -56,7 +59,7 @@ export default class Game {
 
   private initObjects() {
     this.attachables = [createPlane()];
-    this.scene.add(createSkybox(), createGridHelper(1000, 20), ...this.attachables);
+    this.scene.add(createSpotLight(), createGridHelper(1000, 20), ...this.attachables);
 
     const geometry = new THREE.BoxGeometry(50, 50, 50);
     const material = new THREE.MeshBasicMaterial({
@@ -68,10 +71,8 @@ export default class Game {
 
     this.scene.add(this.rolloverMesh);
 
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
-    directionalLight.position.set(20, 10, 0);
-    directionalLight.castShadow = true;
-    this.scene.add(directionalLight);
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.95);
+    this.scene.add(ambientLight);
   }
 
   private resize() {
@@ -102,9 +103,11 @@ export default class Game {
     this.raycaster.setFromCamera(this.pointer(event), this.camera);
     const intersects = this.raycaster.intersectObjects(this.attachables);
 
+    const colors = [0xff9aa2, 0xffb7b2, 0xffdac1, 0xe2f0cb, 0xb5ead7, 0xc7ceea];
+
     const voxel = this.rolloverMesh.clone();
-    voxel.material = new THREE.MeshPhysicalMaterial({
-      color: 0x0000ff,
+    voxel.material = new THREE.MeshStandardMaterial({
+      color: colors[Math.floor(Math.random() * colors.length)],
     });
     voxel.castShadow = true;
     voxel.receiveShadow = true;

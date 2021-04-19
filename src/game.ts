@@ -32,6 +32,7 @@ export default class Game {
     this.attachables = [];
 
     this.scene.background = new THREE.Color(0xf0f0f0);
+    this.scene.fog = new THREE.Fog(0x6a6a6a, 100, 5000);
     this.camera.position.set(500, 800, 1300);
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
@@ -45,8 +46,8 @@ export default class Game {
     this.keyboard
       .on('q', () => {
         const camera = new THREE.PerspectiveCamera(75, this.width / this.height, 1, 10000);
-        camera.quaternion.copy(this.camera.quaternion);
         camera.position.copy(this.camera.position);
+        camera.quaternion.copy(this.camera.quaternion);
 
         this.camera = camera;
         this.controls = new OrbitControls(this.camera, this.keyboard);
@@ -54,9 +55,16 @@ export default class Game {
         this.render();
       })
       .on('e', () => {
-        const camera = new THREE.OrthographicCamera(-1000, 1000, 500, -500, 1, 10000);
-        camera.quaternion.copy(this.camera.quaternion);
+        const camera = new THREE.OrthographicCamera(
+          -this.width,
+          this.width,
+          this.height,
+          -this.height,
+          1,
+          10000,
+        );
         camera.position.copy(this.camera.position);
+        camera.quaternion.copy(this.camera.quaternion);
 
         this.camera = camera;
         this.controls = new OrbitControls(this.camera, this.keyboard);
@@ -122,7 +130,6 @@ export default class Game {
     // we have to save the position and then restore it later to compensate.
     const save = this.camera.position.clone();
     this.raycaster.setFromCamera(this.pointer(event), this.camera);
-    this.camera.position.set(save.x, save.y, save.z);
 
     const intersects = this.raycaster.intersectObjects(this.attachables);
     if (intersects.length > 0) {
@@ -132,6 +139,7 @@ export default class Game {
       this.rolloverMesh.position.divideScalar(50).floor().multiplyScalar(50).addScalar(25);
     }
 
+    this.camera.position.set(save.x, save.y, save.z);
     this.render();
   }
 

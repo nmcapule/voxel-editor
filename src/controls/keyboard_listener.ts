@@ -50,6 +50,11 @@ export default class KeyboardListener {
   }
 
   private onKeyDown(event: KeyboardEvent) {
+    // Skip repeated keydown on hold. We only want the first time.
+    if (this.pressedKeys.has(event.key.toLowerCase())) {
+      return;
+    }
+
     this.pressedKeys.add(event.key.toLowerCase());
 
     this.checkAndTrigger({

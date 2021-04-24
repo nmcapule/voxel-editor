@@ -44,7 +44,7 @@ export default class Game {
     this.canvas.addEventListener('pointermove', this.onPointerMove.bind(this));
 
     this.keyboard
-      .on('q', () => {
+      .on('v+q', () => {
         const camera = new THREE.PerspectiveCamera(75, this.width / this.height, 1, 10000);
         camera.position.copy(this.camera.position);
         camera.quaternion.copy(this.camera.quaternion);
@@ -54,7 +54,7 @@ export default class Game {
         this.raycaster = new THREE.Raycaster(this.camera.position);
         this.render();
       })
-      .on('e', () => {
+      .on('v+e', () => {
         const camera = new THREE.OrthographicCamera(
           -this.width,
           this.width,

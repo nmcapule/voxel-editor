@@ -6,6 +6,8 @@ import OrbitControls from './controls/orbit_controls';
 import KeyboardListener from './controls/keyboard_listener';
 
 export default class Game {
+  readonly coordsScale = 10;
+
   renderer: THREE.WebGLRenderer;
   scene: THREE.Scene;
   camera: THREE.Camera;
@@ -23,7 +25,6 @@ export default class Game {
     this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas });
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(75, this.width / this.height, 1, 10000);
-    // this.camera = new THREE.OrthographicCamera(-1000, 1000, 500, -500, 1, 10000);
     this.keyboard = new KeyboardListener(window.document.body);
     this.clock = new THREE.Clock();
     this.controls = new OrbitControls(this.camera, this.keyboard);
@@ -32,8 +33,8 @@ export default class Game {
     this.attachables = [];
 
     this.scene.background = new THREE.Color(0xf0f0f0);
-    this.scene.fog = new THREE.Fog(0x6a6a6a, 100, 5000);
-    this.camera.position.set(500, 800, 1300);
+    this.scene.fog = new THREE.Fog(0x6a6a6a, this.coordsScale, 100 * this.coordsScale);
+    this.camera.position.set(10 * this.coordsScale, 16 * this.coordsScale, 26 * this.coordsScale);
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
 
@@ -45,7 +46,12 @@ export default class Game {
 
     this.keyboard
       .on('v+q', () => {
-        const camera = new THREE.PerspectiveCamera(75, this.width / this.height, 1, 10000);
+        const camera = new THREE.PerspectiveCamera(
+          75,
+          this.width / this.height,
+          this.coordsScale,
+          200 * this.coordsScale,
+        );
         camera.position.copy(this.camera.position);
         camera.quaternion.copy(this.camera.quaternion);
 
@@ -56,10 +62,10 @@ export default class Game {
       })
       .on('v+e', () => {
         const camera = new THREE.OrthographicCamera(
-          -this.width,
-          this.width,
-          this.height,
-          -this.height,
+          (-this.width * this.coordsScale) / 100,
+          (this.width * this.coordsScale) / 100,
+          (this.height * this.coordsScale) / 100,
+          (-this.height * this.coordsScale) / 100,
           1,
           10000,
         );
@@ -97,10 +103,14 @@ export default class Game {
   }
 
   private initObjects() {
-    this.attachables = [createPlane()];
-    this.scene.add(createSpotLight(), createGridHelper(1000, 20), ...this.attachables);
+    this.attachables = [createPlane(20 * this.coordsScale, 20 * this.coordsScale)];
+    this.scene.add(
+      createSpotLight(),
+      createGridHelper(20 * this.coordsScale, 20),
+      ...this.attachables,
+    );
 
-    const geometry = new THREE.BoxGeometry(50, 50, 50);
+    const geometry = new THREE.BoxGeometry(this.coordsScale, this.coordsScale, this.coordsScale);
     const material = new THREE.MeshBasicMaterial({
       color: 'blue',
       opacity: 0.5,
@@ -136,7 +146,11 @@ export default class Game {
       const intersect = intersects[0];
 
       this.rolloverMesh.position.copy(intersect.point).add(intersect.face.normal);
-      this.rolloverMesh.position.divideScalar(50).floor().multiplyScalar(50).addScalar(25);
+      this.rolloverMesh.position
+        .divideScalar(this.coordsScale)
+        .floor()
+        .multiplyScalar(this.coordsScale)
+        .addScalar(this.coordsScale / 2);
     }
 
     this.camera.position.set(save.x, save.y, save.z);

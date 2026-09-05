@@ -1,0 +1,25 @@
+{
+  "name": "voxel-studio",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "build": "bun run typecheck && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "three": "^0.185.1",
+    "three-gpu-pathtracer": "^0.0.24",
+    "three-mesh-bvh": "^0.9.14",
+    "xatlas-web": "^0.1.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.0",
+    "@types/three": "^0.185.4",
+    "typescript": "~6.0.2",
+    "vite": "^8.2.0"
+  }
+}

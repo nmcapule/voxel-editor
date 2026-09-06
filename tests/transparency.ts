@@ -1,5 +1,9 @@
 // Run with `bunx vite --config tests/vite.config.ts`, then open /tests/transparency.html.
 import { VoxelDocument } from '../src/editor'
+import type { Vec3 } from '../src/editor'
+import type { Object3D, WebGLRenderer } from 'three'
+import { faceViews, projectFaces } from '../src/projections'
+import { inspectionViews, type InspectionView } from '../src/inspection'
 import { VoxelRenderer, type RendererCallbacks } from '../src/renderer'
 import type { ViewSettings } from '../src/storage'
 
@@ -88,8 +92,143 @@ async function runRasterChecks() {
   return { comparisons, chunked, unchunked }
 }
 
+async function runInspectionChecks() {
+  renderer.setRenderMode(false)
+  renderer.setSettings({ ...settings, pathTracing: false, grid: true, faceGrid: true })
+  const fixture = new VoxelDocument({ x: 19, y: 23, z: 29 })
+  // Unequal extents, boundary voxels and overlapping rays expose flips, depth and framing errors.
+  for (let x = 0; x < 8; x++) for (let y = 0; y < 4; y++) for (let z = 0; z < 12; z++) {
+    fixture.setVoxel(x, y, z, 7)
+  }
+  for (const [x, y, z, color] of [[18, 22, 28, 11], [2, 17, 6, 14], [2, 17, 25, 5], [15, 17, 6, 9], [2, 3, 6, 1]]) {
+    fixture.setVoxel(x, y, z, color)
+  }
+  renderer.setDocument(fixture)
+  await renderer.whenMeshIdle()
+  renderer.applySelection({ cells: [{ x: 0, y: 0, z: 0 }, { x: 18, y: 22, z: 28 }], count: 2 }, false)
+  renderer.setView({ position: { x: 41, y: 33, z: -27 }, target: { x: 2, y: 7, z: -3 }, fov: 47 })
+  const sceneObject = Reflect.get(renderer, 'scene') as Object3D
+  const snapshot = () => {
+    const visibility: [string, boolean][] = []
+    sceneObject.traverse(object => visibility.push([object.uuid, object.visible]))
+    return JSON.stringify({
+      view: renderer.getView(), settings: Reflect.get(renderer, 'settings'),
+      selection: [...Reflect.get(renderer, 'selection') as Map<number, Vec3>],
+      floating: Reflect.get(renderer, 'floatingSelection'), renderMode: Reflect.get(renderer, 'renderMode'), visibility,
+    })
+  }
+  const inspect = async (views?: readonly InspectionView[]) => {
+    const before = snapshot()
+    const images = await renderer.inspect(views)
+    check(snapshot() === before, 'Inspection must preserve view, settings, selection and scene visibility')
+    return Promise.all(images.map(async image => {
+      check(image.blob.type === 'image/png', `${image.name}: expected a PNG blob`)
+      const bitmap = await createImageBitmap(image.blob)
+      try {
+        check(bitmap.width === image.width && bitmap.height === image.height, `${image.name}: decoded dimensions must match metadata`)
+        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height)
+        const context = canvas.getContext('2d')!
+        context.drawImage(bitmap, 0, 0)
+        return { ...image, rgba: context.getImageData(0, 0, image.width, image.height).data }
+      } finally {
+        bitmap.close()
+      }
+    }))
+  }
+  const equalPixels = (a: Uint8ClampedArray, b: Uint8ClampedArray) => a.length === b.length && a.every((value, i) => value === b[i])
+  const checkFaces = (images: Awaited<ReturnType<typeof inspect>>, document: VoxelDocument) => {
+    for (const expected of projectFaces(document)) {
+      const image = images.find(image => image.name === expected.name)
+      check(!!image, `${expected.name}: missing face`)
+      check(image!.width === expected.width && image!.height === expected.height, `${expected.name}: incorrect face dimensions`)
+      check(image!.direction === expected.direction && image!.pixelAxes === expected.pixelAxes, `${expected.name}: incorrect orientation metadata`)
+      check(equalPixels(image!.rgba, expected.rgba), `${expected.name}: decoded RGBA must match projectFaces byte for byte`)
+    }
+  }
+  const defaults = await inspect()
+  check(defaults.length === 7 && defaults.map(image => image.name).join() === [...faceViews, 'iso-front-right'].join(), 'Default inspection must return six faces and iso-front-right in order')
+  checkFaces(defaults, fixture)
+  check((await inspect([])).length === 0, 'An empty view request must return no images')
+
+  const overlays = new Map<Object3D, boolean>()
+  for (const key of ['grid', 'limits', 'ground', 'hover', 'marqueePreview', 'selectionPreview', 'fillPreview', 'pushPullPreview']) {
+    const object = Reflect.get(renderer, key) as Object3D | undefined
+    if (object) overlays.set(object, object.visible)
+  }
+  let faceGrids = 0
+  sceneObject.traverse(object => {
+    if (object.userData.faceGrid) { overlays.set(object, object.visible); faceGrids++ }
+  })
+  check(faceGrids > 0 && !!Reflect.get(renderer, 'selectionPreview'), 'Fixture must contain face grids and a selection overlay')
+  let populated: Awaited<ReturnType<typeof inspect>>
+  try {
+    for (const object of overlays.keys()) object.visible = true
+    populated = await inspect(inspectionViews)
+    check(populated.map(image => image.name).join() === inspectionViews.join(), 'Explicit inspection must return all requested views in order')
+    checkFaces(populated, fixture)
+    for (const object of overlays.keys()) object.visible = false
+    const hidden = await inspect(inspectionViews)
+    check(hidden.every((image, i) => equalPixels(image.rgba, populated[i].rgba)), 'Overlay visibility must not affect any inspection pixels')
+
+    // Mixed visibility catches restoration that blindly turns every object back on.
+    let index = 0
+    for (const object of overlays.keys()) object.visible = index++ % 2 === 0
+    const before = snapshot()
+    const webgl = Reflect.get(renderer, 'renderer') as WebGLRenderer
+    const original = webgl.readRenderTargetPixels
+    const failure = new Error('Inspection readback failure')
+    let called = false
+    let caught: unknown
+    try {
+      Reflect.set(webgl, 'readRenderTargetPixels', () => {
+        called = true
+        check([...overlays.keys()].every(object => !object.visible), 'Readback must run with overlays hidden')
+        throw failure
+      })
+      try { await renderer.inspect(['iso-back-left']) } catch (error) { caught = error }
+    } finally {
+      Reflect.set(webgl, 'readRenderTargetPixels', original)
+    }
+    check(called && caught === failure, 'Inspection must propagate the injected readback failure')
+    check(snapshot() === before, 'Failed inspection must restore scene visibility, view, settings and selection')
+    const recovered = await inspect(['iso-back-left'])
+    check(equalPixels(recovered[0].rgba, populated.find(image => image.name === 'iso-back-left')!.rgba), 'Inspection must work again after readback failure')
+  } finally {
+    for (const [object, visible] of overlays) object.visible = visible
+    renderer.render()
+  }
+
+  const emptyDocument = new VoxelDocument(fixture.dimensions)
+  renderer.setDocument(emptyDocument)
+  await renderer.whenMeshIdle()
+  const empty = await inspect(inspectionViews)
+  checkFaces(empty, emptyDocument)
+  for (const image of empty.filter(image => !image.name.startsWith('iso-'))) {
+    check(image.rgba.every((value, i) => i % 4 !== 3 || value === 0), `${image.name}: empty face alpha must be zero everywhere`)
+  }
+  const isometric = populated.filter(image => image.name.startsWith('iso-'))
+  check(isometric.length === 4, 'All four isometric views must be returned')
+  for (const [i, image] of isometric.entries()) {
+    const blank = empty.find(empty => empty.name === image.name)!
+    check(image.width === 512 && image.height === 512 && blank.width === 512 && blank.height === 512, `${image.name}: isometric PNGs must be 512x512`)
+    const x = image.name.endsWith('right') ? 1 : -1
+    const z = image.name.includes('front') ? 1 : -1
+    check(image.direction.includes(`(${x},1,${z})`) && image.direction.includes('orthographic') && image.pixelAxes === undefined, `${image.name}: incorrect isometric metadata`)
+    const background = blank.rgba.slice(0, 4)
+    check(background[3] === 255 && blank.rgba.every((value, j) => value === background[j % 4]), `${image.name}: empty isometric must be uniform opaque background`)
+    check(!equalPixels(image.rgba, blank.rgba), `${image.name}: populated isometric must not be blank`)
+    for (let y = 0; y < 512; y++) for (let x = 0; x < 512; x++) {
+      if (x !== 0 && y !== 0 && x !== 511 && y !== 511) continue
+      const offset = (y * 512 + x) * 4
+      check(background.every((value, channel) => image.rgba[offset + channel] === value), `${image.name}: framing must leave background along the entire border`)
+    }
+    for (const other of isometric.slice(i + 1)) check(!equalPixels(image.rgba, other.rgba), `${image.name} and ${other.name}: asymmetric fixture must produce different pixels`)
+  }
+  return { defaults: defaults.map(image => image.name), faces: faceViews.length, isometric: isometric.map(image => image.name), failureRestored: true }
+}
+
 Object.assign(window, { transparencyTest: {
-  renderer, scene, pixel, errors, settings, runRasterChecks,
+  renderer, scene, pixel, errors, settings, runRasterChecks, runInspectionChecks,
   get status() { return status },
 } })
 await scene('pool')

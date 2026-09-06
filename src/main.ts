@@ -526,6 +526,14 @@ async function executeApplicationCommand({ command, source, ifRevision, viewVers
       emitCommandEvent(command, source, outcome)
       return { changed: true, revision: outcome.revision, result: outcome.result }
     }
+    case 'view.inspect': {
+      const revision = studioController.revision
+      const inspected = await renderer.inspect(command.views)
+      const images = await Promise.all(inspected.map(async ({ blob, ...metadata }) => ({
+        ...metadata, mime: 'image/png', dataBase64: bytesToBase64(new Uint8Array(await blob.arrayBuffer())),
+      })))
+      return { changed: false, revision, result: { revision, images } }
+    }
     case 'view.capture': {
       const { blob, view } = await renderer.capture()
       return { changed: false, revision: studioController.revision, result: { mime: 'image/png', dataBase64: bytesToBase64(new Uint8Array(await blob.arrayBuffer())), view, revision: studioController.revision } }

@@ -9,6 +9,8 @@ import type { WebGLPathTracer } from 'three-gpu-pathtracer'
 import { CHUNK_SIZE, chunkCoords, connectedBodyVoxels, connectedSurfaceVoxels, fillShapeVoxels, moveRange, occupiedVoxels, pushPullRange, surfaceVoxels, type FillShape, type PaletteMaterial, type Vec3, type VoxelDocument } from './editor'
 import type { AuxiliaryTool, PaintMode, PbrMap, SculptMode, SelectionMode, SelectionState, Tool } from './studio'
 import type { ViewSettings } from './storage'
+import { faceViews, projectFaces, type FaceView } from './projections'
+import { defaultInspectionViews, type InspectionView } from './inspection'
 
 export type { AuxiliaryTool, PaintMode, PbrMap, SculptMode, SelectionMode, SelectionState, Tool } from './studio'
 
@@ -423,8 +425,8 @@ export class VoxelRenderer {
     return new THREE.OrthographicCamera(-20, 20, 20, -20, -1000, 2000)
   }
 
-  private createAmbientOcclusionPass() {
-    const pass = new GTAOPass(this.scene, this.camera, 1, 1)
+  private createAmbientOcclusionPass(camera = this.camera) {
+    const pass = new GTAOPass(this.scene, camera, 1, 1)
     pass.updateGtaoMaterial({ radius: 0.8, thickness: 1.1, distanceFallOff: 1, samples: 16 })
     pass.blendIntensity = 0.65
     pass.enabled = this.settings.ambientOcclusion
@@ -1749,14 +1751,14 @@ export class VoxelRenderer {
     }, 750)
   }
 
-  private renderRaster() {
+  private renderRaster(camera = this.camera, composer = this.composer) {
     // ponytail: material-level depth order suits layered voxels; intersecting media need depth peeling.
     this.model.updateMatrixWorld(true)
-    this.camera.updateMatrixWorld(true)
+    camera.updateMatrixWorld(true)
     const bounds = new Map<THREE.Material, THREE.Box3>()
     const box = new THREE.Box3()
     const center = new THREE.Vector3()
-    const frustum = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse))
+    const frustum = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse))
     this.model.traverse(object => {
       if (!(object instanceof THREE.Mesh) || !(object.material instanceof THREE.MeshPhysicalMaterial) || object.material.transmission === 0) return
       box.copy(object.geometry.boundingBox!).applyMatrix4(object.matrixWorld)
@@ -1766,10 +1768,10 @@ export class VoxelRenderer {
       bounds.set(object.material, materialBounds)
     })
     this.transmissionDepths.clear()
-    for (const [material, box] of bounds) this.transmissionDepths.set(material, box.getCenter(center).project(this.camera).z)
+    for (const [material, box] of bounds) this.transmissionDepths.set(material, box.getCenter(center).project(camera).z)
     this.lastTransmissionMaterial = undefined
-    this.composer.render()
-    this.recordFrame()
+    composer.render()
+    if (composer === this.composer) this.recordFrame()
   }
 
   render() {
@@ -1782,5 +1784,91 @@ export class VoxelRenderer {
     const view = this.getView()
     const blob = await new Promise<Blob>((resolve, reject) => this.renderer.domElement.toBlob(blob => blob ? resolve(blob) : reject(new Error('Could not capture the viewport.')), 'image/png'))
     return { blob, view }
+  }
+
+  async inspect(views: readonly InspectionView[] = defaultInspectionViews) {
+    const faces = views.filter((name): name is FaceView => (faceViews as readonly string[]).includes(name))
+    const isometric = views.filter(name => name.startsWith('iso-'))
+    if (isometric.length) await this.whenMeshIdle()
+    const images: { name: InspectionView; width: number; height: number; direction: string; pixelAxes?: string; canvas: OffscreenCanvas }[] = []
+    for (const { rgba, ...face } of projectFaces(this.document, faces)) {
+      const canvas = new OffscreenCanvas(face.width, face.height)
+      canvas.getContext('2d')!.putImageData(new ImageData(rgba, face.width, face.height), 0, 0)
+      images.push({ ...face, canvas })
+    }
+    if (isometric.length) {
+      const bounds = this.document.bounds(true) ?? { min: { x: 0, y: 0, z: 0 }, max: this.document.dimensions }
+      const offset = new THREE.Vector3(-this.document.dimensions.x / 2, 0, -this.document.dimensions.z / 2)
+      const box = new THREE.Box3(new THREE.Vector3(bounds.min.x, bounds.min.y, bounds.min.z).add(offset), new THREE.Vector3(bounds.max.x, bounds.max.y, bounds.max.z).add(offset))
+      const center = box.getCenter(new THREE.Vector3())
+      const distance = box.getSize(new THREE.Vector3()).length() + 1
+      const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, distance * 3)
+      const composer = new EffectComposer(this.renderer, new THREE.WebGLRenderTarget(512, 512, { type: THREE.HalfFloatType }))
+      composer.setPixelRatio(1)
+      composer.setSize(512, 512)
+      composer.renderToScreen = false
+      const renderPass = new RenderPass(this.scene, camera)
+      const ao = this.createAmbientOcclusionPass(camera)
+      const output = new OutputPass()
+      composer.addPass(renderPass)
+      composer.addPass(ao)
+      composer.addPass(output)
+      const visibility = new Map<THREE.Object3D, boolean>()
+      const target = this.renderer.getRenderTarget()
+      const viewport = this.renderer.getViewport(new THREE.Vector4())
+      const scissor = this.renderer.getScissor(new THREE.Vector4())
+      const scissorTest = this.renderer.getScissorTest()
+      try {
+        // No await while scene visibility is overridden; the live camera and canvas are never changed.
+        for (const object of [this.grid, this.limits, this.ground, this.hover, this.marqueePreview, this.selectionPreview, this.fillPreview, this.pushPullPreview]) {
+          if (object) visibility.set(object, object.visible)
+        }
+        this.model.traverse(object => { if (object.userData.faceGrid) visibility.set(object, object.visible) })
+        for (const object of visibility.keys()) object.visible = false
+        for (const name of isometric) {
+          const x = name.endsWith('right') ? 1 : -1
+          const z = name.includes('front') ? 1 : -1
+          camera.position.copy(center).add(new THREE.Vector3(x, 1, z).normalize().multiplyScalar(distance))
+          camera.lookAt(center)
+          camera.updateMatrixWorld(true)
+          let extent = 0
+          for (const x of [box.min.x, box.max.x]) for (const y of [box.min.y, box.max.y]) for (const z of [box.min.z, box.max.z]) {
+            const point = new THREE.Vector3(x, y, z).applyMatrix4(camera.matrixWorldInverse)
+            extent = Math.max(extent, Math.abs(point.x), Math.abs(point.y))
+          }
+          extent = Math.max(1, extent * 1.1)
+          camera.left = camera.bottom = -extent
+          camera.right = camera.top = extent
+          camera.updateProjectionMatrix()
+          this.renderRaster(camera, composer)
+          const pixels = new Uint16Array(512 * 512 * 4)
+          this.renderer.readRenderTargetPixels(composer.readBuffer, 0, 0, 512, 512, pixels)
+          const rgba = new Uint8ClampedArray(pixels.length)
+          for (let y = 0; y < 512; y++) for (let x = 0; x < 2048; x++) rgba[(511 - y) * 2048 + x] = Math.round(THREE.DataUtils.fromHalfFloat(pixels[y * 2048 + x]) * 255)
+          const canvas = new OffscreenCanvas(512, 512)
+          canvas.getContext('2d')!.putImageData(new ImageData(rgba, 512, 512), 0, 0)
+          images.push({ name, width: 512, height: 512, direction: `camera side (${x},1,${z}), orthographic, +Y up, raster materials`, canvas })
+        }
+      } finally {
+        for (const [object, visible] of visibility) object.visible = visible
+        this.renderer.setRenderTarget(target)
+        this.renderer.setViewport(viewport)
+        this.renderer.setScissor(scissor)
+        this.renderer.setScissorTest(scissorTest)
+        this.transmissionDepths.clear()
+        this.lastTransmissionMaterial = undefined
+        renderPass.dispose()
+        ao.dispose()
+        // GTAOPass.dispose in Three 0.185 omits these two owned materials.
+        ao.gtaoMaterial.dispose()
+        ao.blendMaterial.dispose()
+        output.dispose()
+        composer.dispose()
+      }
+    }
+    return Promise.all(views.map(async name => {
+      const { canvas, ...metadata } = images.find(image => image.name === name)!
+      return { ...metadata, blob: await canvas.convertToBlob({ type: 'image/png' }) }
+    }))
   }
 }

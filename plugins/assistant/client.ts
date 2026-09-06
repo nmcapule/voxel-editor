@@ -1,10 +1,13 @@
 import css from './style.css?inline'
 import { StudioCommandError } from '../../src/studio'
-import { isInspection, needsApproval, parseCanvasCommand, type AssistantHost, type ClientMessage, type ServerMessage, type ToolResponse } from './shared'
+import { isInspection, needsApproval, parseCanvasCommand, type AssistantHost, type AssistantModel, type ClientMessage, type ServerMessage, type ToolResponse } from './shared'
 
 export function mountAssistant(host: AssistantHost): () => void {
   const lifetime = new AbortController()
-  const storageKey = 'voxel-assistant-token'
+  const modelStorageKey = 'voxel-assistant-model'
+  let modelChoice = ''
+  try { modelChoice = localStorage.getItem(modelStorageKey) ?? '' } catch { /* Keep model choice in memory if storage is disabled. */ }
+  const modelKey = (model: { providerID: string; modelID: string }) => JSON.stringify([model.providerID, model.modelID])
   const style = document.createElement('style')
   style.dataset.voxelAssistant = ''
   style.textContent = css
@@ -23,27 +26,6 @@ export function mountAssistant(host: AssistantHost): () => void {
     return node
   }
 
-  let token = ''
-  try { token = sessionStorage.getItem(storageKey) ?? '' } catch { /* Storage may be disabled. Keep the key in memory only. */ }
-  const fragment = location.hash.slice(1)
-  const suppliedToken = new URLSearchParams(fragment).get('assistant')
-  if (suppliedToken !== null) {
-    token = suppliedToken
-    // Preserve unrelated fragment bytes, including bare anchors and their encoding.
-    const remaining = fragment.split('&').filter(part => !new URLSearchParams(part).has('assistant')).join('&')
-    history.replaceState(history.state, '', location.pathname + location.search + (remaining ? `#${remaining}` : ''))
-  }
-
-  function rememberToken(value: string) {
-    token = value
-    try {
-      if (value) sessionStorage.setItem(storageKey, value)
-      else sessionStorage.removeItem(storageKey)
-    } catch { /* The connection still works without session storage. */ }
-  }
-
-  if (token.length > 4096) token = ''
-  rememberToken(token)
   const toggle = button('Enable assistant', 'voxel-assistant-toggle')
   toggle.setAttribute('role', 'menuitemcheckbox')
   toggle.setAttribute('aria-checked', 'false')
@@ -75,20 +57,6 @@ export function mountAssistant(host: AssistantHost): () => void {
     notice.setAttribute('role', 'alert')
     notice.hidden = true
 
-    const connection = element('form', 'assistant-connection')
-    const keyLabel = element('label', 'assistant-label', 'Connection key')
-    const key = element('input', '')
-    key.type = 'password'
-    key.autocomplete = 'off'
-    key.spellcheck = false
-    key.maxLength = 4096
-    key.required = true
-    keyLabel.append(key)
-    const explanation = element('p', 'assistant-note', 'Start the optional service with ')
-    explanation.append(element('code', '', 'bun run dev:assistant'), '. Its terminal prints your connection key. The key is kept only in this tab session.')
-    const connectButton = button('Connect', 'assistant-primary')
-    connectButton.type = 'submit'
-    connection.append(keyLabel, explanation, connectButton)
     const reconnect = button('Reconnect', 'assistant-reconnect')
     reconnect.hidden = true
 
@@ -115,6 +83,13 @@ export function mountAssistant(host: AssistantHost): () => void {
     activity.tabIndex = 0
     activity.hidden = true
     const composer = element('form', 'assistant-composer')
+    composer.id = 'assistant-message-form'
+    const modelLabel = element('label', 'assistant-label', 'AI model')
+    const modelSelect = element('select', '')
+    modelSelect.setAttribute('aria-describedby', 'assistant-model-note')
+    modelLabel.append(modelSelect)
+    const modelNote = element('p', 'assistant-note', 'Connected models with tools and image support. Applies to your next message.')
+    modelNote.id = 'assistant-model-note'
     const promptLabel = element('label', 'assistant-label', 'Message')
     const prompt = element('textarea', '')
     prompt.rows = 3
@@ -124,15 +99,16 @@ export function mountAssistant(host: AssistantHost): () => void {
     const count = element('span', 'assistant-count', '0 / 8,000')
     const send = button('Send', 'assistant-primary')
     send.type = 'submit'
+    send.setAttribute('form', composer.id)
     const stop = button('Stop')
     const sendActions = element('div', 'assistant-actions')
     sendActions.append(count, stop, send)
-    composer.append(promptLabel, sendActions)
+    composer.append(modelLabel, modelNote, promptLabel)
     const footer = element('footer', 'assistant-footer')
     const newConversation = button('New conversation', 'assistant-quiet')
     const disableButton = button('Disable', 'assistant-quiet')
-    footer.append(newConversation, disableButton)
-    body.append(notice, connection, reconnect, approval, empty, shortened, activity, composer)
+    footer.append(sendActions, newConversation, disableButton)
+    body.append(notice, reconnect, approval, empty, shortened, activity, composer)
     panel.append(header, body, footer)
     root.append(panel, launcher)
     host.root.append(root)
@@ -144,6 +120,7 @@ export function mountAssistant(host: AssistantHost): () => void {
     let socketLifetime: AbortController | undefined
     let heartbeat: number | undefined
     let ready = false
+    let models: AssistantModel[] = []
     let resettingAt: number | undefined
     let settleApproval: ((accepted: boolean) => void) | undefined
     const seenRuns = new Set<string>()
@@ -151,14 +128,13 @@ export function mountAssistant(host: AssistantHost): () => void {
 
     function render() {
       const busy = !!run || resettingAt !== undefined
-      send.disabled = !ready || busy || !prompt.value.trim() || prompt.value.length > 8000
+      send.disabled = !ready || busy || !modelSelect.value || !prompt.value.trim() || prompt.value.length > 8000
+      modelSelect.disabled = !ready || busy || !models.length
       stop.disabled = !run || run.controller.signal.aborted
-      newConversation.disabled = !ready || busy
-      connectButton.disabled = !!socket
-      key.disabled = !!socket
-      connection.hidden = !!token
-      reconnect.hidden = !token || !!socket
+      newConversation.disabled = !ready || busy || !models.length
+      reconnect.hidden = !!socket && !(ready && !models.length)
       composer.hidden = !ready
+      sendActions.hidden = !ready
       count.textContent = `${prompt.value.length.toLocaleString('en-US')} / 8,000`
       launcher.textContent = settleApproval ? 'Approval needed' : busy ? 'Assistant working' : 'Assistant'
       launcher.setAttribute('aria-label', `${launcher.textContent}. Expand assistant`)
@@ -219,9 +195,8 @@ export function mountAssistant(host: AssistantHost): () => void {
       if (current && current.readyState < current.CLOSING) current.close()
     }
 
-    function disconnected(message: string, rejected = false) {
+    function disconnected(message: string) {
       closeSocket()
-      if (rejected) { rememberToken(''); key.value = '' }
       status.textContent = 'Not connected'
       report(message)
       addActivity('status', message)
@@ -325,7 +300,7 @@ export function mountAssistant(host: AssistantHost): () => void {
     }
 
     function connect() {
-      if (socket || !token || panelLifetime.signal.aborted) return
+      if (socket || panelLifetime.signal.aborted) return
       report('')
       status.textContent = 'Connecting'
       const url = new URL('/__assistant/socket', location.href)
@@ -344,8 +319,7 @@ export function mountAssistant(host: AssistantHost): () => void {
       const malformed = () => disconnected('The assistant sent an invalid message. Local work stopped. Reconnect to start a new conversation.')
       current.addEventListener('open', () => {
         if (socket !== current) return
-        status.textContent = 'Authenticating'
-        transmit({ type: 'auth', token })
+        status.textContent = 'Loading models'
       }, socketEvents)
       current.addEventListener('message', event => {
         if (socket !== current || panelLifetime.signal.aborted) return
@@ -360,15 +334,34 @@ export function mountAssistant(host: AssistantHost): () => void {
           case 'pong': return
           case 'ready':
             if (ready) return
+            if (!Array.isArray(message.models) || !message.models.every(model => model && typeof model === 'object' && ['providerID', 'modelID', 'providerName', 'name'].every(key => typeof model[key as keyof AssistantModel] === 'string' && model[key as keyof AssistantModel].length > 0)) || (message.modelsError !== undefined && typeof message.modelsError !== 'string')) { malformed(); return }
+            models = message.models.sort((a, b) => a.providerName.localeCompare(b.providerName) || a.name.localeCompare(b.name) || a.modelID.localeCompare(b.modelID))
+            modelSelect.replaceChildren(new Option(models.length ? 'Choose a model' : 'No compatible models', ''))
+            {
+              const groups = new Map<string, HTMLOptGroupElement>()
+              for (const model of models) {
+                let group = groups.get(model.providerID)
+                if (!group) {
+                  group = element('optgroup', '')
+                  group.label = model.providerName
+                  groups.set(model.providerID, group)
+                  modelSelect.append(group)
+                }
+                group.append(new Option(model.name, modelKey(model)))
+              }
+              const preferred = modelChoice || (message.defaultModel ? modelKey(message.defaultModel) : '')
+              modelSelect.value = models.some(model => modelKey(model) === preferred) ? preferred : ''
+            }
             ready = true
-            status.textContent = 'Ready'
+            status.textContent = models.length ? 'Ready' : 'No compatible models'
+            modelNote.textContent = models.length ? 'Connected models with tools and image support. Applies to your next message.' : 'Connect a provider with a tool-and-vision model in OpenCode, then reconnect here.'
             if (activity.childElementCount) addActivity('status', 'Connected to a new conversation. Earlier activity is shown for reference only; it was not sent again.')
-            report('')
+            report(message.modelsError ?? (models.length && modelChoice && !modelSelect.value ? 'Your previous model is unavailable. Choose another model before sending.' : ''))
             render()
             return
           case 'error':
             if (typeof message.message !== 'string') { malformed(); return }
-            disconnected(ready ? `Assistant error: ${message.message}. Reconnect to start a new conversation.` : `Connection was not authorized: ${message.message}. Check the connection key printed by bun run dev:assistant.`, !ready)
+            disconnected(`Assistant error: ${message.message}. Check that bun run dev:assistant is running, then reconnect.`)
             return
           case 'reset':
             if (!ready || resettingAt === undefined || run) return
@@ -427,8 +420,7 @@ export function mountAssistant(host: AssistantHost): () => void {
       }, socketEvents)
       current.addEventListener('close', event => {
         if (socket !== current) return
-        const rejected = [1008, 4401, 4403].includes(event.code)
-        disconnected(rejected ? 'Connection key rejected. Enter the key printed by bun run dev:assistant.' : 'Connection closed. Local work stopped; completed edits remain. Reconnect starts a new conversation without replaying commands.', rejected)
+        disconnected(event.code === 4409 ? 'Another canvas is connected. Disable its assistant, then reconnect here.' : 'Connection closed. Local work stopped; completed edits remain. Check that bun run dev:assistant is running, then reconnect to start a new conversation without replaying commands.')
       }, socketEvents)
       current.addEventListener('error', () => {
         if (socket === current) disconnected('Assistant connection failed. Check that bun run dev:assistant is running, then reconnect. Completed edits remain.')
@@ -436,7 +428,7 @@ export function mountAssistant(host: AssistantHost): () => void {
       heartbeat = window.setInterval(() => {
         const now = Date.now()
         if (now - lastMessage >= 45_000) disconnected('Assistant connection timed out. Local work stopped; completed edits remain. Reconnect to start a new conversation.')
-        else if (!ready && now - connectedAt >= 20_000) disconnected('Assistant authentication timed out. Check the service and reconnect.')
+        else if (!ready && now - connectedAt >= 20_000) disconnected('Assistant connection timed out. Check the service and reconnect.')
         else if (resettingAt !== undefined && now - resettingAt >= 15_000) disconnected('Starting a new conversation timed out. Reconnect before sending another message.')
         else if (run && (run.stoppedAt !== undefined ? now - run.stoppedAt >= 15_000 : now - run.lastActivity >= (run.id ? 120_000 : 30_000))) disconnected('The assistant did not respond in time. Local work stopped; completed edits remain. Reconnect to start a new conversation.')
         else if (current.readyState === current.OPEN) transmit({ type: 'ping' })
@@ -468,23 +460,29 @@ export function mountAssistant(host: AssistantHost): () => void {
     approve.addEventListener('click', () => settleApproval?.(true), events)
     cancel.addEventListener('click', () => settleApproval?.(false), events)
     prompt.addEventListener('input', render, events)
-    connection.addEventListener('submit', event => {
-      event.preventDefault()
-      const value = key.value.trim()
-      if (!value || value.length > 4096) { report('Enter the connection key printed by bun run dev:assistant.'); return }
-      rememberToken(value)
-      key.value = ''
+    modelSelect.addEventListener('change', () => {
+      modelChoice = modelSelect.value
+      try {
+        if (modelChoice) localStorage.setItem(modelStorageKey, modelChoice)
+        else localStorage.removeItem(modelStorageKey)
+      } catch { /* The selection still works without local storage. */ }
+      report('')
+      render()
+    }, events)
+    reconnect.addEventListener('click', () => {
+      if (ready && !models.length) closeSocket()
       connect()
     }, events)
-    reconnect.addEventListener('click', connect, events)
     composer.addEventListener('submit', event => {
       event.preventDefault()
       const text = prompt.value.trim()
       if (!ready || run || resettingAt !== undefined || !text) return
+      const model = models.find(model => modelKey(model) === modelSelect.value)
+      if (!model) { report('Choose an available AI model before sending.'); return }
       if (prompt.value.length > 8000) { report('Keep each message to 8,000 characters or fewer.'); return }
       run = { controller: new AbortController(), lastActivity: Date.now(), seen: new Set(), queued: 0 }
       parts.clear()
-      if (!transmit({ type: 'prompt', text })) return
+      if (!transmit({ type: 'prompt', text, model: { providerID: model.providerID, modelID: model.modelID } })) return
       addActivity('user', text)
       prompt.value = ''
       report('')
@@ -513,13 +511,12 @@ export function mountAssistant(host: AssistantHost): () => void {
       panelLifetime.abort()
       root.remove()
       parts.clear()
-      key.value = ''
       prompt.value = ''
       toggle.setAttribute('aria-checked', 'false')
       disable = undefined
     }
     render()
-    if (token) connect()
+    connect()
   }
 
   toggle.addEventListener('click', () => {
@@ -528,12 +525,10 @@ export function mountAssistant(host: AssistantHost): () => void {
     host.menu.closest('details')?.removeAttribute('open')
   }, { signal: lifetime.signal })
   toggle.addEventListener('keydown', event => event.stopPropagation(), { signal: lifetime.signal })
-  if (suppliedToken && token) enable()
   return () => {
     lifetime.abort()
     disable?.()
     toggle.remove()
     style.remove()
-    token = ''
   }
 }

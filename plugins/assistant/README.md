@@ -14,25 +14,41 @@ bun run dev:assistant
 ```
 
 The launcher starts an authenticated loopback OpenCode instance, a loopback
-canvas bridge, and Vite. It inherits your configured OpenCode model and provider
-authentication. It checks that the canvas tool is registered before starting Vite.
+canvas bridge, and Vite. It uses your OpenCode provider authentication and prefers
+your configured model when compatible. It checks that the canvas tool is registered before starting Vite.
 Use `bun run dev:assistant --port 5180` if another dev server owns the default port.
 
-Open the project menu, choose **Enable assistant**, and enter the **connection
-key** printed in the terminal. This is a temporary canvas capability, not your
-model API key. It stays in tab session storage, never local storage or the build.
-An optional `#assistant=<connection-key>` launch fragment also works and is
-removed from the address bar immediately. Treat either form as a secret.
+Open the project menu and choose **Enable assistant** to connect automatically.
+No frontend token is needed. **Reconnect** retries the connection without a token.
 
 The UI supports prompts, follow-ups, streamed model text/reasoning supplied by
 OpenCode, tool progress, Stop, and New conversation. Close collapses the panel
 while work continues; Disable stops it and removes the panel. Re-enable through
 the project menu. A disconnected socket ends its run; reconnect creates a fresh
 conversation without replaying requests. Earlier transcript entries are local
-display only. One authenticated canvas can connect at a time.
+display only. One canvas can connect at a time.
 
-Prompts, state, tool results, and requested viewport captures go to the model
-provider configured in OpenCode. Model reasoning availability depends on that
+On connection, model discovery starts automatically with an 8-second timeout.
+Only connected providers' non-deprecated models with tool calling, image and text
+input, and text output are offered. The default is the compatible configured
+model, otherwise a compatible provider default, otherwise the first compatible
+model. Use **AI model** above the message field to change the model for your next
+message. The choice is remembered in this browser and locked while a request runs.
+Switching models preserves the conversation, so the selected provider receives
+its existing context. If a saved model is unavailable, choose another explicitly;
+the assistant does not silently switch providers.
+An empty catalog means no compatible models are available. A discovery error asks
+you to check OpenCode/provider login and reconnect to retry. Provider credentials,
+options, and raw configuration never go to the browser.
+
+The socket `ready` message includes `models` (only `providerID`, `modelID`,
+`providerName`, and `name`), optional `defaultModel` (`providerID`, `modelID`),
+and optional `modelsError`. Every `prompt` requires an explicit `model` pair
+from that connection's catalog. Unknown or malformed selections are rejected
+before creating a run or calling OpenCode; there is no inherited-model fallback.
+
+Prompts, state, tool results, and requested inspection images/viewport captures go to the model
+provider selected for the prompt. Model reasoning availability depends on that
 provider. The activity feed does not manufacture a thinking transcript.
 
 ## exe.dev
@@ -43,14 +59,32 @@ the OpenCode API and internal tool endpoint are not proxied. No browser-side
 localhost URL, provider credential, or extra public service port is needed.
 
 Use the existing exe.dev proxy with its target port set to this Vite instance.
-Keep private exe.dev access enabled. The bridge additionally checks the WebSocket
-Origin against Host (using exe.dev's forwarded public Host when present), requires
-the connection key before any model operation, and uses a separate server-only
-credential for tool callbacks. When checking
+Host access is the security boundary: anyone who can access the dev site can use
+your configured provider. Protect a remote host with access control, such as
+private exe.dev access; do not expose this dev site publicly. The bridge checks
+the WebSocket Origin against Host (using exe.dev's forwarded public Host when
+present), but this same-origin check is not user authentication. Internal tool
+callbacks still require a separate server-only bearer credential, and the child
+OpenCode instance still requires server-only basic authentication. When checking
 from inside the VM, its `/etc/hosts` entry may resolve its public hostname back
 to the VM rather than the external HTTPS proxy.
 
 ## Editing And Stop
+
+The assistant prefers `view.inspect` for visual understanding and final verification.
+Each image is a named PNG attachment (for example, `front.png`); text output retains
+revision, dimensions, direction, and optional pixel-axis metadata but excludes base64.
+Omitting `views` returns front/back/left/right/top/bottom plus `iso-front-right`.
+An explicit array can select 1 to 10 unique views, including the other three
+isometric corners. Inspection leaves the user's camera state untouched.
+
+Faces cover full document extents at one pixel per voxel, with transparent empty
+rays and the nearest solid visible voxel's palette color regardless of material
+opacity/transmission. Isometric images are 512 x 512 raster renders with scene
+lighting/materials. Neither includes editing overlays. See `SCRIPTING.md` for
+the exact orientation and pixel-axis mappings. Use targeted `composition.get`
+only for depth, interior, or layer questions; `view.capture` remains available
+for the current viewport and retains its existing attachment behavior.
 
 Every tool proposal is parsed on both sides and edits use the existing serial
 application queue with a project-mutation revision guard. Moving/framing the

@@ -60,7 +60,38 @@ UI changes still publish `state.changed` events with their own increasing `seque
 
 Use `state.get` for document, layer, palette, tool, selection, camera, mesh, and save summaries.
 
-Use `composition.get` for exact voxel data. Results are ordered by layer and then Z/Y/X, scan at most one million cells per response, and return `nextCursor` until complete.
+Prefer `view.inspect` for visual understanding and verification. It returns named PNGs without changing camera state, selection, settings, or the document revision. No framing is needed.
+
+```json
+{"protocol":"voxel-studio/1","id":"views","command":{"type":"view.inspect","views":["front","top","iso-front-right"]}}
+```
+
+The optional `views` array accepts 1 to 10 unique names: `front`, `back`, `left`, `right`, `top`, `bottom`, `iso-front-right`, `iso-front-left`, `iso-back-right`, `iso-back-left`. Images retain requested order. Omit `views` for the default seven: the six faces in that order plus `iso-front-right`. Empty arrays, duplicates, and unknown names are rejected.
+
+The result is `{ revision, images: [{ name, width, height, mime: "image/png", dataBase64, direction, pixelAxes? }] }`. Both the response revision and result revision identify the revision captured before inspection begins, not a later revision after PNG encoding. Inspection does not mutate the document (`changed: false` in the application/assistant result).
+
+### Face Images
+
+Faces are exact, unlit, one-pixel-per-voxel projections of the composited visible layers over the **full document extents**, not cropped occupied bounds. Each ray uses the nearest solid voxel's palette RGB with opaque alpha, regardless of material opacity or transmission. Empty rays are transparent. They show surface occupancy/colors, not depth, interiors, or physically rendered glass.
+
+With document dimensions `X,Y,Z`, pixel `u` increases right and `v` increases down from the image's top-left. Directions name the side viewed **from**, looking inward:
+
+| Name | Viewed From | Width x Height | Pixel Mapping |
+| --- | --- | --- | --- |
+| `front` | +Z (max z) | X x Y | `u=x, v=Y-1-y` |
+| `back` | -Z (min z) | X x Y | `u=X-1-x, v=Y-1-y` |
+| `left` | -X (min x) | Z x Y | `u=z, v=Y-1-y` |
+| `right` | +X (max x) | Z x Y | `u=Z-1-z, v=Y-1-y` |
+| `top` | +Y (max y) | X x Z | `u=x, v=z` |
+| `bottom` | -Y (min y) | X x Z | `u=x, v=Z-1-z` |
+
+### Isometric Images
+
+Isometric images are 512 x 512 orthographic raster renders with scene lighting and materials, not exact voxel-color maps or progressive path-traced renders. All look down from +Y: front-right uses +X/+Z, front-left -X/+Z, back-right +X/-Z, back-left -X/-Z. Inspection images exclude editing overlays and leave the interactive camera untouched. Face images include `pixelAxes`; isometric images use `direction` without a per-pixel voxel mapping.
+
+Each isometric image fits the entire visible model independently of selection, with a small margin and the configured background. The ground plane is excluded. Offscreen rendering leaves the live viewport and progressive samples untouched.
+
+Use targeted `composition.get` bounds/layers for exact depth, interior, or layer questions that these images cannot answer, rather than dumping the whole model for visual understanding. Results are ordered by layer and then Z/Y/X, scan at most one million cells per response, and return `nextCursor` until complete.
 
 ```json
 {
@@ -104,7 +135,8 @@ settings.update              renderMode.set
 state.get                    composition.get
 project.snapshot.get         project.snapshot.replace
 view.get                     view.set                     view.frame
-view.capture                 io.vox.import                io.vox.export
+view.capture                 view.inspect
+io.vox.import                io.vox.export
 save.flush
 ```
 

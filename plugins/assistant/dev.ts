@@ -4,7 +4,6 @@ import { generateCapabilityToken } from '../../scripts/relay'
 import { createAssistantService } from './server'
 
 const password = generateCapabilityToken()
-const token = generateCapabilityToken()
 const internalKey = generateCapabilityToken()
 process.env.OPENCODE_SERVER_PASSWORD = password
 process.env.OPENCODE_SERVER_USERNAME = 'opencode'
@@ -20,7 +19,7 @@ const forward: typeof fetch = Object.assign(async (request: RequestInfo | URL, i
   return fetch(new Request(`${baseURL}${target.pathname}${target.search}`, input))
 }, { preconnect: fetch.preconnect })
 const client = createOpencodeClient({ baseUrl: 'http://127.0.0.1:1', directory: process.cwd(), headers: { authorization: `Basic ${btoa(`opencode:${password}`)}` }, fetch: forward })
-const bridge = createAssistantService(client, token, internalKey)
+const bridge = createAssistantService(client, internalKey)
 process.env.VOXEL_ASSISTANT_INTERNAL_URL = `http://127.0.0.1:${bridge.server.port}`
 let vite: ReturnType<typeof Bun.spawn> | undefined
 const startup = new AbortController()
@@ -51,8 +50,7 @@ try {
   const tools = await client.tool.ids({}, { throwOnError: true, signal: AbortSignal.any([startup.signal, AbortSignal.timeout(15_000)]) })
   startup.signal.throwIfAborted()
   if (!tools.data.includes('canvas')) throw new Error('The Canvas Assistant OpenCode plugin did not load. Check the OpenCode logs.')
-  console.log(`Assistant connection key: ${token}`)
-  console.log('Open the app project menu, enable Assistant, and enter this key. It is not a model API key.')
+  console.log('Open the app project menu and choose Enable assistant to connect.')
   const { OPENCODE_SERVER_PASSWORD: _password, OPENCODE_SERVER_USERNAME: _username, VOXEL_ASSISTANT_INTERNAL_KEY: _key, VOXEL_ASSISTANT_INTERNAL_URL: _url, ...viteEnv } = process.env
   vite = Bun.spawn(['bun', 'run', 'dev', '--host', '0.0.0.0', '--strictPort', ...Bun.argv.slice(2)], {
     env: { ...viteEnv, VOXEL_ASSISTANT_PORT: String(bridge.server.port) }, stdin: 'inherit', stdout: 'inherit', stderr: 'inherit',

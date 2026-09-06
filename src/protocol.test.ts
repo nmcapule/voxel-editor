@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { VoxelDocument } from './editor'
+import { inspectionViews } from './inspection'
 import { PROTOCOL, SerialCommandQueue, decodeProjectSnapshot, encodeProjectSnapshot, parseRequest } from './protocol'
 import type { ViewSettings } from './storage'
 
@@ -10,6 +11,17 @@ const settings: ViewSettings = {
 }
 
 describe('scripting protocol', () => {
+  test('validates inspection views while leaving omitted defaults to the renderer', () => {
+    const parse = (command: unknown) => parseRequest({ protocol: PROTOCOL, id: 'inspect', command }).command
+    expect(parse({ type: 'view.inspect' })).toEqual({ type: 'view.inspect', views: undefined })
+    expect(parse({ type: 'view.inspect', views: inspectionViews })).toEqual({ type: 'view.inspect', views: inspectionViews })
+    expect(parse({ type: 'view.inspect', views: ['top', 'front'] })).toEqual({ type: 'view.inspect', views: ['top', 'front'] })
+    for (const views of [[], null, 'front', {}, [1], ['FRONT'], ['unknown'], ['front', 'front'], [...inspectionViews, 'front']]) {
+      expect(() => parse({ type: 'view.inspect', views })).toThrow('command.views')
+    }
+    expect(parse({ type: 'view.capture' })).toEqual({ type: 'view.capture' })
+  })
+
   test('serializes commands and recovers after a rejected command', async () => {
     const order: string[] = []
     let release = () => {}

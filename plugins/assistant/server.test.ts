@@ -1,9 +1,25 @@
 import { expect, test } from 'bun:test'
 import { createOpencodeClient } from '@opencode-ai/sdk/v2/client'
 import { createAssistantService, sameOrigin } from './server'
-import { needsApproval, parseCanvasCommand, type ServerMessage } from './shared'
+import { isInspection, needsApproval, parseCanvasCommand, type ServerMessage } from './shared'
 
 const Socket = WebSocket as unknown as new (url: string, options: Bun.WebSocketOptions) => WebSocket
+const selection = { providerID: 'connected', modelID: 'vision' }
+const model = (id: string) => ({ id, name: id, status: 'active', capabilities: { toolcall: true, input: { image: true, text: true }, output: { text: true } }, options: { apiKey: 'model-secret' }, headers: { authorization: 'header-secret' } })
+const catalog = () => ({
+  all: [{ id: 'connected', name: 'Connected Provider', key: 'provider-secret', options: { apiKey: 'option-secret' }, models: { vision: model('vision'), other: model('other') } }],
+  connected: ['connected'], default: { connected: 'other' },
+})
+
+test('canvas policy allows inspection without approval and validates view choices', () => {
+  for (const input of [{ type: 'view.inspect' }, { type: 'view.inspect', views: ['front', 'iso-back-left'] }, { type: 'view.capture' }]) {
+    const command = parseCanvasCommand(input)
+    expect(isInspection(command)).toBe(true)
+    expect(needsApproval(command)).toBe(false)
+  }
+  expect(() => parseCanvasCommand({ type: 'view.inspect', views: ['front', 'front'] })).toThrow('unique')
+  expect(() => parseCanvasCommand({ type: 'view.inspect', views: ['invalid'] })).toThrow('command.views')
+})
 
 test('canvas policy bounds edits, requires explicit scope, and strips model approval', () => {
   expect(() => parseCanvasCommand({ type: 'history.undo' })).toThrow('not available')
@@ -20,7 +36,7 @@ test('canvas policy bounds edits, requires explicit scope, and strips model appr
   expect(sameOrigin(new Request('http://127.0.0.1:4000/__assistant/socket', { headers: { host: '127.0.0.1:5180', 'x-forwarded-host': 'pandayan.exe.xyz', origin: 'https://attacker.test' } }))).toBe(false)
 })
 
-test('authenticated bridge streams edits, guards revisions, isolates calls, and stops without replay', async () => {
+test('same-origin bridge streams edits, guards revisions, isolates calls, and stops without replay', async () => {
   let emit = (_event: unknown) => {}
   let sessionCount = 0
   let promptCount = 0
@@ -30,6 +46,8 @@ test('authenticated bridge streams edits, guards revisions, isolates calls, and 
   let upstreamMessageID = ''
   const upstream = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: async request => {
     const path = new URL(request.url).pathname
+    if (path === '/provider') return Response.json(catalog())
+    if (path === '/config') return Response.json({})
     if (path === '/event') return new Response(new ReadableStream({ start(controller) {
       emit = event => controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`))
       emit({ type: 'server.connected', properties: {} })
@@ -51,7 +69,7 @@ test('authenticated bridge streams edits, guards revisions, isolates calls, and 
     }
     return new Response('Not found', { status: 404 })
   } })
-  const bridge = createAssistantService(createOpencodeClient({ baseUrl: `http://127.0.0.1:${upstream.port}` }), 'browser-test-key', 'internal-test-key')
+  const bridge = createAssistantService(createOpencodeClient({ baseUrl: `http://127.0.0.1:${upstream.port}` }), 'internal-test-key')
   const origin = `http://127.0.0.1:${bridge.server.port}`
   const url = `ws://127.0.0.1:${bridge.server.port}/__assistant/socket`
   const inbox: ServerMessage[] = []
@@ -68,18 +86,14 @@ test('authenticated bridge streams edits, guards revisions, isolates calls, and 
   try {
     await bridge.ready
     expect((await fetch(`${origin}/tool`, { method: 'POST' })).status).toBe(401)
+    expect((await fetch(`${origin}/tool`, { method: 'POST', headers: { authorization: 'Bearer wrong-key' } })).status).toBe(401)
     expect((await fetch(`${origin}/__assistant/socket`, { headers: { origin: 'https://attacker.test' } })).status).toBe(403)
-    const rejected = new Socket(url, { headers: { origin } })
-    const rejectedCode = new Promise<number>(resolve => { rejected.onclose = event => resolve(event.code) })
-    rejected.onopen = () => rejected.send(JSON.stringify({ type: 'auth', token: 'wrong' }))
-    expect(await rejectedCode).toBe(4401)
     expect(sessionCount).toBe(0)
 
     socket = new Socket(url, { headers: { origin } })
     socket.onmessage = event => inbox.push(JSON.parse(String(event.data)))
-    await new Promise<void>(resolve => { socket!.onopen = () => { socket!.send(JSON.stringify({ type: 'auth', token: 'browser-test-key' })); resolve() } })
     await next('ready')
-    socket.send(JSON.stringify({ type: 'prompt', text: 'Build a tower' }))
+    socket.send(JSON.stringify({ type: 'prompt', text: 'Build a tower', model: selection }))
     const run = await next('run') as Extract<ServerMessage, { type: 'run' }>
     const initial = await next('command') as Extract<ServerMessage, { type: 'command' }>
     expect(initial.command.type).toBe('state.get')
@@ -88,6 +102,28 @@ test('authenticated bridge streams edits, guards revisions, isolates calls, and 
     expect(upstreamMessageID).toStartWith('msg_')
     expect(await next('part')).toMatchObject({ text: 'Building' })
     expect(await next('part')).toMatchObject({ text: 'Building a tower' })
+
+    const rejected = new Socket(url, { headers: { origin } })
+    const rejectedMessages: unknown[] = []
+    const rejectedCode = new Promise<number>(resolve => { rejected.onclose = event => resolve(event.code) })
+    rejected.onmessage = event => rejectedMessages.push(event.data)
+    rejected.onopen = () => {
+      rejected.send(JSON.stringify({ type: 'prompt', text: 'Intrude', model: selection }))
+      rejected.send(JSON.stringify({ type: 'stop', runID: run.runID }))
+    }
+    expect(await rejectedCode).toBe(4409)
+    expect(rejectedMessages).toEqual([])
+    expect(sessionCount).toBe(1)
+    expect(promptCount).toBe(1)
+    expect(aborted).toBe(false)
+
+    const inspect = tool('ses_1', { type: 'view.inspect', views: ['front', 'iso-front-right'] })
+    const inspectCommand = await next('command') as Extract<ServerMessage, { type: 'command' }>
+    expect(inspectCommand.command).toEqual({ type: 'view.inspect', views: ['front', 'iso-front-right'] })
+    expect(inspectCommand.ifRevision).toBe(7)
+    const inspection = { ok: true, changed: false, revision: 7, result: { revision: 7, images: [{ name: 'front', width: 16, height: 16, mime: 'image/png', dataBase64: 'cG5n', direction: '+Z (max z)', pixelAxes: 'u=x, v=Y-1-y' }] } }
+    socket.send(JSON.stringify({ type: 'result', runID: run.runID, id: inspectCommand.id, response: inspection }))
+    expect(await (await inspect).json()).toEqual(inspection)
 
     const edit = tool('ses_1', { type: 'edit.setVoxels', layerId: 1, voxels: [{ x: 1, y: 1, z: 1, color: 5 }] })
     const command = await next('command') as Extract<ServerMessage, { type: 'command' }>
@@ -124,3 +160,209 @@ test('authenticated bridge streams edits, guards revisions, isolates calls, and 
     upstream.stop(true)
   }
 }, 15_000)
+
+test('rapid upgrades admit only one canvas; unavailable service closes without discovery', async () => {
+  for (const available of [true, false]) {
+    const requests: string[] = []
+    const upstream = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request) {
+      const path = new URL(request.url).pathname
+      requests.push(path)
+      if (path === '/event') return new Response(new ReadableStream({ start(controller) {
+        if (available) controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","properties":{}}\n\n'))
+      } }), { headers: { 'content-type': 'text/event-stream' } })
+      if (path === '/provider') return Response.json(catalog())
+      if (path === '/config') return Response.json({})
+      return new Response('Not found', { status: 404 })
+    } })
+    const bridge = createAssistantService(createOpencodeClient({ baseUrl: `http://127.0.0.1:${upstream.port}` }), 'internal-key')
+    const origin = `http://127.0.0.1:${bridge.server.port}`
+    const sockets: WebSocket[] = []
+    try {
+      if (available) await bridge.ready
+      const outcomes = await Promise.all(Array.from({ length: available ? 6 : 1 }, () => {
+        const socket = new Socket(origin.replace('http:', 'ws:') + '/__assistant/socket', { headers: { origin } })
+        sockets.push(socket)
+        return new Promise<{ socket: WebSocket; code?: number; reason?: string }>(resolve => {
+          socket.onmessage = event => {
+            if (JSON.parse(String(event.data)).type === 'ready') resolve({ socket })
+          }
+          socket.onclose = event => resolve({ socket, code: event.code, reason: event.reason })
+        })
+      }))
+      if (available) {
+        expect(outcomes.filter(outcome => outcome.code === undefined)).toHaveLength(1)
+        expect(outcomes.filter(outcome => outcome.code === 4409)).toHaveLength(5)
+        expect(requests.filter(path => path === '/provider')).toHaveLength(1)
+        expect(requests.filter(path => path === '/config')).toHaveLength(1)
+        const winner = outcomes.find(outcome => outcome.code === undefined)!.socket
+        const pong = new Promise<string>(resolve => { winner.onmessage = event => resolve(JSON.parse(String(event.data)).type) })
+        winner.send(JSON.stringify({ type: 'ping' }))
+        expect(await pong).toBe('pong')
+      } else {
+        expect(outcomes[0]).toMatchObject({ code: 1011, reason: 'OpenCode is not available' })
+        expect(requests.filter(path => path !== '/event')).toEqual([])
+      }
+    } finally {
+      for (const socket of sockets) socket.close()
+      await bridge.close()
+      upstream.stop(true)
+    }
+  }
+})
+
+async function modelBridge(providerResponse = async () => Response.json(catalog()), configResponse = async () => Response.json({ model: 'connected/vision', secret: 'config-secret' })) {
+  const requests: string[] = []
+  const prompts: { path: string; body: { model: unknown } }[] = []
+  const upstream = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: async request => {
+    const path = new URL(request.url).pathname
+    requests.push(`${request.method} ${path}`)
+    if (path === '/event') return new Response(new ReadableStream({ start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","properties":{}}\n\n'))
+    } }), { headers: { 'content-type': 'text/event-stream' } })
+    if (path === '/provider') return providerResponse()
+    if (path === '/config') return configResponse()
+    if (path === '/session' && request.method === 'POST') return Response.json({ id: 'ses_shared' })
+    if (path.endsWith('/message')) {
+      prompts.push({ path, body: await request.json() as { model: unknown } })
+      return Response.json({ info: { id: `reply_${prompts.length}` }, parts: [] })
+    }
+    if (request.method === 'DELETE' || path.endsWith('/abort')) return Response.json(true)
+    return new Response('Not found', { status: 404 })
+  } })
+  const bridge = createAssistantService(createOpencodeClient({ baseUrl: `http://127.0.0.1:${upstream.port}` }), 'internal-key')
+  await bridge.ready
+  const origin = `http://127.0.0.1:${bridge.server.port}`
+  const socket = new Socket(origin.replace('http:', 'ws:') + '/__assistant/socket', { headers: { origin } })
+  const inbox: ServerMessage[] = []
+  socket.onmessage = event => inbox.push(JSON.parse(String(event.data)))
+  await new Promise<void>(resolve => { socket.onopen = () => resolve() })
+  return {
+    socket, requests, prompts, inbox,
+    send(message: unknown) { socket.send(JSON.stringify(message)) },
+    async next<T extends ServerMessage['type']>(type: T, timeout = 3000) {
+      const deadline = Date.now() + timeout
+      while (Date.now() < deadline) {
+        const index = inbox.findIndex(message => message.type === type)
+        if (index !== -1) return inbox.splice(index, 1)[0] as Extract<ServerMessage, { type: T }>
+        await Bun.sleep(10)
+      }
+      throw new Error(`Timed out waiting for ${type}`)
+    },
+    async close() { socket.close(); await bridge.close(); upstream.stop(true) },
+  }
+}
+
+test('connection sends ready without a client frame, filters incompatible models, and excludes secrets', async () => {
+  const data = catalog()
+  const models: Record<string, ReturnType<typeof model>> = data.all[0]!.models
+  models.deprecated = { ...model('deprecated'), status: 'deprecated' }
+  for (const capability of ['toolcall', 'image', 'inputText', 'outputText']) {
+    const excluded = model(capability)
+    if (capability === 'toolcall') excluded.capabilities.toolcall = false
+    if (capability === 'image') excluded.capabilities.input.image = false
+    if (capability === 'inputText') excluded.capabilities.input.text = false
+    if (capability === 'outputText') excluded.capabilities.output.text = false
+    models[capability] = excluded
+  }
+  data.all.push({ ...data.all[0]!, id: 'disconnected' })
+  const fixture = await modelBridge(async () => Response.json(data))
+  try {
+    expect(await fixture.next('ready')).toEqual({ type: 'ready', models: [
+      { ...selection, providerName: 'Connected Provider', name: 'vision' },
+      { providerID: 'connected', modelID: 'other', providerName: 'Connected Provider', name: 'other' },
+    ], defaultModel: selection })
+    fixture.send({ type: 'ping' })
+    await fixture.next('pong')
+    expect(fixture.requests.filter(path => path === 'GET /provider')).toHaveLength(1)
+    expect(fixture.inbox).toEqual([])
+  } finally { await fixture.close() }
+})
+
+test('incompatible configured default falls back to provider default, then first; empty catalog is valid', async () => {
+  for (const mode of ['provider', 'first', 'empty']) {
+    const data = catalog()
+    if (mode === 'first') data.default.connected = 'missing'
+    if (mode === 'empty') data.connected = []
+    const fixture = await modelBridge(async () => Response.json(data), async () => Response.json({ model: 'disconnected/vision' }))
+    try {
+      const ready = await fixture.next('ready')
+      expect(ready.modelsError).toBeUndefined()
+      expect(ready.defaultModel).toEqual(mode === 'empty' ? undefined : { providerID: 'connected', modelID: mode === 'provider' ? 'other' : 'vision' })
+      if (mode === 'empty') expect(ready.models).toEqual([])
+    } finally { await fixture.close() }
+  }
+})
+
+test('explicit model selection is forwarded for sequential runs without replacing the session', async () => {
+  const fixture = await modelBridge()
+  try {
+    await fixture.next('ready')
+    for (const modelID of ['vision', 'other']) {
+      fixture.send({ type: 'prompt', text: 'Build', model: { providerID: 'connected', modelID, options: { secret: 'must-not-forward' } } })
+      const run = await fixture.next('run')
+      const command = await fixture.next('command')
+      fixture.send({ type: 'result', runID: run.runID, id: command.id, response: { ok: true, revision: 0, result: {} } })
+      expect(await fixture.next('done')).toMatchObject({ stopped: false })
+    }
+    expect(fixture.requests.filter(path => path === 'POST /session')).toHaveLength(1)
+    expect(fixture.prompts.map(prompt => ({ path: prompt.path, model: prompt.body.model }))).toEqual([
+      { path: '/session/ses_shared/message', model: selection },
+      { path: '/session/ses_shared/message', model: { providerID: 'connected', modelID: 'other' } },
+    ])
+  } finally { await fixture.close() }
+})
+
+test('unknown and malformed models are rejected before any run or upstream request', async () => {
+  for (const requested of [undefined, null, [], 'vision', {}, { providerID: 1, modelID: 'vision' }, { providerID: 'connected', modelID: 1 }, { providerID: 'connected', modelID: 'unknown' }, { providerID: 'disconnected', modelID: 'vision' }]) {
+    const fixture = await modelBridge()
+    try {
+      await fixture.next('ready')
+      const before = [...fixture.requests]
+      fixture.send({ type: 'prompt', text: 'Build', model: requested })
+      expect((await fixture.next('error')).message).toContain('compatible model')
+      expect(fixture.requests).toEqual(before)
+      expect(fixture.inbox.some(message => message.type === 'run')).toBe(false)
+    } finally { await fixture.close() }
+  }
+})
+
+test('provider/config discovery failures send sanitized empty readiness', async () => {
+  for (const endpoint of ['provider', 'config']) {
+    const failed = async () => new Response('upstream-secret', { status: 500 })
+    const fixture = await modelBridge(endpoint === 'provider' ? failed : undefined, endpoint === 'config' ? failed : undefined)
+    try {
+      const ready = await fixture.next('ready')
+      expect(ready.models).toEqual([])
+      expect(ready.defaultModel).toBeUndefined()
+      expect(ready.modelsError).toContain('reconnect to retry')
+      expect(JSON.stringify(ready)).not.toContain('secret')
+    } finally { await fixture.close() }
+  }
+})
+
+test('discovery times out within ten seconds and stays ready without models', async () => {
+  const pending = Promise.withResolvers<Response>()
+  const fixture = await modelBridge(() => pending.promise)
+  try {
+    const started = Date.now()
+    const ready = await fixture.next('ready', 9500)
+    expect(Date.now() - started).toBeLessThan(10_000)
+    expect(ready.models).toEqual([])
+    expect(ready.modelsError).toContain('reconnect to retry')
+  } finally { pending.resolve(Response.json(catalog())); await fixture.close() }
+}, 12_000)
+
+test('closing during discovery never sends readiness', async () => {
+  const pending = Promise.withResolvers<Response>()
+  const requested = Promise.withResolvers<void>()
+  const fixture = await modelBridge(() => { requested.resolve(); return pending.promise })
+  try {
+    await requested.promise
+    const closed = new Promise<void>(resolve => { fixture.socket.onclose = () => resolve() })
+    fixture.socket.close()
+    await closed
+    pending.resolve(Response.json(catalog()))
+    await Bun.sleep(30)
+    expect(fixture.inbox).toEqual([])
+  } finally { pending.resolve(Response.json(catalog())); await fixture.close() }
+})

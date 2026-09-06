@@ -14,13 +14,14 @@
 }
 
 .voxel-assistant [hidden] { display: none !important; }
-.voxel-assistant button, .voxel-assistant input, .voxel-assistant textarea { font: inherit; }
-.voxel-assistant button, .voxel-assistant input, .voxel-assistant summary { min-height: 44px; }
+.voxel-assistant button, .voxel-assistant input, .voxel-assistant textarea, .voxel-assistant select { font: inherit; }
+.voxel-assistant button, .voxel-assistant input, .voxel-assistant summary, .voxel-assistant select { min-height: 44px; }
 .voxel-assistant button { padding: 9px 12px; border: 1px solid var(--line); border-radius: 11px; color: var(--ink); background: var(--paper); font-weight: 650; }
 .voxel-assistant button:not(:disabled):hover { background: var(--field); }
 .voxel-assistant button:disabled { opacity: 0.45; cursor: default; }
-.voxel-assistant :is(button, input, textarea, summary, [tabindex]):focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
-.voxel-assistant input, .voxel-assistant textarea { min-width: 0; width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 11px; color: var(--ink); background: var(--paper); caret-color: var(--cobalt); font-weight: 400; }
+.voxel-assistant :is(button, input, textarea, select, summary, [tabindex]):focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+.voxel-assistant input, .voxel-assistant textarea, .voxel-assistant select { min-width: 0; width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 11px; color: var(--ink); background: var(--paper); caret-color: var(--cobalt); font-weight: 400; }
+.voxel-assistant select:disabled { opacity: 0.65; }
 .voxel-assistant input { font-size: 1rem; }
 .voxel-assistant textarea { min-height: 88px; max-height: 160px; resize: vertical; }
 .voxel-assistant textarea::placeholder { color: var(--muted); opacity: 1; }
@@ -47,7 +48,6 @@
 .voxel-assistant .assistant-label { display: grid; gap: 6px; font-size: 0.75rem; font-weight: 650; }
 .voxel-assistant .assistant-note, .voxel-assistant .assistant-empty { color: var(--muted); font-size: 0.78rem; line-height: 1.55; overflow-wrap: anywhere; }
 .voxel-assistant .assistant-empty { margin-bottom: 18px; }
-.voxel-assistant .assistant-connection { display: grid; gap: 12px; margin-bottom: 18px; }
 .voxel-assistant .assistant-notice { margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid var(--line); font-weight: 600; overflow-wrap: anywhere; }
 .voxel-assistant .assistant-reconnect { width: 100%; margin-bottom: 18px; }
 .voxel-assistant .assistant-approval { display: grid; gap: 10px; margin-bottom: 18px; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
@@ -66,6 +66,7 @@
 .voxel-assistant .assistant-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .voxel-assistant .assistant-count { margin-right: auto; color: var(--muted); font-size: 0.69rem; font-variant-numeric: tabular-nums; }
 .voxel-assistant .assistant-footer { flex-shrink: 0; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px; margin-inline: 16px; padding-block: 8px 12px; border-top: 1px solid var(--line); }
+.voxel-assistant .assistant-footer .assistant-actions { flex-basis: 100%; padding-bottom: 4px; }
 
 @media (max-width: 840px) {
   .voxel-assistant { top: auto; bottom: calc(82px + env(safe-area-inset-bottom)); left: max(10px, env(safe-area-inset-left)); width: calc(100vw - max(10px, env(safe-area-inset-left)) - max(10px, env(safe-area-inset-right))); }
@@ -74,4 +75,5 @@
   .voxel-assistant .assistant-body { padding: 12px 16px; }
   .voxel-assistant .assistant-activity { max-height: min(160px, 20dvh); }
   .voxel-assistant textarea { min-height: 72px; height: 72px; font-size: 1rem; }
+  .voxel-assistant select { font-size: 1rem; }
 }

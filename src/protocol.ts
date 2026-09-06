@@ -1,5 +1,6 @@
 import { CHUNK_SIZE, CHUNK_VOLUME, VoxelDocument, chunkCoords, type Dimensions, type PaletteMaterial, type Vec3, type VoxelLayer } from './editor'
 import type { CameraSnapshot } from './renderer'
+import { inspectionViews, type InspectionView } from './inspection'
 import { StudioCommandError, type MaterialPatch, type PbrMap, type StudioCommand } from './studio'
 import type { ViewSettings } from './storage'
 
@@ -16,6 +17,7 @@ export type RemoteCommand = StudioCommand
   | { type: 'view.set'; view: Pick<CameraSnapshot, 'position' | 'target'> & Partial<Pick<CameraSnapshot, 'up' | 'zoom' | 'fov' | 'orthographicSpan'>> }
   | { type: 'view.frame' }
   | { type: 'view.capture' }
+  | { type: 'view.inspect'; views?: readonly InspectionView[] }
   | { type: 'io.vox.import'; dataBase64: string; name?: string; allowReplace?: boolean }
   | { type: 'io.vox.export' }
   | { type: 'material.map.set'; index: number; map: PbrMap; name: string; mime: string; dataBase64: string }
@@ -232,6 +234,15 @@ export function parseCommand(value: unknown): RemoteCommand {
       return { type, visibility: optional(input.visibility, value => oneOf(value, 'command.visibility', ['composited', 'all', 'layer'] as const)), layerId: optionalLayer(input), bounds, cursor: optional(input.cursor, value => integer(value, 'command.cursor', 0)), limit: optional(input.limit, value => integer(value, 'command.limit', 1, 65_536)) }
     }
     case 'project.snapshot.replace': return { type, snapshot: parseProjectSnapshot(input.snapshot), allowReplace: optional(input.allowReplace, value => booleanValue(value, 'command.allowReplace')) }
+    case 'view.inspect': {
+      const views = optional(input.views, value => {
+        if (!Array.isArray(value) || !value.length || value.length > 10) throw invalid('command.views must contain 1 to 10 views.')
+        const parsed = value.map((view, index) => oneOf(view, `command.views[${index}]`, inspectionViews))
+        if (new Set(parsed).size !== parsed.length) throw invalid('command.views must contain unique views.')
+        return parsed
+      })
+      return { type, views }
+    }
     case 'view.set': {
       const view = record(input.view, 'command.view')
       const optionalVector = optional(view.up, value => {

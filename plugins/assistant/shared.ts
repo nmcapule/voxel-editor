@@ -3,6 +3,7 @@ import { StudioCommandError } from '../../src/studio'
 
 export type CommandResult = { revision: number; changed?: boolean; result: unknown }
 export type ToolResponse = { ok: true } & CommandResult | { ok: false; error: { code: string; message: string } }
+export type AssistantModel = { providerID: string; modelID: string; providerName: string; name: string }
 export type AssistantHost = {
   root: HTMLElement
   menu: HTMLElement
@@ -11,15 +12,14 @@ export type AssistantHost = {
 }
 
 export type ClientMessage =
-  | { type: 'auth'; token: string }
-  | { type: 'prompt'; text: string }
+  | { type: 'prompt'; text: string; model: { providerID: string; modelID: string } }
   | { type: 'stop'; runID: string }
   | { type: 'new' }
   | { type: 'result'; runID: string; id: string; response: ToolResponse }
   | { type: 'ping' }
 
 export type ServerMessage =
-  | { type: 'ready' }
+  | { type: 'ready'; models: AssistantModel[]; defaultModel?: { providerID: string; modelID: string }; modelsError?: string }
   | { type: 'run'; runID: string }
   | { type: 'part'; runID: string; id: string; kind: 'text' | 'reasoning' | 'tool'; text: string }
   | { type: 'command'; runID: string; id: string; command: RemoteCommand; ifRevision?: number }
@@ -29,7 +29,7 @@ export type ServerMessage =
   | { type: 'pong' }
 
 const allowed = new Set([
-  'state.get', 'composition.get', 'view.get', 'view.capture', 'view.set', 'view.frame',
+  'state.get', 'composition.get', 'view.get', 'view.capture', 'view.inspect', 'view.set', 'view.frame',
   'edit.setVoxels', 'edit.paint', 'edit.erase', 'edit.fill', 'edit.move', 'edit.pushPull',
   'document.new', 'document.rename', 'document.resize',
   'layer.create', 'layer.rename', 'layer.visibility', 'layer.lock', 'layer.delete',
@@ -62,5 +62,5 @@ export function needsApproval(command: RemoteCommand) {
 }
 
 export function isInspection(command: RemoteCommand) {
-  return ['state.get', 'composition.get', 'view.get', 'view.capture'].includes(command.type)
+  return ['state.get', 'composition.get', 'view.get', 'view.capture', 'view.inspect'].includes(command.type)
 }

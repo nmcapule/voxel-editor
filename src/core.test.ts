@@ -242,7 +242,7 @@ describe('surface meshing and picking', () => {
     expect(traceGridRay(document, { x: 1.5, y: -10, z: 2.5 }, { x: 0, y: 1, z: 0 })).toBeUndefined()
   })
 
-  test('keeps an opaque interface visible behind a transparent voxel', () => {
+  test('keeps only the opaque interface behind a transparent voxel', () => {
     const document = new VoxelDocument()
     document.setVoxel(0, 0, 0, 12)
     document.setVoxel(1, 0, 0, 5)
@@ -260,8 +260,29 @@ describe('surface meshing and picking', () => {
     const left = meshChunk(split.paddedChunk(chunkId(0, 0, 0)), split.palette, false, transparent)
     const right = meshChunk(split.paddedChunk(chunkId(1, 0, 0)), split.palette, false, transparent)
     expect(left.quads + right.quads).toBe(11)
-    expect(left.groups.some(group => group.materialIndex === 5)).toBe(false)
+    expect(left.groups.find(group => group.materialIndex === 12)?.count).toBe(30)
     expect(right.groups.find(group => group.materialIndex === 5)?.count).toBe(36)
+  })
+
+  test('keeps both sides of an interface between different transparent materials', () => {
+    const transparent = new Uint8Array(256)
+    transparent[12] = transparent[31] = 1
+    const document = new VoxelDocument()
+    document.setVoxel(0, 0, 0, 12)
+    document.setVoxel(1, 0, 0, 31)
+
+    const mesh = meshChunk(document.paddedChunk(0), document.palette, false, transparent)
+    expect(mesh.quads).toBe(12)
+    expect(mesh.groups.map(group => [group.materialIndex, group.count])).toEqual([[12, 36], [31, 36]])
+    document.setVoxel(1, 0, 0, 12)
+    expect(meshChunk(document.paddedChunk(0), document.palette, false, transparent).quads).toBe(6)
+
+    const split = new VoxelDocument({ x: 32, y: 16, z: 16 })
+    split.setVoxel(15, 0, 0, 12)
+    split.setVoxel(16, 0, 0, 31)
+    const left = meshChunk(split.paddedChunk(chunkId(0, 0, 0)), split.palette, false, transparent)
+    const right = meshChunk(split.paddedChunk(chunkId(1, 0, 0)), split.palette, false, transparent)
+    expect(left.quads + right.quads).toBe(12)
   })
 
   test('projects a locked gesture onto its starting plane', () => {

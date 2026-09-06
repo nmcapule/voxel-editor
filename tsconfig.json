@@ -16,5 +16,5 @@
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true
   },
-  "include": ["src", "plugins/assistant"]
+  "include": ["src", "tests", "plugins/assistant"]
 }

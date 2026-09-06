@@ -277,6 +277,13 @@ export class VoxelRenderer {
   private pointer = new THREE.Vector2()
   private environmentMap: THREE.Texture
   private materials: THREE.MeshPhysicalMaterial[]
+  private transmissionBuffer = new THREE.WebGLRenderTarget(1, 1, {
+    type: THREE.HalfFloatType, minFilter: THREE.LinearMipmapLinearFilter,
+    generateMipmaps: true, depthBuffer: false,
+  })
+  private transmissionSize = new THREE.Vector2(1, 1)
+  private transmissionDepths = new Map<THREE.Material, number>()
+  private lastTransmissionMaterial?: THREE.Material
   private faceGridMaterial = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.46, depthWrite: false, toneMapped: false })
   private model = new THREE.Group()
   private chunkMeshes = new Map<number, THREE.Group>()
@@ -356,6 +363,9 @@ export class VoxelRenderer {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping
     this.renderer.toneMappingExposure = 1.08
+    this.renderer.setTransparentSort((a, b) => a.groupOrder - b.groupOrder || a.renderOrder - b.renderOrder
+      || (this.transmissionDepths.get(b.material) ?? b.z) - (this.transmissionDepths.get(a.material) ?? a.z)
+      || a.material.id - b.material.id || b.z - a.z || a.id - b.id)
     const room = new RoomEnvironment()
     const pmrem = new THREE.PMREMGenerator(this.renderer)
     this.environmentMap = pmrem.fromScene(room, 0.04, 0.1, 100, { size: 64 }).texture
@@ -1116,8 +1126,24 @@ export class VoxelRenderer {
         geometry.setAttribute('color', color)
         geometry.setAttribute('uv', uv)
         geometry.setIndex(new THREE.BufferAttribute(result.indices.slice(group.start, group.start + group.count), 1))
-        geometry.computeBoundingSphere()
+        const bounds = new THREE.Box3()
+        const vertex = new THREE.Vector3()
+        for (let index = group.start; index < group.start + group.count; index++) bounds.expandByPoint(vertex.fromBufferAttribute(position, result.indices[index]))
+        geometry.boundingBox = bounds
+        geometry.boundingSphere = bounds.getBoundingSphere(new THREE.Sphere())
         const mesh = new THREE.Mesh(geometry, this.materials[group.materialIndex])
+        mesh.onBeforeRender = (renderer, scene, _camera, _geometry, material) => {
+          if (scene.overrideMaterial || !(material instanceof THREE.MeshPhysicalMaterial) || material.transmission === 0) return
+          const target = renderer.getRenderTarget()
+          if (!target || target.samples || this.lastTransmissionMaterial === material) return
+          // All chunks of one medium sample the same background: never tint water through itself.
+          this.transmissionBuffer.setSize(target.width, target.height)
+          this.transmissionSize.set(target.width, target.height)
+          renderer.initRenderTarget(this.transmissionBuffer)
+          renderer.copyTextureToTexture(target.texture, this.transmissionBuffer.texture)
+          renderer.setRenderTarget(target)
+          this.lastTransmissionMaterial = material
+        }
         mesh.castShadow = castsRealtimeShadow(this.document.materials[group.materialIndex])
         mesh.receiveShadow = true
         chunkMesh.add(mesh)
@@ -1201,21 +1227,30 @@ export class VoxelRenderer {
   }
 
   private createMaterials() {
-    return this.document.materials.map(({ name, roughness, metalness, emissiveIntensity, opacity, transmission, ior }, index) => new THREE.MeshPhysicalMaterial({
-      name,
-      vertexColors: true,
-      envMap: this.environmentMap,
-      envMapIntensity: realtimeEnvironmentIntensity(metalness),
-      roughness,
-      metalness,
-      emissive: this.document.palette[index],
-      emissiveIntensity,
-      opacity,
-      transmission,
-      ior,
-      transparent: opacity < 1,
-      depthWrite: opacity >= 1,
-    }))
+    return this.document.materials.map(({ name, roughness, metalness, emissiveIntensity, opacity, transmission, ior }, index) => {
+      const material = new THREE.MeshPhysicalMaterial({
+        name,
+        vertexColors: true,
+        envMap: this.environmentMap,
+        envMapIntensity: realtimeEnvironmentIntensity(metalness),
+        roughness,
+        metalness,
+        emissive: this.document.palette[index],
+        emissiveIntensity,
+        opacity,
+        transmission,
+        ior,
+        transparent: opacity < 1,
+        depthWrite: opacity >= 1,
+      })
+      material.onBeforeCompile = shader => {
+        shader.uniforms.layeredTransmissionMap = { value: this.transmissionBuffer.texture }
+        shader.uniforms.layeredTransmissionSize = { value: this.transmissionSize }
+        shader.fragmentShader = shader.fragmentShader.replace('#include <transmission_pars_fragment>',
+          THREE.ShaderChunk.transmission_pars_fragment.replaceAll('transmissionSamplerMap', 'layeredTransmissionMap').replaceAll('transmissionSamplerSize', 'layeredTransmissionSize'))
+      }
+      return material
+    })
   }
 
   private disposeMaterials() {
@@ -1417,6 +1452,7 @@ export class VoxelRenderer {
     tracer.minSamples = 1
     tracer.fadeDuration = 180
     tracer.dynamicLowRes = true
+    tracer.rasterizeSceneCallback = () => this.renderRaster()
     this.pathTracer = tracer
     return tracer
   }
@@ -1714,6 +1750,24 @@ export class VoxelRenderer {
   }
 
   private renderRaster() {
+    // ponytail: material-level depth order suits layered voxels; intersecting media need depth peeling.
+    this.model.updateMatrixWorld(true)
+    this.camera.updateMatrixWorld(true)
+    const bounds = new Map<THREE.Material, THREE.Box3>()
+    const box = new THREE.Box3()
+    const center = new THREE.Vector3()
+    const frustum = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse))
+    this.model.traverse(object => {
+      if (!(object instanceof THREE.Mesh) || !(object.material instanceof THREE.MeshPhysicalMaterial) || object.material.transmission === 0) return
+      box.copy(object.geometry.boundingBox!).applyMatrix4(object.matrixWorld)
+      if (!frustum.intersectsBox(box)) return
+      const materialBounds = bounds.get(object.material) ?? new THREE.Box3()
+      materialBounds.union(box)
+      bounds.set(object.material, materialBounds)
+    })
+    this.transmissionDepths.clear()
+    for (const [material, box] of bounds) this.transmissionDepths.set(material, box.getCenter(center).project(this.camera).z)
+    this.lastTransmissionMaterial = undefined
     this.composer.render()
     this.recordFrame()
   }

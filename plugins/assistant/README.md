@@ -53,8 +53,11 @@ to the VM rather than the external HTTPS proxy.
 ## Editing And Stop
 
 Every tool proposal is parsed on both sides and edits use the existing serial
-application queue with a revision guard. The model must refresh state after a
-conflict. UI/renderer changes remain usable and appear to external scripting
+application queue with a project-mutation revision guard. Moving/framing the
+camera, selecting voxels, switching tools, and toggling render mode do not cause
+conflicts. Document, layer, palette/material, and saved scene-setting edits do.
+The model must refresh state after a genuine mutation conflict.
+UI/renderer changes remain usable and appear to external scripting
 clients; assistant commands are attributed to `assistant`.
 
 Voxel batches use normal Undo. There is no whole-run rollback: it could undo

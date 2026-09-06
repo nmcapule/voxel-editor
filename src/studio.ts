@@ -88,6 +88,7 @@ export interface StudioEffects {
   preferencesChanged?: boolean
   clearPbrMaps?: boolean
   save?: boolean
+  mutation?: boolean
   announcement?: string
 }
 
@@ -423,7 +424,8 @@ export class Studio {
   }
 
   private changed(effects: StudioEffects, result: Record<string, unknown> = {}): StudioOutcome {
-    this.revision++
+    // Conflict tokens track project edits, not camera or transient editor activity.
+    if (effects.save || effects.mutation) this.revision++
     return { changed: true, revision: this.revision, effects, result }
   }
 

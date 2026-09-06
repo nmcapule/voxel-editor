@@ -52,7 +52,9 @@ Responses retain request order:
 }
 ```
 
-`ifRevision` is optional. When supplied, the command fails with `revision_conflict` if UI or script activity changed the application first. UI changes are published as `state.changed` events so a connected agent can refresh its assumptions.
+`ifRevision` is optional. When supplied, the command fails with `revision_conflict` if a project mutation occurred first: document/voxel edits, undo/redo, layer changes, palette/material edits (including texture maps), or saved scene settings. Camera movement and framing, selection, tools, clipboard previews, and render-mode toggles do not advance this revision.
+
+UI changes still publish `state.changed` events with their own increasing `sequence`, even when the mutation `revision` stays the same. Scripted edits should specify cells, color, and layer explicitly: transient editing scope is intentionally not covered by the conflict guard.
 
 ## Inspection
 

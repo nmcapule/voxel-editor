@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { VoxelDocument } from './editor'
-import { Studio, StudioCommandError } from './studio'
+import { Studio, StudioCommandError, type StudioCommand } from './studio'
 import type { ViewSettings } from './storage'
 
 const settings: ViewSettings = {
@@ -17,6 +17,59 @@ const settings: ViewSettings = {
 }
 
 describe('studio command kernel', () => {
+  test('camera and transient editor activity do not invalidate a document revision', () => {
+    const studio = new Studio(new VoxelDocument(), settings)
+    studio.execute({ type: 'edit.setVoxels', voxels: [{ x: 1, y: 1, z: 1, color: 5 }] })
+    const revision = studio.revision
+
+    // view.set and view.frame report their changes through recordChange.
+    expect(studio.recordChange({ view: { position: { x: 30, y: 20, z: 30 } } })).toMatchObject({ changed: true, revision })
+    expect(studio.recordChange({ view: { position: { x: 40, y: 25, z: 40 } } })).toMatchObject({ changed: true, revision })
+    for (const command of [
+      { type: 'tool.set', tool: 'paint' },
+      { type: 'tool.selectionMode', mode: 'body' },
+      { type: 'palette.activate', index: 6 },
+      { type: 'selection.set', cells: [{ x: 1, y: 1, z: 1 }] },
+      { type: 'clipboard.copy' },
+      { type: 'clipboard.paste.begin' },
+      { type: 'clipboard.paste.cancel' },
+      { type: 'renderMode.set', enabled: true },
+    ] satisfies StudioCommand[]) {
+      expect(studio.execute(command)).toMatchObject({ changed: true, revision })
+    }
+    expect(studio.stateSnapshot().revision).toBe(revision)
+    expect(studio.composition().revision).toBe(revision)
+    expect(studio.execute({ type: 'edit.setVoxels', voxels: [{ x: 2, y: 1, z: 1, color: 6 }] }).revision).toBe(revision + 1)
+  })
+
+  test('project edits still advance revisions while no-ops and failures do not', () => {
+    const studio = new Studio(new VoxelDocument(), settings)
+    const voxel = { x: 1, y: 1, z: 1, color: 5 }
+    for (const command of [
+      { type: 'edit.setVoxels', voxels: [voxel] },
+      { type: 'history.undo' },
+      { type: 'history.redo' },
+      { type: 'document.rename', name: 'Tower' },
+      { type: 'palette.setColor', index: 5, color: 0x123456 },
+      { type: 'material.update', index: 5, patch: { roughness: 0.8 } },
+      { type: 'layer.create', name: 'Details' },
+      { type: 'layer.visibility', id: 2, visible: false },
+      { type: 'layer.lock', id: 2, locked: true },
+      { type: 'settings.update', patch: { grid: false } },
+      { type: 'document.new' },
+    ] satisfies StudioCommand[]) {
+      const before = studio.revision
+      expect(studio.execute(command)).toMatchObject({ changed: true, revision: before + 1 })
+    }
+    const beforeMap = studio.revision
+    expect(studio.recordChange({ index: 5, map: 'map' }, { mutation: true })).toHaveProperty('revision', beforeMap + 1)
+    const revision = studio.revision
+    expect(studio.execute({ type: 'edit.setVoxels', voxels: [] })).toMatchObject({ changed: false, revision })
+    expect(studio.execute({ type: 'history.undo' })).toMatchObject({ changed: false, revision })
+    expect(() => studio.execute({ type: 'layer.delete', id: 1 })).toThrow()
+    expect(studio.revision).toBe(revision)
+  })
+
   test('applies edits, selection, and history through one effect boundary', () => {
     const document = new VoxelDocument()
     document.setVoxel(1, 1, 1, 5)

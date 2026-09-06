@@ -548,19 +548,20 @@ async function executeApplicationCommand({ command, source, ifRevision, viewVers
       maps.set(command.map, command.name)
       loadedPbrMaps.set(command.index, maps)
       if (activeColor === command.index) renderPaletteMaterial()
-      const outcome = studioController.recordChange({ index: command.index, map: command.map }, { announcement: `${command.name} loaded for color ${command.index}` })
+      const outcome = studioController.recordChange({ index: command.index, map: command.map }, { mutation: true, announcement: `${command.name} loaded for color ${command.index}` })
       applyStudioEffects(command, outcome, source)
       emitCommandEvent(command, source, outcome)
       return { changed: true, revision: outcome.revision, result: outcome.result }
     }
     case 'material.map.clear': {
-      renderer.clearPbrMaps(command.index, command.map)
       const maps = loadedPbrMaps.get(command.index)
+      const mutation = command.map ? maps?.has(command.map) : Boolean(maps?.size)
+      renderer.clearPbrMaps(command.index, command.map)
       if (command.map) maps?.delete(command.map)
       else loadedPbrMaps.delete(command.index)
       if (maps && !maps.size) loadedPbrMaps.delete(command.index)
       if (activeColor === command.index) renderPaletteMaterial()
-      const outcome = studioController.recordChange({ index: command.index, map: command.map ?? null }, { announcement: `PBR texture ${command.map ? 'map' : 'maps'} cleared for color ${command.index}` })
+      const outcome = studioController.recordChange({ index: command.index, map: command.map ?? null }, { mutation, announcement: `PBR texture ${command.map ? 'map' : 'maps'} cleared for color ${command.index}` })
       applyStudioEffects(command, outcome, source)
       emitCommandEvent(command, source, outcome)
       return { changed: true, revision: outcome.revision, result: outcome.result }

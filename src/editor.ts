@@ -140,7 +140,7 @@ export class VoxelDocument {
 
   constructor(dimensions: Dimensions = { x: 32, y: 32, z: 32 }, name = 'Untitled', palette: ArrayLike<number> = DEFAULT_PALETTE, materials?: readonly Partial<PaletteMaterial>[], layers?: readonly VoxelLayer[], activeLayerId?: number) {
     this.dimensions = normalizeDimensions(dimensions)
-    this.name = name
+    this.name = name.trim().slice(0, 60) || 'Untitled'
     this.palette = new Uint32Array(256)
     this.palette.set(palette)
     const addedPresetStart = DEFAULT_PALETTE.length - 2
@@ -418,13 +418,27 @@ export class VoxelDocument {
   }
 }
 
+function resizeOffset(source: Dimensions, target: Dimensions, anchor: ResizeAnchor) {
+  return anchor === 'center' ? {
+    x: Math.trunc((target.x - source.x) / 2),
+    y: Math.trunc((target.y - source.y) / 2),
+    z: Math.trunc((target.z - source.z) / 2),
+  } : { x: 0, y: 0, z: 0 }
+}
+
+export function croppedVoxelCount(source: VoxelDocument, dimensions: Dimensions, anchor: ResizeAnchor) {
+  const target = normalizeDimensions(dimensions)
+  const offset = resizeOffset(source.dimensions, target, anchor)
+  let cropped = 0
+  source.forEachVoxel((x, y, z) => {
+    if (x + offset.x < 0 || y + offset.y < 0 || z + offset.z < 0 || x + offset.x >= target.x || y + offset.y >= target.y || z + offset.z >= target.z) cropped++
+  })
+  return cropped
+}
+
 export function resizeVoxelDocument(source: VoxelDocument, dimensions: Dimensions, anchor: ResizeAnchor) {
   const resized = new VoxelDocument(dimensions, source.name, source.palette, source.materials, source.layers, source.activeLayerId)
-  const offset = anchor === 'center' ? {
-    x: Math.trunc((resized.dimensions.x - source.dimensions.x) / 2),
-    y: Math.trunc((resized.dimensions.y - source.dimensions.y) / 2),
-    z: Math.trunc((resized.dimensions.z - source.dimensions.z) / 2),
-  } : { x: 0, y: 0, z: 0 }
+  const offset = resizeOffset(source.dimensions, resized.dimensions, anchor)
   let cropped = 0
   source.forEachVoxel((x, y, z, color, layerId) => {
     x += offset.x; y += offset.y; z += offset.z
@@ -467,9 +481,9 @@ export class EditSession {
   private document: VoxelDocument
   private layerId: number
 
-  constructor(document: VoxelDocument) {
+  constructor(document: VoxelDocument, layerId = document.activeLayerId) {
     this.document = document
-    this.layerId = document.activeLayerId
+    this.layerId = layerId
   }
 
   private capture(id: number) {
@@ -605,11 +619,10 @@ export class History {
   }
 }
 
-export function pushPullRange(document: VoxelDocument, cells: Vec3[], normal: Vec3) {
+export function pushPullRange(document: VoxelDocument, cells: Vec3[], normal: Vec3, layerId = document.activeLayerId) {
   let pull = Infinity
   let push = Infinity
   for (const cell of cells) {
-    const layerId = document.activeLayerId
     let free = 0
     while (document.contains(cell.x + normal.x * (free + 1), cell.y + normal.y * (free + 1), cell.z + normal.z * (free + 1))
       && !document.getLayerVoxel(cell.x + normal.x * (free + 1), cell.y + normal.y * (free + 1), cell.z + normal.z * (free + 1), layerId)) free++
@@ -639,22 +652,23 @@ export function moveRange(document: VoxelDocument, cells: Vec3[], normal: Vec3) 
   return { pull: available(1), push: available(-1) }
 }
 
-export function moveVoxels(document: VoxelDocument, session: EditSession, cells: Vec3[], normal: Vec3, distance: number) {
-  const range = moveRange(document, cells, normal)
+export function moveVoxels(document: VoxelDocument, session: EditSession, cells: Vec3[], normal: Vec3, distance: number, layerId = document.activeLayerId) {
+  const moving = cells.map(cell => ({ ...cell, color: document.getLayerVoxel(cell.x, cell.y, cell.z, layerId) })).filter(cell => cell.color)
+  if (!moving.length) return 0
+  const range = moveRange(document, moving, normal)
   const amount = Math.max(-range.push, Math.min(range.pull, Math.round(distance)))
   if (!amount) return 0
-  const moving = cells.map(cell => ({ ...cell, color: document.getLayerVoxel(cell.x, cell.y, cell.z) }))
   for (const cell of moving) session.set(cell.x, cell.y, cell.z, 0)
   for (const cell of moving) session.set(cell.x + normal.x * amount, cell.y + normal.y * amount, cell.z + normal.z * amount, cell.color)
   return amount
 }
 
-export function pushPull(document: VoxelDocument, session: EditSession, cells: Vec3[], normal: Vec3, distance: number) {
-  const range = pushPullRange(document, cells, normal)
+export function pushPull(document: VoxelDocument, session: EditSession, cells: Vec3[], normal: Vec3, distance: number, layerId = document.activeLayerId) {
+  const range = pushPullRange(document, cells, normal, layerId)
   const amount = Math.max(-range.push, Math.min(range.pull, Math.round(distance)))
   if (amount > 0) {
     for (const cell of cells) {
-      const color = document.getLayerVoxel(cell.x, cell.y, cell.z)
+      const color = document.getLayerVoxel(cell.x, cell.y, cell.z, layerId)
       for (let step = 1; step <= amount; step++) session.set(cell.x + normal.x * step, cell.y + normal.y * step, cell.z + normal.z * step, color)
     }
   } else if (amount < 0) {
@@ -682,6 +696,76 @@ export function dirtyChunks(document: VoxelDocument, ids: Iterable<number>) {
     }
   }
   return dirty
+}
+
+export function surfaceVoxels(document: VoxelDocument, min: Vec3, max: Vec3, normal: Vec3, layerId?: number) {
+  const cells: Vec3[] = []
+  for (let z = min.z; z <= max.z; z++) {
+    for (let y = min.y; y <= max.y; y++) {
+      for (let x = min.x; x <= max.x; x++) {
+        if (document.getVisibleVoxel(x, y, z) && (layerId === undefined || document.getVisibleVoxelLayer(x, y, z) === layerId)
+          && !document.getVisibleVoxel(x + normal.x, y + normal.y, z + normal.z)) cells.push({ x, y, z })
+      }
+    }
+  }
+  return cells
+}
+
+export function occupiedVoxels(document: VoxelDocument, min: Vec3, max: Vec3, layerId?: number) {
+  const cells: Vec3[] = []
+  document.forEachVisibleVoxel((x, y, z, _color, owner) => {
+    if ((layerId === undefined || owner === layerId)
+      && x >= min.x && x <= max.x && y >= min.y && y <= max.y && z >= min.z && z <= max.z) cells.push({ x, y, z })
+  })
+  return cells
+}
+
+export function connectedSurfaceVoxels(document: VoxelDocument, start: Vec3, normal: Vec3, color?: number) {
+  const cells: Vec3[] = []
+  const pending = [{ ...start }]
+  const visited = new Set<number>()
+  const layerId = document.getVisibleVoxelLayer(start.x, start.y, start.z)
+  const axes = (['x', 'y', 'z'] as const).filter(axis => normal[axis] === 0)
+  for (let index = 0; index < pending.length; index++) {
+    const cell = pending[index]
+    const key = cell.x + cell.y * document.dimensions.x + cell.z * document.dimensions.x * document.dimensions.y
+    if (visited.has(key)) continue
+    visited.add(key)
+    const cellColor = document.getVisibleVoxel(cell.x, cell.y, cell.z)
+    if (!cellColor || document.getVisibleVoxelLayer(cell.x, cell.y, cell.z) !== layerId || color !== undefined && cellColor !== color
+      || document.getVisibleVoxel(cell.x + normal.x, cell.y + normal.y, cell.z + normal.z)) continue
+    cells.push(cell)
+    for (const axis of axes) {
+      for (const step of [-1, 1]) {
+        const neighbor = { ...cell, [axis]: cell[axis] + step }
+        if (document.contains(neighbor.x, neighbor.y, neighbor.z)) pending.push(neighbor)
+      }
+    }
+  }
+  return cells
+}
+
+export function connectedBodyVoxels(document: VoxelDocument, start: Vec3, color?: number) {
+  const cells: Vec3[] = []
+  const pending = [{ ...start }]
+  const visited = new Set<number>()
+  const layerId = document.getVisibleVoxelLayer(start.x, start.y, start.z)
+  for (let index = 0; index < pending.length; index++) {
+    const cell = pending[index]
+    const key = cell.x + cell.y * document.dimensions.x + cell.z * document.dimensions.x * document.dimensions.y
+    if (visited.has(key)) continue
+    visited.add(key)
+    const cellColor = document.getVisibleVoxel(cell.x, cell.y, cell.z)
+    if (!cellColor || document.getVisibleVoxelLayer(cell.x, cell.y, cell.z) !== layerId || color !== undefined && cellColor !== color) continue
+    cells.push(cell)
+    for (const axis of ['x', 'y', 'z'] as const) {
+      for (const step of [-1, 1]) {
+        const neighbor = { ...cell, [axis]: cell[axis] + step }
+        if (document.contains(neighbor.x, neighbor.y, neighbor.z)) pending.push(neighbor)
+      }
+    }
+  }
+  return cells
 }
 
 export function voxelLine(from: Vec3, to: Vec3) {

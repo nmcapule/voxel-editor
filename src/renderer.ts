@@ -6,23 +6,28 @@ import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import type { WebGLPathTracer } from 'three-gpu-pathtracer'
-import { CHUNK_SIZE, chunkCoords, fillShapeVoxels, moveRange, pushPullRange, type FillShape, type PaletteMaterial, type Vec3, type VoxelDocument } from './editor'
+import { CHUNK_SIZE, chunkCoords, connectedBodyVoxels, connectedSurfaceVoxels, fillShapeVoxels, moveRange, occupiedVoxels, pushPullRange, surfaceVoxels, type FillShape, type PaletteMaterial, type Vec3, type VoxelDocument } from './editor'
+import type { AuxiliaryTool, PaintMode, PbrMap, SculptMode, SelectionMode, SelectionState, Tool } from './studio'
 import type { ViewSettings } from './storage'
 
-export type Tool = 'select' | 'paint' | 'sculpt' | 'layer'
-export type PaintMode = 'paint' | 'fill'
-export type SculptMode = 'push' | 'move' | 'erase'
-export type AuxiliaryTool = 'pick'
-export type SelectionMode = 'point' | 'surface' | 'texture' | 'body'
-export type PbrMap = 'map' | 'normalMap' | 'roughnessMap' | 'metalnessMap'
-
-export type SelectionState = { cells: Vec3[]; count: number; floating?: boolean }
+export type { AuxiliaryTool, PaintMode, PbrMap, SculptMode, SelectionMode, SelectionState, Tool } from './studio'
 
 export interface ToolTarget {
   cell: Vec3
   normal: Vec3
   occupied: boolean
   color: number
+}
+
+export interface CameraSnapshot {
+  projection: ViewSettings['projection']
+  position: Vec3
+  target: Vec3
+  up: Vec3
+  zoom?: number
+  fov?: number
+  orthographicSpan: number
+  viewport: { width: number; height: number }
 }
 
 export function shouldOrbitTouch(actionable: boolean, activeTouches: number) {
@@ -56,13 +61,15 @@ interface MeshResult {
 
 export interface RendererCallbacks {
   onSelectionChange: (selection: SelectionState) => void
-  onPaint: () => void
-  onErase: () => void
+  onPaint: (cells: Vec3[]) => void
+  onErase: (cells: Vec3[]) => void
   onFillCommit: (min: Vec3, max: Vec3, normal: Vec3, shape: FillShape) => void
-  onPushPullCommit: (cells: Vec3[], normal: Vec3, distance: number, move: boolean) => void
+  onPushPullCommit: (cells: Vec3[], normal: Vec3, distance: number, move: boolean, floating: boolean) => void
   onPushPullPreview: (cells?: number, distance?: number, move?: boolean) => void
   onPick: (color: number) => void
   onLayerSelect: (layerId: number) => void
+  onViewStart: () => void
+  onViewChange: (view: CameraSnapshot) => void
   onHover: (cell?: Vec3) => void
   onMeshStats: (pending: number, quads: number) => void
   onPathTracingStatus: (status: string) => void
@@ -198,28 +205,6 @@ export function tracePlaneRay(document: VoxelDocument, origin: Vec3, direction: 
   return document.contains(cell.x, cell.y, cell.z) ? cell : undefined
 }
 
-export function surfaceVoxels(document: VoxelDocument, min: Vec3, max: Vec3, normal: Vec3, layerId?: number) {
-  const cells: Vec3[] = []
-  for (let z = min.z; z <= max.z; z++) {
-    for (let y = min.y; y <= max.y; y++) {
-      for (let x = min.x; x <= max.x; x++) {
-        if (document.getVisibleVoxel(x, y, z) && (layerId === undefined || document.getVisibleVoxelLayer(x, y, z) === layerId)
-          && !document.getVisibleVoxel(x + normal.x, y + normal.y, z + normal.z)) cells.push({ x, y, z })
-      }
-    }
-  }
-  return cells
-}
-
-export function occupiedVoxels(document: VoxelDocument, min: Vec3, max: Vec3, layerId?: number) {
-  const cells: Vec3[] = []
-  document.forEachVisibleVoxel((x, y, z, _color, owner) => {
-    if ((layerId === undefined || owner === layerId)
-      && x >= min.x && x <= max.x && y >= min.y && y <= max.y && z >= min.z && z <= max.z) cells.push({ x, y, z })
-  })
-  return cells
-}
-
 export function pushPullGhostVoxels(cells: Vec3[], normal: Vec3, distance: number, move: boolean) {
   if (move || !distance) return cells.map(cell => ({
     x: cell.x + normal.x * distance,
@@ -234,54 +219,6 @@ export function pushPullGhostVoxels(cells: Vec3[], normal: Vec3, distance: numbe
     }
   }
   return ghosts
-}
-
-export function connectedSurfaceVoxels(document: VoxelDocument, start: Vec3, normal: Vec3, color?: number) {
-  const cells: Vec3[] = []
-  const pending = [{ ...start }]
-  const visited = new Set<number>()
-  const layerId = document.getVisibleVoxelLayer(start.x, start.y, start.z)
-  const axes = axisNames.filter(axis => normal[axis] === 0)
-  for (let index = 0; index < pending.length; index++) {
-    const cell = pending[index]
-    const key = cell.x + cell.y * document.dimensions.x + cell.z * document.dimensions.x * document.dimensions.y
-    if (visited.has(key)) continue
-    visited.add(key)
-    const cellColor = document.getVisibleVoxel(cell.x, cell.y, cell.z)
-    if (!cellColor || document.getVisibleVoxelLayer(cell.x, cell.y, cell.z) !== layerId || color !== undefined && cellColor !== color
-      || document.getVisibleVoxel(cell.x + normal.x, cell.y + normal.y, cell.z + normal.z)) continue
-    cells.push(cell)
-    for (const axis of axes) {
-      for (const step of [-1, 1]) {
-        const neighbor = { ...cell, [axis]: cell[axis] + step }
-        if (document.contains(neighbor.x, neighbor.y, neighbor.z)) pending.push(neighbor)
-      }
-    }
-  }
-  return cells
-}
-
-export function connectedBodyVoxels(document: VoxelDocument, start: Vec3, color?: number) {
-  const cells: Vec3[] = []
-  const pending = [{ ...start }]
-  const visited = new Set<number>()
-  const layerId = document.getVisibleVoxelLayer(start.x, start.y, start.z)
-  for (let index = 0; index < pending.length; index++) {
-    const cell = pending[index]
-    const key = cell.x + cell.y * document.dimensions.x + cell.z * document.dimensions.x * document.dimensions.y
-    if (visited.has(key)) continue
-    visited.add(key)
-    const cellColor = document.getVisibleVoxel(cell.x, cell.y, cell.z)
-    if (!cellColor || document.getVisibleVoxelLayer(cell.x, cell.y, cell.z) !== layerId || color !== undefined && cellColor !== color) continue
-    cells.push(cell)
-    for (const axis of axisNames) {
-      for (const step of [-1, 1]) {
-        const neighbor = { ...cell, [axis]: cell[axis] + step }
-        if (document.contains(neighbor.x, neighbor.y, neighbor.z)) pending.push(neighbor)
-      }
-    }
-  }
-  return cells
 }
 
 export function workspaceGridPositions(dimensions: Vec3, normal: Vec3 = { x: 0, y: 1, z: 0 }) {
@@ -369,6 +306,8 @@ export class VoxelRenderer {
   private nextVersion = 0
   private inFlight = 0
   private workerReady = false
+  private meshFailed = false
+  private meshWaiters: { resolve: () => void; reject: (error: Error) => void }[] = []
   private document: VoxelDocument
   private settings: ViewSettings
   private renderMode = false
@@ -454,6 +393,9 @@ export class VoxelRenderer {
     }
     this.worker.onerror = () => {
       this.inFlight = 0
+      this.queued.clear()
+      this.meshFailed = true
+      for (const waiter of this.meshWaiters.splice(0)) waiter.reject(new Error('The voxel surface worker stopped.'))
       this.callbacks.onMeshStats(0, 0)
       this.callbacks.onError('The voxel surface worker stopped. Reload to continue editing.')
     }
@@ -481,6 +423,8 @@ export class VoxelRenderer {
 
   private createControls(camera: THREE.Camera) {
     const controls = new OrbitControls(camera, this.renderer.domElement)
+    let interacting = false
+    let changed = false
     controls.enableDamping = false
     controls.screenSpacePanning = true
     controls.mouseButtons.LEFT = -1 as THREE.MOUSE
@@ -490,8 +434,18 @@ export class VoxelRenderer {
     controls.touches.TWO = THREE.TOUCH.DOLLY_ROTATE
     controls.minDistance = 2
     controls.maxDistance = 1200
-    controls.addEventListener('start', () => this.cancelFocusAnimation())
-    controls.addEventListener('change', () => this.cameraChanged())
+    controls.addEventListener('start', () => {
+      if (!interacting) { changed = false; this.callbacks.onViewStart() }
+      interacting = true
+      this.cancelFocusAnimation()
+    })
+    controls.addEventListener('change', () => { if (interacting) changed = true; this.cameraChanged() })
+    controls.addEventListener('end', () => {
+      const report = interacting && changed
+      interacting = false
+      changed = false
+      if (report) this.callbacks.onViewChange(this.getView())
+    })
     return controls
   }
 
@@ -573,7 +527,7 @@ export class VoxelRenderer {
         }
         if (!this.resolveActionTarget(target)) return
         if (this.sculptMode === 'erase') {
-          this.callbacks.onErase()
+          this.callbacks.onErase([...this.selection.values()])
           return
         }
         if (!this.startPushPull(event, target)) return
@@ -613,19 +567,17 @@ export class VoxelRenderer {
         else if (action) this.resolveActionTarget(this.marqueeDrag.target)
         else this.selectTarget(this.marqueeDrag.target, this.marqueeDrag.additive)
         this.cancelMarquee()
-        if (action === 'paint') this.callbacks.onPaint()
-        if (action === 'erase') this.callbacks.onErase()
+        if (action === 'paint') this.callbacks.onPaint([...this.selection.values()])
+        if (action === 'erase') this.callbacks.onErase([...this.selection.values()])
       } else if (this.pushPullDrag && this.activePointer === event.pointerId) {
         const { cells, normal, distance, move } = this.pushPullDrag
         if (distance || this.floatingSelection) {
-          this.callbacks.onPushPullCommit(cells, normal, distance, move)
-          this.setSelection(cells.map(cell => ({ x: cell.x + normal.x * distance, y: cell.y + normal.y * distance, z: cell.z + normal.z * distance }))
-            .filter(cell => this.document.getVisibleVoxelLayer(cell.x, cell.y, cell.z) === this.document.activeLayerId))
+            this.callbacks.onPushPullCommit(cells, normal, distance, move, this.floatingSelection)
         }
         this.cancelPushPull()
       } else if (this.paintPointer === event.pointerId) {
         const target = this.targetAt(event)
-        if (this.resolveActionTarget(target)) this.callbacks.onPaint()
+        if (this.resolveActionTarget(target)) this.callbacks.onPaint([...this.selection.values()])
         this.cancelPaint()
       }
     })
@@ -672,22 +624,17 @@ export class VoxelRenderer {
           }
           return
         }
-        if (this.resolveActionTarget(target)) this.callbacks.onPaint()
+        if (this.resolveActionTarget(target)) this.callbacks.onPaint([...this.selection.values()])
         return
       }
       if (this.tool === 'sculpt') {
         if (!target.occupied) { this.setSelection([]); return }
         if (!this.resolveActionTarget(target)) return
-        if (this.sculptMode === 'erase') { this.callbacks.onErase(); return }
+        if (this.sculptMode === 'erase') { this.callbacks.onErase([...this.selection.values()]); return }
         const { cells, move, range } = this.pushPullOperation(target)
         const distance = event.shiftKey ? -Math.min(1, range.push) : Math.min(1, range.pull)
         if (distance || this.floatingSelection) {
-          this.callbacks.onPushPullCommit(cells, target.normal, distance, move)
-          this.setSelection(cells.map(cell => ({
-            x: cell.x + target.normal.x * distance,
-            y: cell.y + target.normal.y * distance,
-            z: cell.z + target.normal.z * distance,
-          })).filter(cell => this.document.getVisibleVoxelLayer(cell.x, cell.y, cell.z) === this.document.activeLayerId))
+          this.callbacks.onPushPullCommit(cells, target.normal, distance, move, this.floatingSelection)
         }
         return
       }
@@ -831,15 +778,20 @@ export class VoxelRenderer {
   }
 
   setSelection(cells: Vec3[]) {
-    this.updateSelection(cells, false)
+    this.updateSelection(cells, false, true, true)
   }
 
   setFloatingSelection(cells: Vec3[]) {
     if (cells[0]) this.keyboardCell = { ...cells[0] }
-    this.updateSelection(cells, true)
+    this.updateSelection(cells, true, true, true)
   }
 
-  private updateSelection(cells: Vec3[], floating: boolean) {
+  applySelection(selection: SelectionState, focus = true) {
+    if (selection.cells[0] && selection.floating) this.keyboardCell = { ...selection.cells[0] }
+    this.updateSelection(selection.cells, selection.floating === true, false, focus)
+  }
+
+  private updateSelection(cells: Vec3[], floating: boolean, notify: boolean, focus: boolean) {
     this.selection.clear()
     this.floatingSelection = floating
     for (const cell of cells) if (this.document.contains(cell.x, cell.y, cell.z) && (floating
@@ -861,7 +813,7 @@ export class VoxelRenderer {
       this.selectionPreview = preview
       this.scene.add(preview)
     }
-    this.finishSelection({ cells: selected, count: selected.length, floating })
+    this.finishSelection({ cells: selected, count: selected.length, floating }, notify, focus)
   }
 
   private clearSelectionPreview() {
@@ -873,9 +825,9 @@ export class VoxelRenderer {
     this.selectionPreview = undefined
   }
 
-  private finishSelection(selection: SelectionState) {
-    this.moveFocus(this.focusCenter())
-    this.callbacks.onSelectionChange(selection)
+  private finishSelection(selection: SelectionState, notify: boolean, focus: boolean) {
+    if (focus) this.moveFocus(this.focusCenter())
+    if (notify) this.callbacks.onSelectionChange(selection)
     this.render()
   }
 
@@ -932,6 +884,7 @@ export class VoxelRenderer {
     const startTarget = this.controls.target.clone()
     const shift = target.clone().sub(startTarget)
     if (shift.lengthSq() < 1e-8) return
+    this.callbacks.onViewStart()
     const endPosition = this.camera.position.clone().add(shift)
     if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
       this.camera.position.copy(endPosition)
@@ -1204,7 +1157,9 @@ export class VoxelRenderer {
   private reportMeshStats() {
     let quads = 0
     for (const count of this.chunkQuads.values()) quads += count
-    this.callbacks.onMeshStats(this.queued.size + this.inFlight, quads)
+    const pending = this.queued.size + this.inFlight
+    this.callbacks.onMeshStats(pending, quads)
+    if (!pending) for (const waiter of this.meshWaiters.splice(0)) waiter.resolve()
   }
 
   private pump() {
@@ -1232,6 +1187,17 @@ export class VoxelRenderer {
     }
     this.pump()
     this.requestPathTraceRebuild()
+    this.render()
+  }
+
+  whenMeshIdle() {
+    if (this.meshFailed) return Promise.reject(new Error('The voxel surface worker stopped.'))
+    if (!this.queued.size && !this.inFlight) return Promise.resolve()
+    return new Promise<void>((resolve, reject) => this.meshWaiters.push({ resolve, reject }))
+  }
+
+  meshState() {
+    return { pending: this.queued.size + this.inFlight, failed: this.meshFailed }
   }
 
   private createMaterials() {
@@ -1298,7 +1264,7 @@ export class VoxelRenderer {
     this.cancelPushPull()
     this.cancelMarquee()
     this.document = document
-    this.setSelection([])
+    this.applySelection({ cells: [], count: 0 }, false)
     this.queued.clear()
     this.versions.clear()
     for (const id of [...this.chunkMeshes.keys()]) this.removeChunk(id)
@@ -1371,7 +1337,7 @@ export class VoxelRenderer {
     if (this.hover.visible) this.showCell(this.keyboardCell)
   }
 
-  async setPbrMap(index: number, map: PbrMap, file: File) {
+  async setPbrMap(index: number, map: PbrMap, file: Blob) {
     const url = URL.createObjectURL(file)
     let texture: THREE.Texture
     try {
@@ -1392,9 +1358,10 @@ export class VoxelRenderer {
     this.render()
   }
 
-  clearPbrMaps(index: number) {
+  clearPbrMaps(index: number, selected?: PbrMap) {
     const material = this.materials[index]
     for (const map of ['map', 'normalMap', 'roughnessMap', 'metalnessMap'] as const) {
+      if (selected && map !== selected) continue
       material[map]?.dispose()
       material[map] = null
     }
@@ -1676,6 +1643,32 @@ export class VoxelRenderer {
     this.render()
   }
 
+  getView(): CameraSnapshot {
+    return {
+      projection: this.camera instanceof THREE.PerspectiveCamera ? 'perspective' : 'orthographic',
+      position: { x: this.camera.position.x, y: this.camera.position.y, z: this.camera.position.z },
+      target: { x: this.controls.target.x, y: this.controls.target.y, z: this.controls.target.z },
+      up: { x: this.camera.up.x, y: this.camera.up.y, z: this.camera.up.z },
+      zoom: this.camera instanceof THREE.OrthographicCamera ? this.camera.zoom : undefined,
+      fov: this.camera instanceof THREE.PerspectiveCamera ? this.camera.fov : undefined,
+      orthographicSpan: this.orthographicSpan,
+      viewport: { width: this.renderer.domElement.width, height: this.renderer.domElement.height },
+    }
+  }
+
+  setView(view: Pick<CameraSnapshot, 'position' | 'target'> & Partial<Pick<CameraSnapshot, 'up' | 'zoom' | 'fov' | 'orthographicSpan'>>) {
+    this.cancelFocusAnimation()
+    this.camera.position.set(view.position.x, view.position.y, view.position.z)
+    this.controls.target.set(view.target.x, view.target.y, view.target.z)
+    if (view.up) this.camera.up.set(view.up.x, view.up.y, view.up.z)
+    if (view.orthographicSpan !== undefined) this.orthographicSpan = view.orthographicSpan
+    if (this.camera instanceof THREE.OrthographicCamera && view.zoom !== undefined) this.camera.zoom = view.zoom
+    if (this.camera instanceof THREE.PerspectiveCamera && view.fov !== undefined) this.camera.fov = view.fov
+    this.resize()
+    this.controls.update()
+    this.render()
+  }
+
   resize() {
     const width = Math.max(1, this.host.clientWidth)
     const height = Math.max(1, this.host.clientHeight)
@@ -1730,7 +1723,10 @@ export class VoxelRenderer {
   }
 
   async capture() {
+    await this.whenMeshIdle()
     this.render()
-    return new Promise<Blob>((resolve, reject) => this.renderer.domElement.toBlob(blob => blob ? resolve(blob) : reject(new Error('Could not capture the viewport.')), 'image/png'))
+    const view = this.getView()
+    const blob = await new Promise<Blob>((resolve, reject) => this.renderer.domElement.toBlob(blob => blob ? resolve(blob) : reject(new Error('Could not capture the viewport.')), 'image/png'))
+    return { blob, view }
   }
 }

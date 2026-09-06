@@ -1,7 +1,10 @@
 import './style.css'
-import { EditSession, History, VoxelDocument, dirtyChunks, moveVoxels, pushPull, resizeVoxelDocument, type Dimensions, type FillShape, type ResizeAnchor, type Vec3 } from './editor'
-import { VoxelRenderer, type AuxiliaryTool, type PaintMode, type PbrMap, type SculptMode, type SelectionMode, type SelectionState, type Tool } from './renderer'
-import { loadProject, saveProject, type ViewSettings } from './storage'
+import { VoxelDocument, type Dimensions, type FillShape, type ResizeAnchor, type Vec3 } from './editor'
+import { SerialCommandQueue, base64ToBytes, bytesToBase64, decodeProjectSnapshot, encodeProjectSnapshot, type RemoteCommand } from './protocol'
+import { connectRemote } from './remote'
+import { VoxelRenderer } from './renderer'
+import { Studio, StudioCommandError, type AuxiliaryTool, type PaintMode, type PbrMap, type SculptMode, type SelectionMode, type SelectionState, type StudioCommand, type StudioOutcome, type Tool } from './studio'
+import { loadProject, saveProjectSnapshot, snapshotProject, type ViewSettings } from './storage'
 import { exportVox, importVox } from './vox'
 
 const DEFAULT_SETTINGS: ViewSettings = {
@@ -50,7 +53,6 @@ const storedToolState: StoredToolState = (() => {
 const isSelectionMode = (value: unknown): value is SelectionMode => typeof value === 'string' && ['point', 'surface', 'texture', 'body'].includes(value)
 const isPaletteColor = (value: unknown): value is number => Number.isInteger(value) && Number(value) > 0 && Number(value) < 256 && Boolean(voxelDocument.palette[Number(value)])
 const defaultActiveColor = voxelDocument.palette[5] ? 5 : Math.max(1, voxelDocument.palette.findIndex((color, index) => index > 0 && Boolean(color)))
-let history = new History()
 let activeTool: Tool = 'select'
 let paintMode: PaintMode = 'paint'
 let sculptMode: SculptMode = 'push'
@@ -65,13 +67,15 @@ let renderMode = false
 let saveTimer: ReturnType<typeof setTimeout> | undefined
 let saveRevision = 0
 let saveState: 'saved' | 'saving' | 'error' = storageError ? 'error' : 'saved'
+let pendingSave = Promise.resolve()
 const storedRecentColors = Array.isArray(storedToolState.recentColors) ? storedToolState.recentColors : [5, 6, 12, 14, 3, 2]
 let recentColors = [...new Set([activeColor, ...storedRecentColors.filter(isPaletteColor)])].slice(0, 6)
 let selection: SelectionState = { cells: [], count: 0 }
-type ClipboardVoxel = Vec3 & { color: number }
-let clipboard: ClipboardVoxel[] = []
-let pendingPaste: { voxels: ClipboardVoxel[]; selectionBefore: Vec3[]; layerId: number } | undefined
-const loadedPbrMaps = new Map<number, Map<PbrMap, string>>()
+let clipboard: (Vec3 & { color: number })[] = []
+let pendingPaste: Studio['pendingPaste']
+const studioController = new Studio(voxelDocument, settings, { selectionMode, activeColor, recentColors })
+const loadedPbrMaps = studioController.loadedPbrMaps
+let renderer!: VoxelRenderer
 
 app.innerHTML = `
   <svg class="icon-sprite" aria-hidden="true">
@@ -374,17 +378,219 @@ function queueSave() {
   saveState = 'saving'
   updateSaveStatus()
   const revision = ++saveRevision
-  saveTimer = setTimeout(async () => {
-    try {
-      await saveProject(voxelDocument, settings)
-      if (revision === saveRevision) { saveState = 'saved'; updateSaveStatus() }
-    } catch {
-      storageError = 'Autosave failed.'
-      saveState = 'error'
-      updateSaveStatus()
-      showToast('Autosave failed. Export a VOX file to keep this model.', 'warning')
+  saveTimer = setTimeout(() => { void persistSave(revision) }, 420)
+}
+
+function persistSave(revision: number) {
+  saveTimer = undefined
+  const snapshot = snapshotProject(voxelDocument, settings)
+  pendingSave = pendingSave.catch(() => {}).then(() => saveProjectSnapshot(snapshot)).then(() => {
+    if (revision === saveRevision) { saveState = 'saved'; updateSaveStatus() }
+  }).catch(error => {
+    storageError = 'Autosave failed.'
+    saveState = 'error'
+    updateSaveStatus()
+    showToast('Autosave failed. Export a VOX file to keep this model.', 'warning')
+    throw error
+  })
+  return pendingSave
+}
+
+async function flushSave() {
+  if (storageError) throw new StudioCommandError('save_failed', storageError)
+  if (saveTimer) clearTimeout(saveTimer)
+  if (saveState === 'saving') await persistSave(saveRevision)
+  else await pendingSave
+}
+
+type CommandSource = 'ui' | 'renderer' | 'remote'
+type CommandEvent = { sequence: number; source: CommandSource; command: RemoteCommand; outcome: StudioOutcome }
+const commandListeners = new Set<(event: CommandEvent) => void>()
+let commandSequence = 0
+
+function syncStudioState() {
+  voxelDocument = studioController.document
+  settings = studioController.settings
+  activeTool = studioController.activeTool
+  paintMode = studioController.paintMode
+  sculptMode = studioController.sculptMode
+  fillShape = studioController.fillShape
+  fillDepth = studioController.fillDepth
+  auxiliaryTool = studioController.auxiliaryTool
+  selectionMode = studioController.selectionMode
+  activeColor = studioController.activeColor
+  recentColors = studioController.recentColors
+  renderMode = studioController.renderMode
+  selection = studioController.selection
+  clipboard = studioController.clipboard
+  pendingPaste = studioController.pendingPaste
+}
+
+function applyStudioEffects(command: RemoteCommand, outcome: StudioOutcome, source: CommandSource) {
+  const effects = outcome.effects
+  syncStudioState()
+  if (effects.documentReplaced) {
+    renderer.setDocument(voxelDocument, effects.preserveMaterials)
+    renderer.setActiveColor(activeColor)
+  } else {
+    if (effects.dirtyChunks) renderer.markDirty(effects.dirtyChunks)
+    if (effects.paletteChanged) renderer.updatePalette()
+    for (const index of effects.materialChanged ?? []) renderer.updatePaletteMaterial(index)
+  }
+  if (effects.settingsChanged) renderer.setSettings(settings)
+  if (effects.activeColorChanged) renderer.setActiveColor(activeColor)
+  if (effects.selectionChanged && !(source === 'renderer' && command.type === 'selection.set') && !effects.documentReplaced) renderer.applySelection(selection, effects.selectionFocus)
+  if (command.type === 'tool.set' || command.type === 'clipboard.paste.begin') {
+    studio.dataset.tool = activeTool
+    document.querySelector('#context-title')!.textContent = toolCopy[activeTool][0]
+    renderer.setTool(activeTool)
+    renderer.setAuxiliary(auxiliaryTool)
+  }
+  if (command.type === 'tool.paintMode') {
+    document.querySelector('#context-title')!.textContent = toolCopy[activeTool][0]
+    renderer.setPaintMode(paintMode)
+    renderer.setAuxiliary(auxiliaryTool)
+  }
+  if (command.type === 'tool.sculptMode' || command.type === 'clipboard.paste.begin') renderer.setSculptMode(sculptMode)
+  if (command.type === 'tool.selectionMode') renderer.setSelectionMode(selectionMode)
+  if (command.type === 'tool.auxiliary') renderer.setAuxiliary(auxiliaryTool)
+  if (command.type === 'tool.auxiliary') document.querySelector('#context-title')!.textContent = auxiliaryTool ? 'Eyedropper' : toolCopy[activeTool][0]
+  if (command.type === 'tool.fill') { renderer.setFillShape(fillShape); renderer.setFillDepth(fillDepth) }
+  if (command.type === 'renderMode.set') {
+    studio.dataset.renderMode = String(renderMode)
+    document.querySelectorAll<HTMLElement>('.tool-dock, .context-dock').forEach(element => { element.inert = renderMode })
+    document.querySelector<HTMLButtonElement>('[data-action="render"]')!.setAttribute('aria-pressed', String(renderMode))
+    renderer.setRenderMode(renderMode)
+  }
+  if (effects.preferencesChanged) persistToolState()
+  if (effects.factsChanged || effects.documentReplaced) renderDocumentFacts()
+  if (effects.paletteChanged || effects.activeColorChanged || effects.documentReplaced) {
+    renderPalette()
+    renderPaletteMaterial()
+  } else if (effects.materialChanged && source === 'remote') {
+    renderPalette()
+    renderPaletteMaterial()
+  }
+  if (effects.settingsChanged) renderSettings()
+  if (effects.toolsChanged || effects.selectionChanged) renderToolControls()
+  if (effects.save) queueSave()
+  if (effects.announcement) announce(effects.announcement)
+}
+
+function executeStudioCommand(command: StudioCommand, source: CommandSource = 'ui') {
+  const outcome = studioController.execute(command)
+  applyStudioEffects(command, outcome, source)
+  emitCommandEvent(command, source, outcome)
+  return outcome
+}
+
+function emitCommandEvent(command: RemoteCommand, source: CommandSource, outcome: StudioOutcome) {
+  const event = { sequence: ++commandSequence, source, command, outcome }
+  for (const listener of commandListeners) listener(event)
+}
+
+type QueuedCommand = { command: RemoteCommand; source: CommandSource; ifRevision?: number; viewVersion?: number }
+type ApplicationResult = { changed: boolean; revision: number; result: unknown }
+let rendererViewVersion = 0
+
+async function executeApplicationCommand({ command, source, ifRevision, viewVersion }: QueuedCommand): Promise<ApplicationResult> {
+  if (ifRevision !== undefined && ifRevision !== studioController.revision) throw new StudioCommandError('revision_conflict', `Expected revision ${ifRevision}, current revision is ${studioController.revision}.`, { expected: ifRevision, actual: studioController.revision })
+  switch (command.type) {
+    case 'state.get':
+      return { changed: false, revision: studioController.revision, result: { ...studioController.stateSnapshot(), view: renderer.getView(), mesh: renderer.meshState(), saveState } }
+    case 'composition.get': {
+      const { type: _type, ...query } = command
+      return { changed: false, revision: studioController.revision, result: studioController.composition(query) }
     }
-  }, 420)
+    case 'project.snapshot.get':
+      return { changed: false, revision: studioController.revision, result: encodeProjectSnapshot(voxelDocument, settings) }
+    case 'project.snapshot.replace': {
+      if (voxelDocument.voxelCount && !command.allowReplace) throw new StudioCommandError('confirmation_required', 'Replacing the project requires allowReplace.', { voxelCount: voxelDocument.voxelCount })
+      const decoded = decodeProjectSnapshot(command.snapshot)
+      const outcome = studioController.replaceDocument(decoded.document, false, {}, decoded.settings)
+      applyStudioEffects(command, outcome, source)
+      emitCommandEvent(command, source, outcome)
+      return { changed: true, revision: outcome.revision, result: { voxelCount: decoded.document.voxelCount } }
+    }
+    case 'view.get':
+      return { changed: false, revision: studioController.revision, result: renderer.getView() }
+    case 'view.set': {
+      if (source !== 'renderer' || viewVersion === rendererViewVersion) renderer.setView(command.view)
+      const outcome = studioController.recordChange({ view: renderer.getView() })
+      emitCommandEvent(command, source, outcome)
+      return { changed: true, revision: outcome.revision, result: outcome.result }
+    }
+    case 'view.frame': {
+      renderer.frameModel()
+      const outcome = studioController.recordChange({ view: renderer.getView() })
+      emitCommandEvent(command, source, outcome)
+      return { changed: true, revision: outcome.revision, result: outcome.result }
+    }
+    case 'view.capture': {
+      const { blob, view } = await renderer.capture()
+      return { changed: false, revision: studioController.revision, result: { mime: 'image/png', dataBase64: bytesToBase64(new Uint8Array(await blob.arrayBuffer())), view, revision: studioController.revision } }
+    }
+    case 'io.vox.import': {
+      if (voxelDocument.voxelCount && !command.allowReplace) throw new StudioCommandError('confirmation_required', 'Importing a VOX file requires allowReplace.', { voxelCount: voxelDocument.voxelCount })
+      const bytes = base64ToBytes(command.dataBase64)
+      const imported = importVox(bytes.buffer, command.name)
+      const outcome = studioController.replaceDocument(imported.document)
+      applyStudioEffects(command, outcome, source)
+      emitCommandEvent(command, source, outcome)
+      return { changed: true, revision: outcome.revision, result: { voxelCount: imported.document.voxelCount, warning: imported.warning ?? null } }
+    }
+    case 'io.vox.export':
+      return { changed: false, revision: studioController.revision, result: { mime: 'application/octet-stream', filename: filename('vox'), dataBase64: bytesToBase64(new Uint8Array(exportVox(voxelDocument))) } }
+    case 'material.map.set': {
+      const bytes = base64ToBytes(command.dataBase64)
+      await renderer.setPbrMap(command.index, command.map, new Blob([bytes], { type: command.mime }))
+      const maps = loadedPbrMaps.get(command.index) ?? new Map<PbrMap, string>()
+      maps.set(command.map, command.name)
+      loadedPbrMaps.set(command.index, maps)
+      if (activeColor === command.index) renderPaletteMaterial()
+      const outcome = studioController.recordChange({ index: command.index, map: command.map }, { announcement: `${command.name} loaded for color ${command.index}` })
+      applyStudioEffects(command, outcome, source)
+      emitCommandEvent(command, source, outcome)
+      return { changed: true, revision: outcome.revision, result: outcome.result }
+    }
+    case 'material.map.clear': {
+      renderer.clearPbrMaps(command.index, command.map)
+      const maps = loadedPbrMaps.get(command.index)
+      if (command.map) maps?.delete(command.map)
+      else loadedPbrMaps.delete(command.index)
+      if (maps && !maps.size) loadedPbrMaps.delete(command.index)
+      if (activeColor === command.index) renderPaletteMaterial()
+      const outcome = studioController.recordChange({ index: command.index, map: command.map ?? null }, { announcement: `PBR texture ${command.map ? 'map' : 'maps'} cleared for color ${command.index}` })
+      applyStudioEffects(command, outcome, source)
+      emitCommandEvent(command, source, outcome)
+      return { changed: true, revision: outcome.revision, result: outcome.result }
+    }
+    case 'save.flush':
+      await flushSave()
+      return { changed: false, revision: studioController.revision, result: { saveState } }
+    default: {
+      const outcome = executeStudioCommand(command, source)
+      return { changed: outcome.changed, revision: outcome.revision, result: { changed: outcome.changed, ...outcome.result } }
+    }
+  }
+}
+
+const applicationQueue = new SerialCommandQueue<QueuedCommand, ApplicationResult>(executeApplicationCommand)
+
+function dispatchApplicationCommand(command: RemoteCommand, source: CommandSource = 'ui', ifRevision?: number, viewVersion?: number) {
+  return applicationQueue.dispatch({ command, source, ifRevision, viewVersion })
+}
+
+function commandFailed(error: unknown) {
+  const message = error instanceof Error ? error.message : 'The command could not be completed.'
+  showToast(message, error instanceof StudioCommandError && error.code === 'invalid_state' ? 'normal' : 'warning')
+}
+
+function runStudioCommand(command: StudioCommand, source: CommandSource = 'ui') {
+  return dispatchApplicationCommand(command, source).catch(error => {
+    commandFailed(error)
+    return undefined
+  })
 }
 
 function persistToolState() {
@@ -408,14 +614,9 @@ function paletteIndices(filter: PaletteFilter = paletteFilter) {
 }
 
 function selectColor(index: number) {
-  if (!voxelDocument.palette[index]) return
-  activeColor = index
-  recentColors = [index, ...recentColors.filter(color => color !== index)].slice(0, 6)
-  persistToolState()
-  renderer.setActiveColor(index)
-  renderPalette()
-  renderPaletteMaterial()
-  announce(`Color ${index}, ${colorHex(index)}`)
+  void runStudioCommand({ type: 'palette.activate', index }).then(outcome => {
+    if (outcome?.changed) announce(`Color ${index}, ${colorHex(index)}`)
+  })
 }
 
 function materialSummary(index: number) {
@@ -612,50 +813,24 @@ for (const trigger of document.querySelectorAll<HTMLButtonElement>('.tool-dock b
 }
 
 function setTool(tool: Tool) {
-  if (pendingPaste && tool !== 'sculpt') cancelPendingPaste()
   closePanel()
-  activeTool = tool
-  auxiliaryTool = undefined
-  studio.dataset.tool = tool
-  renderer.setAuxiliary()
-  renderer.setTool(tool)
-  renderer.setPaintMode(paintMode)
-  renderer.setSculptMode(sculptMode)
-  document.querySelector('#context-title')!.textContent = toolCopy[tool][0]
-  renderToolControls()
-  announce(`${toolCopy[tool][0]} tool selected`)
+  runStudioCommand({ type: 'tool.set', tool })
 }
 
 function setPaintMode(mode: PaintMode) {
-  paintMode = mode
-  auxiliaryTool = undefined
-  renderer.setAuxiliary()
-  renderer.setPaintMode(mode)
-  document.querySelector('#context-title')!.textContent = toolCopy[activeTool][0]
-  renderToolControls()
-  announce(`${paintLabels[mode]} operation selected`)
+  runStudioCommand({ type: 'tool.paintMode', mode })
 }
 
 function setSculptMode(mode: SculptMode) {
-  if (pendingPaste && mode !== 'move') cancelPendingPaste()
-  sculptMode = mode
-  renderer.setSculptMode(mode)
-  renderToolControls()
-  announce(`${sculptCopy[mode][0]} operation selected`)
+  runStudioCommand({ type: 'tool.sculptMode', mode })
 }
 
 function setFillShape(shape: FillShape) {
-  fillShape = shape
-  renderer.setFillShape(shape)
-  renderToolControls()
-  announce(`${shape} volume shape selected`)
+  runStudioCommand({ type: 'tool.fill', shape })
 }
 
 function setAuxiliary(tool?: AuxiliaryTool) {
-  auxiliaryTool = auxiliaryTool === tool ? undefined : tool
-  renderer.setAuxiliary(auxiliaryTool)
-  document.querySelector('#context-title')!.textContent = auxiliaryTool ? 'Eyedropper' : toolCopy[activeTool][0]
-  renderToolControls()
+  runStudioCommand({ type: 'tool.auxiliary', tool })
 }
 
 function clearShortcutPrefix() {
@@ -677,11 +852,7 @@ function runShortcutChord(prefix: 'q' | 'w' | 's', key: string) {
   if (prefix === 'q') {
     const mode = ({ 1: 'point', 2: 'surface', 3: 'texture', 4: 'body' } as const)[key as '1' | '2' | '3' | '4']
     if (!mode) return false
-    selectionMode = mode
-    renderer.setSelectionMode(mode)
-    persistToolState()
-    renderToolControls()
-    announce(`${selectionLabels[mode]} selection mode`)
+    runStudioCommand({ type: 'tool.selectionMode', mode })
     return true
   }
   if (prefix === 'w') {
@@ -706,8 +877,8 @@ function renderDocumentFacts() {
   document.querySelector('#voxel-count')!.textContent = `${formatNumber(voxelDocument.voxelCount)} ${voxelDocument.voxelCount === 1 ? 'voxel' : 'voxels'}`
   document.querySelector('#panel-voxel-count')!.textContent = formatNumber(voxelDocument.voxelCount)
   document.querySelector('#chunk-count')!.textContent = formatNumber(voxelDocument.chunks.size)
-  document.querySelector<HTMLButtonElement>('[data-action="undo"]')!.disabled = !history.canUndo
-  document.querySelector<HTMLButtonElement>('[data-action="redo"]')!.disabled = !history.canRedo
+  document.querySelector<HTMLButtonElement>('[data-action="undo"]')!.disabled = !studioController.canUndo
+  document.querySelector<HTMLButtonElement>('[data-action="redo"]')!.disabled = !studioController.canRedo
   renderLayers()
 }
 
@@ -753,13 +924,6 @@ function renderPaletteMaterial() {
   renderPbrMapCount()
 }
 
-function canEditActiveLayer() {
-  const layer = voxelDocument.activeLayer
-  if (layer.visible && !layer.locked) return true
-  showToast(`${layer.name} is ${layer.locked ? 'locked' : 'hidden'}.`, 'warning')
-  return false
-}
-
 async function loadPbrMap(input: HTMLInputElement) {
   const file = input.files?.[0]
   const map = input.dataset.pbrMap as PbrMap
@@ -769,12 +933,7 @@ async function loadPbrMap(input: HTMLInputElement) {
   input.disabled = true
   label.textContent = 'Loading...'
   try {
-    await renderer.setPbrMap(color, map, file)
-    const maps = loadedPbrMaps.get(color) ?? new Map<PbrMap, string>()
-    maps.set(map, file.name)
-    loadedPbrMaps.set(color, maps)
-    if (activeColor === color) renderPaletteMaterial()
-    announce(`${file.name} loaded for color ${color}`)
+    await dispatchApplicationCommand({ type: 'material.map.set', index: color, map, name: file.name, mime: file.type || 'application/octet-stream', dataBase64: bytesToBase64(new Uint8Array(await file.arrayBuffer())) })
   } catch {
     if (activeColor === color) renderPaletteMaterial()
     showToast(`${file.name} could not be decoded as a texture.`, 'warning')
@@ -783,151 +942,67 @@ async function loadPbrMap(input: HTMLInputElement) {
   }
 }
 
-function fillSelection() {
-  if (!selection.count) { showToast('Select voxels before painting.'); return }
-  if (!canEditActiveLayer()) return
+function fillSelection(cells: Vec3[]) {
+  if (!cells.length) { showToast('Select voxels before painting.'); return }
   dismissGuide()
-  const session = new EditSession(voxelDocument)
-  for (const cell of selection.cells) session.set(cell.x, cell.y, cell.z, activeColor)
-  const command = session.commit()
-  history.push(command, selection.cells, selection.cells, voxelDocument.activeLayerId)
-  if (!command) { announce('Selection already uses the active color'); return }
-  renderer.markDirty(dirtyChunks(voxelDocument, command.changes.map(change => change.id)))
-  renderDocumentFacts()
-  queueSave()
-  announce(`Painted ${formatNumber(selection.count)} ${selection.count === 1 ? 'voxel' : 'voxels'}`)
+  void runStudioCommand({ type: 'edit.paint', cells }).then(outcome => {
+    if (outcome && !outcome.changed) announce('Selection already uses the active color')
+  })
 }
 
-function eraseSelection() {
-  if (!selection.count) return
-  if (!canEditActiveLayer()) return
+function eraseSelection(cells: Vec3[]) {
+  if (!cells.length) return
   dismissGuide()
-  const count = selection.count
-  const session = new EditSession(voxelDocument)
-  for (const cell of selection.cells) session.set(cell.x, cell.y, cell.z, 0)
-  const command = session.commit()
-  history.push(command, selection.cells, [], voxelDocument.activeLayerId)
-  if (!command) return
-  renderer.markDirty(dirtyChunks(voxelDocument, command.changes.map(change => change.id)))
-  renderer.clearSelection()
-  renderDocumentFacts()
-  queueSave()
-  announce(`Erased ${formatNumber(count)} ${count === 1 ? 'voxel' : 'voxels'}`)
+  runStudioCommand({ type: 'edit.erase', cells })
 }
 
-function copySelection(report = true) {
-  if (!selection.count || selection.floating) { showToast('Select placed voxels before copying.'); return false }
-  const copied: ClipboardVoxel[] = []
-  for (const cell of selection.cells) {
-    const color = voxelDocument.getLayerVoxel(cell.x, cell.y, cell.z)
-    if (color) copied.push({ ...cell, color })
-  }
-  if (!copied.length) return false
-  clipboard = copied
-  renderToolControls()
-  if (report) announce(`Copied ${formatNumber(copied.length)} ${copied.length === 1 ? 'voxel' : 'voxels'}`)
-  return true
+function copySelection() {
+  void runStudioCommand({ type: 'clipboard.copy' })
 }
 
 function cutSelection() {
-  const count = selection.count
-  if (!canEditActiveLayer() || !copySelection(false)) return
-  eraseSelection()
-  announce(`Cut ${formatNumber(count)} ${count === 1 ? 'voxel' : 'voxels'}`)
+  runStudioCommand({ type: 'clipboard.cut' })
 }
 
 function cancelPendingPaste() {
-  if (!pendingPaste) return
-  pendingPaste = undefined
-  renderer.clearSelection()
+  runStudioCommand({ type: 'clipboard.paste.cancel' })
 }
 
 function pasteSelection() {
-  if (pendingPaste) { showToast('Place or cancel the current paste first.'); return }
-  if (!clipboard.length) { showToast('Copy or cut voxels before pasting.'); return }
-  if (!canEditActiveLayer()) return
-  const voxels = clipboard.filter(cell => voxelDocument.contains(cell.x, cell.y, cell.z)).map(cell => ({ ...cell }))
-  if (!voxels.length) { showToast('The copied voxels are outside this canvas.', 'warning'); return }
-  pendingPaste = { voxels, selectionBefore: selection.cells.map(cell => ({ ...cell })), layerId: voxelDocument.activeLayerId }
-  setTool('sculpt')
-  setSculptMode('move')
-  renderer.setFloatingSelection(voxels)
-  closeToolPopups()
-  renderer.focusViewport()
-  announce(`Pasted ${formatNumber(voxels.length)} ${voxels.length === 1 ? 'voxel' : 'voxels'}; drag to place`)
+  closePanel()
+  void runStudioCommand({ type: 'clipboard.paste.begin' }).then(outcome => {
+    if (!outcome?.changed) return
+    studio.dataset.tool = activeTool
+    document.querySelector('#context-title')!.textContent = toolCopy[activeTool][0]
+    closeToolPopups()
+    renderer.focusViewport()
+  })
 }
 
-let renderer!: VoxelRenderer
-
 function activateLayer(id: number) {
-  const layer = voxelDocument.getLayer(id)
-  if (!layer) return
-  cancelPendingPaste()
-  voxelDocument.setActiveLayer(id)
-  renderer.clearSelection()
-  renderDocumentFacts()
-  renderToolControls()
-  queueSave()
-  announce(`${layer.name} active`)
+  runStudioCommand({ type: 'layer.activate', id })
 }
 
 renderer = new VoxelRenderer(document.querySelector('#viewport')!, voxelDocument, settings, {
   onSelectionChange(next) {
-    if (pendingPaste && !next.floating) pendingPaste = undefined
-    selection = next
+    runStudioCommand({ type: 'selection.set', cells: next.cells, floating: next.floating }, 'renderer')
     if (next.count) dismissGuide()
-    renderToolControls()
-    announce(next.count ? `${formatNumber(next.count)} ${next.count === 1 ? 'voxel' : 'voxels'} selected` : 'Selection cleared')
   },
   onPaint: fillSelection,
   onErase: eraseSelection,
   onFillCommit(min, max, normal, shape) {
-    if (!canEditActiveLayer()) return
     dismissGuide()
     const axis = (['x', 'y', 'z'] as const).find(name => normal[name] !== 0) ?? 'y'
-    const session = new EditSession(voxelDocument)
-    session.fillShape(min, max, activeColor, shape, axis)
-    const command = session.commit()
-    history.push(command, selection.cells, selection.cells, voxelDocument.activeLayerId)
-    if (!command) { announce('Volume made no changes'); return }
-    renderer.markDirty(dirtyChunks(voxelDocument, command.changes.map(change => change.id)))
-    renderDocumentFacts()
-    queueSave()
-    announce(`${shape} volume filled`)
+    void runStudioCommand({ type: 'edit.fill', min, max, shape, axis }, 'renderer').then(outcome => {
+      if (outcome && !outcome.changed) announce('Volume made no changes')
+    })
   },
-  onPushPullCommit(cells, normal, distance, move) {
-    if (!canEditActiveLayer()) return
-    if (pendingPaste && move) {
-      const paste = pendingPaste
-      pendingPaste = undefined
-      const session = new EditSession(voxelDocument)
-      const nextSelection = paste.voxels.map(voxel => ({
-        x: voxel.x + normal.x * distance,
-        y: voxel.y + normal.y * distance,
-        z: voxel.z + normal.z * distance,
-      }))
-      paste.voxels.forEach((voxel, index) => session.set(nextSelection[index].x, nextSelection[index].y, nextSelection[index].z, voxel.color))
-      const command = session.commit()
-      history.push(command, paste.selectionBefore, nextSelection, paste.layerId)
-      if (command) {
-        renderer.markDirty(dirtyChunks(voxelDocument, command.changes.map(change => change.id)))
-        renderDocumentFacts()
-        queueSave()
-      }
-      announce(`Placed ${formatNumber(nextSelection.length)} ${nextSelection.length === 1 ? 'voxel' : 'voxels'}`)
+  onPushPullCommit(cells, normal, distance, move, floating) {
+    if (floating && move) {
+      runStudioCommand({ type: 'clipboard.paste.place', offset: { x: normal.x * distance, y: normal.y * distance, z: normal.z * distance } }, 'renderer')
       return
     }
-    const session = new EditSession(voxelDocument)
-    const amount = move ? moveVoxels(voxelDocument, session, cells, normal, distance) : pushPull(voxelDocument, session, cells, normal, distance)
-    const command = session.commit()
-    const nextSelection = cells.map(cell => ({ x: cell.x + normal.x * amount, y: cell.y + normal.y * amount, z: cell.z + normal.z * amount }))
-      .filter(cell => voxelDocument.getVisibleVoxelLayer(cell.x, cell.y, cell.z) === voxelDocument.activeLayerId)
-    history.push(command, selection.cells, nextSelection, voxelDocument.activeLayerId)
-    if (!command) return
-    renderer.markDirty(dirtyChunks(voxelDocument, command.changes.map(change => change.id)))
-    renderDocumentFacts()
-    queueSave()
-    announce(`${move ? 'Moved' : amount > 0 ? 'Pulled' : 'Pushed'} ${Math.abs(amount)} ${Math.abs(amount) === 1 ? 'voxel' : 'voxels'}`)
+    runStudioCommand({ type: move ? 'edit.move' : 'edit.pushPull', cells, normal, distance }, 'renderer')
   },
   onPushPullPreview(cells, distance, move) {
     if (cells === undefined) { renderToolControls(); return }
@@ -942,6 +1017,12 @@ renderer = new VoxelRenderer(document.querySelector('#viewport')!, voxelDocument
     setAuxiliary()
   },
   onLayerSelect: activateLayer,
+  onViewStart() {
+    rendererViewVersion++
+  },
+  onViewChange(view) {
+    void dispatchApplicationCommand({ type: 'view.set', view }, 'renderer', undefined, rendererViewVersion).catch(commandFailed)
+  },
   onHover(cell) {
     document.querySelector('#coordinate-status')!.textContent = cell ? `X ${cell.x}   Y ${cell.y}   Z ${cell.z}` : 'X --   Y --   Z --'
   },
@@ -960,25 +1041,6 @@ renderer = new VoxelRenderer(document.querySelector('#viewport')!, voxelDocument
     showToast(message, 'warning')
   },
 })
-
-function replaceDocument(next: VoxelDocument, preserveMaterials = false) {
-  pendingPaste = undefined
-  clipboard = []
-  voxelDocument = next
-  history = new History()
-  if (!preserveMaterials) {
-    activeColor = paletteIndices('all')[0] ?? 1
-    recentColors = [activeColor]
-    loadedPbrMaps.clear()
-  }
-  persistToolState()
-  renderer.setDocument(voxelDocument, preserveMaterials)
-  renderer.setActiveColor(activeColor)
-  renderPalette()
-  renderPaletteMaterial()
-  renderDocumentFacts()
-  queueSave()
-}
 
 function openPanel(tab = 'model') {
   if (layerPanel.matches(':popover-open')) layerPanel.hidePopover()
@@ -1013,41 +1075,25 @@ function filename(extension: string) {
 }
 
 function undo() {
-  if (pendingPaste) { cancelPendingPaste(); announce('Paste canceled'); return }
-  const result = history.undo(voxelDocument)
-  if (!result) return
-  if (result.layerId !== undefined) voxelDocument.setActiveLayer(result.layerId)
-  renderer.markDirty(dirtyChunks(voxelDocument, result.ids))
-  renderer.setSelection(result.selection)
-  renderDocumentFacts()
-  queueSave()
-  announce('Undo')
+  if (pendingPaste) { cancelPendingPaste(); return }
+  runStudioCommand({ type: 'history.undo' })
 }
 
 function redo() {
-  if (pendingPaste) { cancelPendingPaste(); announce('Paste canceled'); return }
-  const result = history.redo(voxelDocument)
-  if (!result) return
-  if (result.layerId !== undefined) voxelDocument.setActiveLayer(result.layerId)
-  renderer.markDirty(dirtyChunks(voxelDocument, result.ids))
-  renderer.setSelection(result.selection)
-  renderDocumentFacts()
-  queueSave()
-  announce('Redo')
+  if (pendingPaste) { cancelPendingPaste(); return }
+  runStudioCommand({ type: 'history.redo' })
 }
 
 function toggleRenderMode() {
-  if (!renderMode) cancelPendingPaste()
-  renderMode = !renderMode
+  const next = !renderMode
   const button = document.querySelector<HTMLButtonElement>('[data-action="render"]')!
   const focusFromTool = toolPopups.some(popup => popup.contains(document.activeElement)) || Boolean((document.activeElement as HTMLElement | null)?.closest('.tool-dock'))
-  if (renderMode) { clearShortcutPrefix(); closeToolPopups(); if (focusFromTool) button.focus({ preventScroll: true }) }
+  if (next) { clearShortcutPrefix(); closeToolPopups(); if (focusFromTool) button.focus({ preventScroll: true }) }
+  runStudioCommand({ type: 'renderMode.set', enabled: next })
   studio.dataset.renderMode = String(renderMode)
   document.querySelectorAll<HTMLElement>('.tool-dock, .context-dock').forEach(element => { element.inert = renderMode })
-  renderer.setRenderMode(renderMode)
   button.setAttribute('aria-pressed', String(renderMode))
   if (renderMode && !matchMedia('(max-width: 840px)').matches) openPanel('render')
-  announce(renderMode ? 'Render mode on' : 'Render mode off')
 }
 
 document.addEventListener('click', async event => {
@@ -1079,12 +1125,7 @@ document.addEventListener('click', async event => {
   if (layerButton) {
     const action = layerButton.dataset.layerAction
     if (action === 'add') {
-      const layer = voxelDocument.createLayer()
-      renderer.clearSelection()
-      renderDocumentFacts()
-      renderToolControls()
-      queueSave()
-      announce(`${layer.name} created`)
+      runStudioCommand({ type: 'layer.create' })
       return
     }
     const id = Number(layerButton.closest<HTMLElement>('[data-layer-id]')?.dataset.layerId)
@@ -1094,41 +1135,22 @@ document.addEventListener('click', async event => {
       activateLayer(id)
     }
     if (action === 'visibility') {
-      layer.visible = !layer.visible
-      renderer.setSelection(selection.cells)
-      renderer.markDirty(dirtyChunks(voxelDocument, voxelDocument.chunks.keys()))
-      renderDocumentFacts()
-      queueSave()
-      announce(`${layer.name} ${layer.visible ? 'shown' : 'hidden'}`)
+      runStudioCommand({ type: 'layer.visibility', id, visible: !layer.visible })
     }
     if (action === 'lock') {
-      layer.locked = !layer.locked
-      renderDocumentFacts()
-      queueSave()
-      announce(`${layer.name} ${layer.locked ? 'locked' : 'unlocked'}`)
+      runStudioCommand({ type: 'layer.lock', id, locked: !layer.locked })
     }
     if (action === 'delete') {
       const count = voxelDocument.layerVoxelCount(id)
       if (count && !confirm(`Delete ${layer.name} and its ${formatNumber(count)} voxels?`)) return
-      const ids = [...voxelDocument.chunks.keys()]
-      voxelDocument.deleteLayer(id)
-      history.clear()
-      renderer.clearSelection()
-      renderer.markDirty(dirtyChunks(voxelDocument, ids))
-      renderDocumentFacts()
-      renderToolControls()
-      queueSave()
-      announce(`${layer.name} deleted`)
+      runStudioCommand({ type: 'layer.delete', id, allowNonEmpty: true })
     }
     return
   }
   const selectionButton = target.closest<HTMLButtonElement>('[data-selection-mode]')
   if (selectionButton) {
     if (activeTool !== 'select') setTool('select')
-    selectionMode = selectionButton.dataset.selectionMode as SelectionMode
-    renderer.setSelectionMode(selectionMode)
-    persistToolState()
-    renderToolControls()
+    runStudioCommand({ type: 'tool.selectionMode', mode: selectionButton.dataset.selectionMode as SelectionMode })
     selectionButton.closest<HTMLElement>('[popover]')?.hidePopover()
     announce(`${selectionLabels[selectionMode]} selection mode`)
     return
@@ -1179,7 +1201,7 @@ document.addEventListener('click', async event => {
   const action = button.dataset.action
   if (action === 'undo') undo()
   if (action === 'redo') redo()
-  if (action === 'frame') renderer.frameModel()
+  if (action === 'frame') void dispatchApplicationCommand({ type: 'view.frame' }).catch(commandFailed)
   if (action === 'render') toggleRenderMode()
   if (action === 'panel') stagePanel.dataset.open ? closePanel() : openPanel('model')
   if (action === 'close-panel') closePanel()
@@ -1189,49 +1211,44 @@ document.addEventListener('click', async event => {
   }
   if (action === 'dismiss-guide') dismissGuide()
   if (action === 'clear-pbr') {
-    renderer.clearPbrMaps(activeColor)
-    loadedPbrMaps.delete(activeColor)
-    renderPaletteMaterial()
-    announce(`PBR texture maps cleared for color ${activeColor}`)
+    void dispatchApplicationCommand({ type: 'material.map.clear', index: activeColor }).catch(commandFailed)
   }
   if (action === 'new') {
     if (voxelDocument.voxelCount && !confirm('Clear this model and start a new document? Your autosave will be replaced.')) return
-    replaceDocument(new VoxelDocument(voxelDocument.dimensions))
+    runStudioCommand({ type: 'document.new', dimensions: voxelDocument.dimensions })
     closePanel()
     showToast('New document ready.')
   }
   if (action === 'import') fileInput.click()
   if (action === 'export') {
-    try { download(exportVox(voxelDocument), filename('vox'), 'application/octet-stream'); showToast('VOX file exported.') }
+    try {
+      const response = await dispatchApplicationCommand({ type: 'io.vox.export' })
+      const result = response.result as { dataBase64: string; filename: string; mime: string }
+      download(base64ToBytes(result.dataBase64), result.filename, result.mime)
+      showToast('VOX file exported.')
+    }
     catch { showToast('The VOX file could not be created.', 'warning') }
   }
   if (action === 'capture') {
     button.disabled = true
-    try { download(await renderer.capture(), filename('png'), 'image/png'); showToast('PNG captured.') }
+    try {
+      const response = await dispatchApplicationCommand({ type: 'view.capture' })
+      const result = response.result as { dataBase64: string; mime: string }
+      download(base64ToBytes(result.dataBase64), filename('png'), result.mime)
+      showToast('PNG captured.')
+    }
     catch { showToast('The viewport could not be captured.', 'warning') }
     finally { button.disabled = false }
   }
   if (action === 'new-swatch') {
-    const free = Array.from({ length: 255 }, (_, index) => index + 1).find(index => !voxelDocument.palette[index])
-    if (!free) { showToast('The 255-color palette is full.', 'warning'); return }
-    voxelDocument.palette[free] = voxelDocument.palette[activeColor]
-    voxelDocument.materials[free] = { ...voxelDocument.materials[activeColor], name: `${voxelDocument.materials[activeColor].name} copy`.slice(0, 40) }
-    activeColor = free
-    recentColors = [free, ...recentColors].slice(0, 6)
-    persistToolState()
-    renderer.updatePalette()
-    renderer.updatePaletteMaterial(free)
-    renderPalette()
-    renderPaletteMaterial()
-    queueSave()
+    runStudioCommand({ type: 'palette.duplicate' })
   }
   document.querySelector<HTMLDetailsElement>('#project-menu')!.open = false
 })
 
 projectName.value = voxelDocument.name
 projectName.addEventListener('input', () => {
-  voxelDocument.name = projectName.value.trim() || 'Untitled'
-  queueSave()
+  runStudioCommand({ type: 'document.rename', name: projectName.value })
 })
 
 fileInput.addEventListener('change', async () => {
@@ -1240,44 +1257,45 @@ fileInput.addEventListener('change', async () => {
   if (!file) return
   if (voxelDocument.voxelCount && !confirm('Replace the current model with this VOX file?')) return
   try {
-    const imported = importVox(await file.arrayBuffer(), file.name)
-    replaceDocument(imported.document)
+    const response = await dispatchApplicationCommand({ type: 'io.vox.import', dataBase64: bytesToBase64(new Uint8Array(await file.arrayBuffer())), name: file.name, allowReplace: true })
+    const imported = response.result as { voxelCount: number; warning: string | null }
     closePanel()
-    showToast(imported.warning ?? `Imported ${formatNumber(imported.document.voxelCount)} voxels.`, imported.warning ? 'warning' : 'normal')
+    showToast(imported.warning ?? `Imported ${formatNumber(imported.voxelCount)} voxels.`, imported.warning ? 'warning' : 'normal')
   } catch (error) {
     showToast(error instanceof Error ? error.message : 'This VOX file could not be imported.', 'warning')
   }
 })
 
-resizeForm.addEventListener('submit', event => {
+resizeForm.addEventListener('submit', async event => {
   event.preventDefault()
   const data = new FormData(resizeForm)
   const dimensions: Dimensions = { x: Number(data.get('x')), y: Number(data.get('y')), z: Number(data.get('z')) }
   const anchor: ResizeAnchor = data.get('anchor') === 'origin' ? 'origin' : 'center'
-  const { document: resized, cropped } = resizeVoxelDocument(voxelDocument, dimensions, anchor)
-  if (cropped && !confirm(`Resize and remove ${formatNumber(cropped)} voxels outside the new bounds?`)) return
-  replaceDocument(resized, true)
-  showToast(`Canvas resized to ${resized.dimensions.x} × ${resized.dimensions.y} × ${resized.dimensions.z} from ${anchor}.`)
+  const command = { type: 'document.resize' as const, dimensions, anchor }
+  try {
+    await dispatchApplicationCommand(command)
+  } catch (error) {
+    if (!(error instanceof StudioCommandError) || error.code !== 'confirmation_required') { commandFailed(error); return }
+    const cropped = Number(error.details?.cropped ?? 0)
+    if (!confirm(`Resize and remove ${formatNumber(cropped)} voxels outside the new bounds?`)) return
+    try { await dispatchApplicationCommand({ ...command, allowCrop: true }, 'ui', Number(error.details?.revision)) }
+    catch (retryError) { commandFailed(retryError); return }
+  }
+  showToast(`Canvas resized to ${dimensions.x} × ${dimensions.y} × ${dimensions.z} from ${anchor}.`)
 })
 
 function updateActiveColor(value: string) {
   if (!/^#[0-9a-f]{6}$/i.test(value)) { showToast('Enter a six-digit hex color such as #2F66DB.', 'warning'); renderPalette(); return }
-  voxelDocument.palette[activeColor] = Number.parseInt(value.slice(1), 16)
-  renderer.updatePalette()
-  renderPalette()
-  queueSave()
+  runStudioCommand({ type: 'palette.setColor', index: activeColor, color: Number.parseInt(value.slice(1), 16) })
 }
 
 document.querySelector<HTMLInputElement>('#color-input')!.addEventListener('change', event => updateActiveColor((event.target as HTMLInputElement).value))
 document.querySelector<HTMLInputElement>('#hex-input')!.addEventListener('change', event => updateActiveColor((event.target as HTMLInputElement).value))
 document.querySelector<HTMLInputElement>('#material-name')!.addEventListener('change', event => {
   const input = event.target as HTMLInputElement
-  const material = voxelDocument.materials[activeColor]
-  material.name = input.value.trim().slice(0, 40) || `Color ${activeColor}`
-  renderer.updatePaletteMaterial(activeColor)
+  runStudioCommand({ type: 'material.update', index: activeColor, patch: { name: input.value } })
   renderPalette()
   renderPaletteMaterial()
-  queueSave()
 })
 
 layerList.addEventListener('change', event => {
@@ -1285,10 +1303,7 @@ layerList.addEventListener('change', event => {
   if (!input) return
   const layer = voxelDocument.getLayer(Number(input.dataset.layerName))
   if (!layer) return
-  if (voxelDocument.renameLayer(layer.id, input.value)) {
-    queueSave()
-    announce(`Layer renamed to ${voxelDocument.getLayer(layer.id)!.name}`)
-  }
+  runStudioCommand({ type: 'layer.rename', id: layer.id, name: input.value })
   const name = voxelDocument.getLayer(layer.id)!.name
   const row = input.closest<HTMLElement>('[data-layer-id]')!
   input.value = name
@@ -1314,11 +1329,9 @@ document.querySelector<HTMLElement>('[data-panel="palette"]')!.addEventListener(
   if (target instanceof HTMLInputElement && target.dataset.pbrMap) { void loadPbrMap(target); return }
   if (target.id === 'roughness' || target.id === 'metalness' || target.id === 'emissiveIntensity' || target.id === 'opacity' || target.id === 'transmission' || target.id === 'ior') {
     const value = Number(target.value)
-    voxelDocument.materials[activeColor][target.id as 'roughness' | 'metalness' | 'emissiveIntensity' | 'opacity' | 'transmission' | 'ior'] = value
+    runStudioCommand({ type: 'material.update', index: activeColor, patch: { [target.id]: value } })
     document.querySelector(`#${target.id}-output`)!.textContent = value.toFixed(2)
-    renderer.updatePaletteMaterial(activeColor)
     renderMaterialPreview()
-    queueSave()
   }
 })
 
@@ -1329,28 +1342,25 @@ document.querySelector<HTMLElement>('[data-panel="palette"]')!.addEventListener(
 
 document.querySelector<HTMLElement>('[data-panel="render"]')!.addEventListener('input', event => {
   const target = event.target as HTMLInputElement | HTMLSelectElement
-  if (target.id === 'projection') settings.projection = target.value as ViewSettings['projection']
-  if (target.id === 'background') settings.background = target.value
-  if (target.id === 'ambient') settings.ambient = Number(target.value)
-  if (target.id === 'light') settings.light = Number(target.value)
-  if (target.id === 'azimuth') settings.lightAzimuth = Number(target.value)
-  if (target.id === 'ambient-occlusion') settings.ambientOcclusion = (target as HTMLInputElement).checked
-  if (target.id === 'shadows') settings.shadows = (target as HTMLInputElement).checked
-  if (target.id === 'grid') settings.grid = (target as HTMLInputElement).checked
-  if (target.id === 'face-grid') settings.faceGrid = (target as HTMLInputElement).checked
-  if (target.id === 'path-tracing') settings.pathTracing = (target as HTMLInputElement).checked
-  renderer.setSettings(settings)
-  renderSettings()
-  queueSave()
+  const patch: Partial<ViewSettings> = {}
+  if (target.id === 'projection') patch.projection = target.value as ViewSettings['projection']
+  if (target.id === 'background') patch.background = target.value
+  if (target.id === 'ambient') patch.ambient = Number(target.value)
+  if (target.id === 'light') patch.light = Number(target.value)
+  if (target.id === 'azimuth') patch.lightAzimuth = Number(target.value)
+  if (target.id === 'ambient-occlusion') patch.ambientOcclusion = (target as HTMLInputElement).checked
+  if (target.id === 'shadows') patch.shadows = (target as HTMLInputElement).checked
+  if (target.id === 'grid') patch.grid = (target as HTMLInputElement).checked
+  if (target.id === 'face-grid') patch.faceGrid = (target as HTMLInputElement).checked
+  if (target.id === 'path-tracing') patch.pathTracing = (target as HTMLInputElement).checked
+  runStudioCommand({ type: 'settings.update', patch })
 })
 
 document.querySelector<HTMLInputElement>('#fill-depth')!.addEventListener('input', event => {
   const input = event.target as HTMLInputElement
   if (!input.value) return
-  fillDepth = Math.max(1, Math.min(256, Math.round(Number(input.value))))
+  runStudioCommand({ type: 'tool.fill', depth: Number(input.value) })
   if (Number(input.value) !== fillDepth) input.value = String(fillDepth)
-  renderer.setFillDepth(fillDepth)
-  renderToolControls()
 })
 
 document.querySelector<HTMLInputElement>('#fill-depth')!.addEventListener('change', event => {
@@ -1380,7 +1390,7 @@ document.addEventListener('keydown', event => {
   }
   if (event.key === 'Escape' && selection.count) {
     event.preventDefault()
-    renderer.clearSelection()
+    runStudioCommand({ type: 'selection.clear', focus: true })
     return
   }
   if ((event.metaKey || event.ctrlKey) && (key === 'z' || key === 'y') && !editingText) {
@@ -1424,7 +1434,7 @@ document.addEventListener('keydown', event => {
     showToolPopup('layer')
     return
   }
-  if (key === 'f') { event.preventDefault(); renderer.frameModel() }
+  if (key === 'f') { event.preventDefault(); void dispatchApplicationCommand({ type: 'view.frame' }).catch(commandFailed) }
   if (key === 'r') { event.preventDefault(); toggleRenderMode() }
   if (event.key === '?') { welcome.hidden = false }
 })
@@ -1441,6 +1451,23 @@ renderPaletteMaterial()
 setTool(activeTool)
 updateSaveStatus()
 if (storageError) showToast(storageError, 'warning')
+
+connectRemote({
+  dispatch: request => dispatchApplicationCommand(request.command, 'remote', request.ifRevision),
+  revision: () => studioController.revision,
+  subscribe(listener) {
+    const forward = (event: CommandEvent) => {
+      if (event.source === 'remote') return
+      listener({ sequence: event.sequence, revision: event.outcome.revision, source: event.source, command: event.command.type, changed: event.outcome.changed })
+    }
+    commandListeners.add(forward)
+    return () => commandListeners.delete(forward)
+  },
+  onStatus(status, message) {
+    if (status === 'connected') showToast('Remote scripting connected.')
+    if (status === 'error' && message) showToast(message, 'warning')
+  },
+})
 
 window.addEventListener('beforeunload', event => {
   if (saveState === 'saving') event.preventDefault()

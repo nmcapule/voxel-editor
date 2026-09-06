@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import { CHUNK_SIZE, DEFAULT_PALETTE, EditSession, History, VoxelDocument, chunkId, fillShapeVoxels, moveRange, moveVoxels, pushPull, pushPullRange, resizeVoxelDocument, voxelLine } from './editor'
+import { CHUNK_SIZE, DEFAULT_PALETTE, EditSession, History, VoxelDocument, chunkId, connectedBodyVoxels, connectedSurfaceVoxels, fillShapeVoxels, moveRange, moveVoxels, occupiedVoxels, pushPull, pushPullRange, resizeVoxelDocument, surfaceVoxels, voxelLine } from './editor'
 import { meshChunk } from './mesher'
-import { castsRealtimeShadow, connectedBodyVoxels, connectedSurfaceVoxels, isTouchTap, occupiedVoxels, pushPullGhostVoxels, realtimeEnvironmentIntensity, shouldOrbitTouch, surfaceVoxels, traceGridRay, tracePlaneRay, workspaceGridPlaneVisible, workspaceGridPositions } from './renderer'
+import { castsRealtimeShadow, isTouchTap, pushPullGhostVoxels, realtimeEnvironmentIntensity, shouldOrbitTouch, traceGridRay, tracePlaneRay, workspaceGridPlaneVisible, workspaceGridPositions } from './renderer'
 import { exportVox, importVox } from './vox'
 
 describe('voxel document', () => {
@@ -117,6 +117,10 @@ describe('voxel document', () => {
     expect(moveVoxels(document, session, cells, normal, 2)).toBe(2)
     expect([document.getVoxel(2, 0, 2), document.getVoxel(3, 0, 2)]).toEqual([0, 0])
     expect([document.getVoxel(4, 0, 2), document.getVoxel(5, 0, 2)]).toEqual([5, 6])
+
+    const emptySession = new EditSession(document)
+    expect(moveVoxels(document, emptySession, [{ x: 3, y: 0, z: 2 }], normal, 1)).toBe(0)
+    expect(document.getVoxel(4, 0, 2)).toBe(5)
   })
 
   test('erases a selected region as one undoable edit', () => {

@@ -8,7 +8,8 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "build": "bun run typecheck && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "relay": "bun scripts/relay.ts"
   },
   "dependencies": {
     "three": "^0.185.1",

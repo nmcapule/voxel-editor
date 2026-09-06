@@ -16,7 +16,7 @@ export interface ViewSettings {
   pathTracing: boolean
 }
 
-interface StoredProject {
+export interface StoredProject {
   version: 1 | 2 | 3
   name: string
   dimensions: Dimensions
@@ -37,16 +37,16 @@ function database() {
   })
 }
 
-function complete(request: IDBRequest) {
+function complete(transaction: IDBTransaction) {
   return new Promise<void>((resolve, reject) => {
-    request.onsuccess = () => resolve()
-    request.onerror = () => reject(request.error)
+    transaction.oncomplete = () => resolve()
+    transaction.onerror = () => reject(transaction.error)
+    transaction.onabort = () => reject(transaction.error)
   })
 }
 
-export async function saveProject(document: VoxelDocument, settings: ViewSettings) {
-  const db = await database()
-  const stored: StoredProject = {
+export function snapshotProject(document: VoxelDocument, settings: ViewSettings): StoredProject {
+  return {
     version: 3,
     name: document.name,
     dimensions: document.dimensions,
@@ -57,8 +57,18 @@ export async function saveProject(document: VoxelDocument, settings: ViewSetting
     chunks: [...document.chunks].flatMap(([id, layers]) => [...layers].map(([layerId, data]) => ({ id, layerId, data: data.slice().buffer }))),
     settings,
   }
-  await complete(db.transaction(STORE, 'readwrite').objectStore(STORE).put(stored, 'current'))
+}
+
+export async function saveProjectSnapshot(stored: StoredProject) {
+  const db = await database()
+  const transaction = db.transaction(STORE, 'readwrite')
+  transaction.objectStore(STORE).put(stored, 'current')
+  await complete(transaction)
   db.close()
+}
+
+export function saveProject(document: VoxelDocument, settings: ViewSettings) {
+  return saveProjectSnapshot(snapshotProject(document, settings))
 }
 
 export async function loadProject() {
@@ -91,6 +101,8 @@ export async function loadProject() {
 
 export async function clearProject() {
   const db = await database()
-  await complete(db.transaction(STORE, 'readwrite').objectStore(STORE).delete('current'))
+  const transaction = db.transaction(STORE, 'readwrite')
+  transaction.objectStore(STORE).delete('current')
+  await complete(transaction)
   db.close()
 }

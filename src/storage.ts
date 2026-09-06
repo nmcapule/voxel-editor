@@ -1,4 +1,4 @@
-import { VoxelDocument, type Dimensions, type PaletteMaterial, type VoxelLayer } from './editor'
+import { VoxelDocument, type Dimensions, type LayerChunkSnapshot, type PaletteMaterial, type VoxelLayer } from './editor'
 
 const DATABASE = 'voxel-studio'
 const STORE = 'projects'
@@ -17,14 +17,14 @@ export interface ViewSettings {
 }
 
 interface StoredProject {
-  version: 1 | 2
+  version: 1 | 2 | 3
   name: string
   dimensions: Dimensions
   palette: ArrayBuffer
   materials?: Partial<PaletteMaterial>[]
   layers?: VoxelLayer[]
   activeLayerId?: number
-  chunks: { id: number; data: ArrayBuffer; layerData?: ArrayBuffer }[]
+  chunks: { id: number; data: ArrayBuffer; layerId?: number; layerData?: ArrayBuffer }[]
   settings: ViewSettings
 }
 
@@ -47,14 +47,14 @@ function complete(request: IDBRequest) {
 export async function saveProject(document: VoxelDocument, settings: ViewSettings) {
   const db = await database()
   const stored: StoredProject = {
-    version: 2,
+    version: 3,
     name: document.name,
     dimensions: document.dimensions,
     palette: document.palette.slice().buffer,
     materials: document.materials.map(material => ({ ...material })),
     layers: document.layers.map(layer => ({ ...layer })),
     activeLayerId: document.activeLayerId,
-    chunks: [...document.chunks].map(([id, data]) => ({ id, data: data.slice().buffer, layerData: document.copyLayerChunk(id)!.buffer })),
+    chunks: [...document.chunks].flatMap(([id, layers]) => [...layers].map(([layerId, data]) => ({ id, layerId, data: data.slice().buffer }))),
     settings,
   }
   await complete(db.transaction(STORE, 'readwrite').objectStore(STORE).put(stored, 'current'))
@@ -69,12 +69,23 @@ export async function loadProject() {
     request.onerror = () => reject(request.error)
   })
   db.close()
-  if (!stored || stored.version !== 1 && stored.version !== 2) return undefined
+  if (!stored || stored.version !== 1 && stored.version !== 2 && stored.version !== 3) return undefined
   const legacy = stored.settings as ViewSettings & Partial<PaletteMaterial>
   const materials = stored.materials ?? (legacy.roughness === undefined && legacy.metalness === undefined ? undefined
     : Array.from({ length: 256 }, () => ({ roughness: legacy.roughness ?? 0.68, metalness: legacy.metalness ?? 0.02 })))
-  const document = new VoxelDocument(stored.dimensions, stored.name, new Uint32Array(stored.palette), materials, stored.version === 2 ? stored.layers : undefined, stored.activeLayerId)
-  for (const chunk of stored.chunks) document.replaceChunk(chunk.id, new Uint8Array(chunk.data), stored.version === 2 && chunk.layerData ? new Uint16Array(chunk.layerData) : undefined)
+  const document = new VoxelDocument(stored.dimensions, stored.name, new Uint32Array(stored.palette), materials, stored.version >= 2 ? stored.layers : undefined, stored.activeLayerId)
+  if (stored.version === 3) {
+    const chunks = new Map<number, LayerChunkSnapshot[]>()
+    for (const chunk of stored.chunks) {
+      if (!Number.isInteger(chunk.layerId)) continue
+      const layers = chunks.get(chunk.id) ?? []
+      layers.push({ layerId: chunk.layerId!, data: new Uint8Array(chunk.data) })
+      chunks.set(chunk.id, layers)
+    }
+    for (const [id, layers] of chunks) document.replaceChunk(id, layers)
+  } else {
+    for (const chunk of stored.chunks) document.replaceLegacyChunk(chunk.id, new Uint8Array(chunk.data), stored.version === 2 && chunk.layerData ? new Uint16Array(chunk.layerData) : undefined)
+  }
   return { document, settings: stored.settings }
 }
 

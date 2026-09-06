@@ -1,6 +1,6 @@
 import './style.css'
-import { EditSession, History, VoxelDocument, dirtyChunks, moveVoxels, pushPull, type Dimensions, type FillShape } from './editor'
-import { VoxelRenderer, type AuxiliaryTool, type PbrMap, type SculptMode, type SelectionMode, type SelectionState, type Tool } from './renderer'
+import { EditSession, History, VoxelDocument, dirtyChunks, moveVoxels, pushPull, resizeVoxelDocument, type Dimensions, type FillShape, type ResizeAnchor, type Vec3 } from './editor'
+import { VoxelRenderer, type AuxiliaryTool, type PaintMode, type PbrMap, type SculptMode, type SelectionMode, type SelectionState, type Tool } from './renderer'
 import { loadProject, saveProject, type ViewSettings } from './storage'
 import { exportVox, importVox } from './vox'
 
@@ -20,6 +20,16 @@ const DEFAULT_SETTINGS: ViewSettings = {
 const icon = (name: string) => `<svg aria-hidden="true"><use href="#icon-${name}"></use></svg>`
 const materialCube = `<svg class="material-cube" viewBox="0 0 64 64" aria-hidden="true"><path class="preview-top" d="m32 8 23 13-23 13L9 21 32 8Z"/><path class="preview-left" d="M9 21l23 13v26L9 47V21Z"/><path class="preview-right" d="m32 34 23-13v26L32 60V34Z"/></svg>`
 const app = document.querySelector<HTMLDivElement>('#app')!
+type PaletteFilter = 'all' | 'opaque' | 'transparent' | 'metal' | 'emissive'
+type StoredToolState = { selectionMode?: unknown; activeColor?: unknown; recentColors?: unknown }
+
+function readLocalStorage(key: string) {
+  try { return localStorage.getItem(key) } catch { return null }
+}
+
+function writeLocalStorage(key: string, value: string) {
+  try { localStorage.setItem(key, value) } catch { /* Preferences remain usable for this session. */ }
+}
 
 let restored: Awaited<ReturnType<typeof loadProject>>
 let storageError = ''
@@ -31,21 +41,36 @@ try {
 
 let voxelDocument = restored?.document ?? new VoxelDocument()
 let settings: ViewSettings = { ...DEFAULT_SETTINGS, ...restored?.settings }
+const storedToolState: StoredToolState = (() => {
+  try {
+    const parsed: unknown = JSON.parse(readLocalStorage('voxel-studio-tool-state') ?? '{}')
+    return parsed && typeof parsed === 'object' ? parsed as StoredToolState : {}
+  } catch { return {} }
+})()
+const isSelectionMode = (value: unknown): value is SelectionMode => typeof value === 'string' && ['point', 'surface', 'texture', 'body'].includes(value)
+const isPaletteColor = (value: unknown): value is number => Number.isInteger(value) && Number(value) > 0 && Number(value) < 256 && Boolean(voxelDocument.palette[Number(value)])
+const defaultActiveColor = voxelDocument.palette[5] ? 5 : Math.max(1, voxelDocument.palette.findIndex((color, index) => index > 0 && Boolean(color)))
 let history = new History()
 let activeTool: Tool = 'select'
+let paintMode: PaintMode = 'paint'
 let sculptMode: SculptMode = 'push'
 let fillShape: FillShape = 'box'
 let fillDepth = 1
 let auxiliaryTool: AuxiliaryTool | undefined
-let selectionMode: SelectionMode = 'surface'
-let activeColor = 5
-let paletteView: 'grid' | 'list' = localStorage.getItem('voxel-studio-palette-view') === 'list' ? 'list' : 'grid'
+let selectionMode: SelectionMode = isSelectionMode(storedToolState.selectionMode) ? storedToolState.selectionMode : 'point'
+let activeColor = isPaletteColor(storedToolState.activeColor) ? storedToolState.activeColor : defaultActiveColor
+let paletteView: 'grid' | 'list' = readLocalStorage('voxel-studio-palette-view') === 'list' ? 'list' : 'grid'
+let paletteFilter: PaletteFilter = 'all'
 let renderMode = false
 let saveTimer: ReturnType<typeof setTimeout> | undefined
 let saveRevision = 0
 let saveState: 'saved' | 'saving' | 'error' = storageError ? 'error' : 'saved'
-let recentColors = [5, 6, 12, 14, 3, 2]
+const storedRecentColors = Array.isArray(storedToolState.recentColors) ? storedToolState.recentColors : [5, 6, 12, 14, 3, 2]
+let recentColors = [...new Set([activeColor, ...storedRecentColors.filter(isPaletteColor)])].slice(0, 6)
 let selection: SelectionState = { cells: [], count: 0 }
+type ClipboardVoxel = Vec3 & { color: number }
+let clipboard: ClipboardVoxel[] = []
+let pendingPaste: { voxels: ClipboardVoxel[]; selectionBefore: Vec3[]; layerId: number } | undefined
 const loadedPbrMaps = new Map<number, Map<PbrMap, string>>()
 
 app.innerHTML = `
@@ -64,10 +89,12 @@ app.innerHTML = `
     <symbol id="icon-move" viewBox="0 0 24 24"><path d="m9 5 7 4v7l-7 4-7-4V9l7-4Z"/><path d="m9 13 7-4M9 13 2 9M9 13v7M13 20h8M18 17l3 3-3 3"/></symbol>
     <symbol id="icon-erase" viewBox="0 0 24 24"><path d="m8 5 7 4v8l-7 4-5-3V9l5-4Z"/><path d="m8 13 7-4M8 13 3 9M8 13v8M16 5l5 5M21 5l-5 5"/></symbol>
     <symbol id="icon-fill" viewBox="0 0 24 24"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="m12 12 8-4.5M12 12 4 7.5M12 12v9M7 10l5-3 5 3"/></symbol>
+    <symbol id="icon-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></symbol>
     <symbol id="icon-box" viewBox="0 0 24 24"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="m12 12 8-4.5M12 12 4 7.5M12 12v9"/></symbol>
     <symbol id="icon-sphere" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 2.5 4.5 5.5 4.5 9S15 18.5 12 21M12 3c-3 2.5-4.5 5.5-4.5 9S9 18.5 12 21"/></symbol>
     <symbol id="icon-cylinder" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 18c0-1.7 3.6-3 8-3s8 1.3 8 3"/></symbol>
     <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="icon-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
     <symbol id="icon-camera" viewBox="0 0 24 24"><path d="M4 8h4l2-3h4l2 3h4v11H4V8Z"/><circle cx="12" cy="13" r="3.5"/></symbol>
     <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
     <symbol id="icon-eye" viewBox="0 0 24 24"><path d="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6Z"/><circle cx="12" cy="12" r="2.5"/></symbol>
@@ -75,6 +102,9 @@ app.innerHTML = `
     <symbol id="icon-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
     <symbol id="icon-unlock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M9 10V7a4 4 0 0 1 7-2.6"/></symbol>
     <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></symbol>
+    <symbol id="icon-cut" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="m8.5 7.5 11 8.5M8.5 16.5l11-8.5"/></symbol>
+    <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h2"/></symbol>
+    <symbol id="icon-paste" viewBox="0 0 24 24"><path d="M9 5h6M9 3h6v4H9z"/><path d="M8 5H5v16h14V5h-3M8 12h8M8 16h5"/></symbol>
   </svg>
 
   <main class="studio" data-render-mode="false" data-tool="select">
@@ -107,16 +137,11 @@ app.innerHTML = `
       </div>
     </div>
 
-    <aside class="color-rail instrument" aria-label="Recent colors">
-      <button id="active-swatch" class="active-swatch" type="button" data-action="palette" aria-label="Open palette"></button>
-      <div id="quick-palette" class="quick-palette"></div>
-    </aside>
-
     <section id="welcome" class="welcome-panel instrument" aria-labelledby="welcome-title">
       <button type="button" class="welcome-close" data-action="dismiss-guide" aria-label="Dismiss guide">${icon('close')}</button>
       <span class="welcome-cube" aria-hidden="true">${icon('logo')}</span>
       <h1 id="welcome-title">Choose how you shape.</h1>
-      <p>Select, paint, sculpt, or fill volumes with one focused tool at a time.</p>
+      <p>Select, place, sculpt, or switch layers with one focused tool at a time.</p>
       <button type="button" class="primary" data-action="dismiss-guide">Start shaping</button>
     </section>
 
@@ -132,39 +157,73 @@ app.innerHTML = `
 
     <div id="context-dock" class="context-dock instrument">
       <div class="context-summary"><strong id="context-title">Select</strong><span id="context-copy">Click a connected surface.</span></div>
-      <div id="selection-modes" class="selection-modes" role="group" aria-label="Selection mode">
-        <button type="button" data-selection-mode="point" aria-pressed="false">Point</button>
-        <button type="button" data-selection-mode="surface" aria-pressed="true">Surface</button>
-        <button type="button" data-selection-mode="texture" aria-pressed="false">Texture</button>
-        <button type="button" data-selection-mode="body" aria-pressed="false">Body</button>
-      </div>
-      <div id="paint-options" class="tool-options" role="group" aria-label="Paint actions" hidden>
-        <button type="button" data-auxiliary="pick" aria-pressed="false">${icon('pick')}<span>Pick color</span><kbd>E</kbd></button>
-      </div>
-      <div id="sculpt-modes" class="tool-options" role="group" aria-label="Sculpt operation" hidden>
-        <button type="button" data-sculpt-mode="push" aria-pressed="true">${icon('push')}<span>Push/Pull</span></button>
-        <button type="button" data-sculpt-mode="move" aria-pressed="false">${icon('move')}<span>Move</span><kbd>D</kbd></button>
-        <button type="button" data-sculpt-mode="erase" aria-pressed="false">${icon('erase')}<span>Erase</span><kbd>X</kbd></button>
-      </div>
-      <div id="fill-options" class="tool-options fill-options" role="group" aria-label="Fill shape" hidden>
-        <button type="button" data-fill-shape="box" aria-label="Box fill" aria-pressed="true">${icon('box')}<span>Box</span></button>
-        <button type="button" data-fill-shape="sphere" aria-label="Sphere fill" aria-pressed="false">${icon('sphere')}<span>Sphere</span></button>
-        <button type="button" data-fill-shape="cylinder" aria-label="Cylinder fill" aria-pressed="false">${icon('cylinder')}<span>Cylinder</span></button>
+      <div id="fill-options" class="tool-options fill-options" role="group" aria-label="Volume shape" hidden>
+        <button type="button" data-fill-shape="box" aria-label="Box volume" aria-pressed="true">${icon('box')}<span>Box</span></button>
+        <button type="button" data-fill-shape="sphere" aria-label="Sphere volume" aria-pressed="false">${icon('sphere')}<span>Sphere</span></button>
+        <button type="button" data-fill-shape="cylinder" aria-label="Cylinder volume" aria-pressed="false">${icon('cylinder')}<span>Cylinder</span></button>
         <label class="fill-depth"><span>Depth</span><input id="fill-depth" type="number" min="1" max="256" value="1" inputmode="numeric"></label>
       </div>
     </div>
 
+    <aside id="select-tool-popup" class="tool-popup instrument" popover aria-labelledby="select-popup-title">
+      <header><strong id="select-popup-title">Select mode</strong><span>Choose what a gesture resolves</span></header>
+      <div class="tool-mode-list" role="group" aria-label="Select mode">
+        <button type="button" data-selection-mode="point" aria-pressed="true"><span><strong>Point</strong><small>One voxel or a box drag</small></span><kbd>Q 1</kbd></button>
+        <button type="button" data-selection-mode="surface" aria-pressed="false"><span><strong>Surface</strong><small>Connected exposed faces</small></span><kbd>Q 2</kbd></button>
+        <button type="button" data-selection-mode="texture" aria-pressed="false"><span><strong>Texture</strong><small>Contiguous voxels with one texture</small></span><kbd>Q 3</kbd></button>
+        <button type="button" data-selection-mode="body" aria-pressed="false"><span><strong>Body</strong><small>One contiguous voxel body</small></span><kbd>Q 4</kbd></button>
+      </div>
+      <div class="popup-actions">
+        <span class="popup-section-label">Clipboard</span>
+        <div class="tool-mode-list" role="group" aria-label="Clipboard actions">
+          <button type="button" data-clipboard-action="cut" aria-keyshortcuts="Control+X Meta+X">${icon('cut')}<span><strong>Cut</strong><small>Remove and hold selection</small></span><kbd>⌘/Ctrl X</kbd></button>
+          <button type="button" data-clipboard-action="copy" aria-keyshortcuts="Control+C Meta+C">${icon('copy')}<span><strong>Copy</strong><small>Hold a duplicate of selection</small></span><kbd>⌘/Ctrl C</kbd></button>
+          <button type="button" data-clipboard-action="paste" aria-keyshortcuts="Control+V Meta+V">${icon('paste')}<span><strong>Paste</strong><small>Place with the Move tool</small></span><kbd>⌘/Ctrl V</kbd></button>
+        </div>
+      </div>
+    </aside>
+
+    <aside id="paint-tool-popup" class="tool-popup instrument" popover aria-labelledby="paint-popup-title">
+      <header><strong id="paint-popup-title">Place operation</strong><span>Uses the Select scope and active material</span></header>
+      <div class="tool-mode-list" role="group" aria-label="Place operation">
+        <button type="button" data-paint-mode="paint" aria-pressed="true">${icon('paint')}<span><strong>Paint</strong><small>Use the current Select scope</small></span><kbd>W 1</kbd></button>
+        <button type="button" data-paint-mode="fill" aria-pressed="false">${icon('fill')}<span><strong>Volume</strong><small>Create a solid voxel volume</small></span><kbd>W 2</kbd></button>
+        <button type="button" data-auxiliary="pick" aria-pressed="false">${icon('pick')}<span><strong>Eyedropper</strong><small>Pick material from a voxel</small></span><kbd>W 3</kbd></button>
+      </div>
+      <div class="popup-materials">
+        <span class="popup-section-label">Material</span>
+        <button class="active-swatch popup-active-material" type="button" data-action="palette" aria-label="Open palette">${materialCube}<span><strong id="paint-material-name">Gold</strong><small id="paint-material-value">#F2C14E</small></span>${icon('chevron')}</button>
+        <div id="paint-quick-palette" class="quick-palette popup-material-grid" role="group" aria-label="Recent materials"></div>
+      </div>
+    </aside>
+
+    <aside id="sculpt-tool-popup" class="tool-popup instrument" popover aria-labelledby="sculpt-popup-title">
+      <header><strong id="sculpt-popup-title">Sculpt mode</strong><span>Choose how the model changes</span></header>
+      <div class="tool-mode-list" role="group" aria-label="Sculpt mode">
+        <button type="button" data-sculpt-mode="push" aria-pressed="true">${icon('push')}<span><strong>Push/Pull</strong><small>Add or remove complete layers</small></span><kbd>S 1</kbd></button>
+        <button type="button" data-sculpt-mode="move" aria-pressed="false">${icon('move')}<span><strong>Move</strong><small>Translate the current selection</small></span><kbd>S 2</kbd></button>
+        <button type="button" data-sculpt-mode="erase" aria-pressed="false">${icon('erase')}<span><strong>Erase</strong><small>Remove the resolved selection</small></span><kbd>S 3</kbd></button>
+      </div>
+    </aside>
+
     <nav class="tool-dock instrument" aria-label="Voxel tools">
-      <button type="button" data-tool="select" aria-pressed="false">${icon('select')}<span>Select</span><kbd>Q</kbd></button>
-      <button type="button" data-tool="paint" aria-pressed="false">${icon('paint')}<span>Paint</span><kbd>W</kbd></button>
-      <button type="button" data-tool="sculpt" aria-pressed="false">${icon('push')}<span>Sculpt</span><kbd>S</kbd></button>
-      <button type="button" data-tool="fill" aria-pressed="false">${icon('fill')}<span>Fill</span><kbd>A</kbd></button>
+      <button type="button" data-tool="select" aria-pressed="false" popovertarget="select-tool-popup">${icon('select')}<span class="tool-label"><strong>Select</strong><small id="select-tool-mode">Point</small></span><kbd>Q</kbd></button>
+      <button type="button" data-tool="paint" aria-pressed="false" popovertarget="paint-tool-popup">${icon('paint')}<span class="tool-label"><strong>Place</strong><small><i id="paint-tool-swatch"></i><span id="paint-tool-mode">Paint</span></small></span><kbd>W</kbd></button>
+      <button type="button" data-tool="sculpt" aria-pressed="false" popovertarget="sculpt-tool-popup">${icon('push')}<span class="tool-label"><strong>Sculpt</strong><small id="sculpt-tool-mode">Push/Pull</small></span><kbd>S</kbd></button>
+      <button type="button" data-tool="layer" aria-pressed="false" popovertarget="layer-panel">${icon('layers')}<span class="tool-label"><strong>Layer</strong><small id="layer-tool-mode">Layer 1</small></span><kbd>L</kbd></button>
     </nav>
 
-    <div id="selection-menu" class="selection-menu instrument" role="menu" aria-label="Selection actions" hidden>
-      <button type="button" data-selection-action="paint" role="menuitem">${icon('paint')}<span>Paint selection</span></button>
-      <button type="button" data-selection-action="erase" role="menuitem">${icon('erase')}<span>Erase selection</span></button>
-    </div>
+    <aside id="layer-panel" class="layer-panel instrument" popover aria-labelledby="layer-panel-title">
+      <header>
+        <div><strong id="layer-panel-title">Layers</strong><span>Pick a voxel or manage layers</span></div>
+        <div class="layer-panel-actions">
+          <button type="button" data-layer-action="add" aria-label="Add layer" title="Add layer">${icon('plus')}</button>
+          <button type="button" popovertarget="layer-panel" popovertargetaction="hide" aria-label="Close layers">${icon('close')}</button>
+        </div>
+      </header>
+      <div id="layer-list" class="layer-list" role="list" aria-label="Voxel layers"></div>
+      <p class="panel-note layer-note">VOX export flattens visible layers into one model.</p>
+    </aside>
 
     <aside id="stage-panel" class="stage-panel instrument" aria-label="Stage settings" aria-hidden="true">
       <header>
@@ -183,16 +242,14 @@ app.innerHTML = `
           <label>X<input name="x" type="number" min="16" max="256" required></label>
           <label>Y<input name="y" type="number" min="16" max="256" required></label>
           <label>Z<input name="z" type="number" min="16" max="256" required></label>
+          <label class="resize-anchor">Anchor<select name="anchor"><option value="center" selected>Center</option><option value="origin">Origin</option></select></label>
           <button type="submit">Resize</button>
         </form>
         <div class="model-facts">
           <div><span>Occupied</span><strong id="panel-voxel-count">0</strong></div>
           <div><span>Chunks</span><strong id="chunk-count">0</strong></div>
         </div>
-        <div class="section-heading layer-heading"><h2>Layers</h2><button type="button" data-layer-action="add" aria-label="Add layer" title="Add layer">${icon('plus')}</button></div>
-        <div id="layer-list" class="layer-list" role="list" aria-label="Voxel layers"></div>
-        <p class="panel-note layer-note">VOX export flattens visible layers into one model.</p>
-        <p class="panel-note">Coordinates run from 0 to 255. Shrinking preserves everything that still fits.</p>
+        <p class="panel-note">Origin keeps voxel coordinates. Center balances the size change around the model. Shrinking removes anything outside the new bounds.</p>
         <button type="button" class="secondary full" data-action="new">Clear and start new</button>
       </section>
 
@@ -211,14 +268,21 @@ app.innerHTML = `
         </div>
         <p class="panel-note swatch-note">Click the cube to change color. Duplicate a swatch before making a variant.</p>
         <div class="palette-view-bar"><strong>Palette</strong><div role="group" aria-label="Palette view"><button type="button" data-palette-view="grid" aria-pressed="true">Grid</button><button type="button" data-palette-view="list" aria-pressed="false">List</button></div></div>
+        <div class="palette-filter-bar" role="group" aria-label="Filter materials">
+          <button type="button" data-palette-filter="opaque" aria-pressed="false">Opaque</button>
+          <button type="button" data-palette-filter="transparent" aria-pressed="false">Transparent</button>
+          <button type="button" data-palette-filter="metal" aria-pressed="false">Metal</button>
+          <button type="button" data-palette-filter="emissive" aria-pressed="false">Emissive</button>
+        </div>
         <div id="palette-grid" class="palette-grid" data-view="grid" role="group" aria-label="Document palette"></div>
         <div class="section-heading pbr-heading"><h2>Material</h2><span id="material-color">Color 5</span></div>
         <label class="range-row"><span>Roughness <output id="roughness-output">0.24</output></span><input id="roughness" aria-label="Color 5 material roughness" type="range" min="0" max="1" value="0.24" step="0.01"></label>
         <label class="range-row"><span>Metalness <output id="metalness-output">0.88</output></span><input id="metalness" aria-label="Color 5 material metalness" type="range" min="0" max="1" value="0.88" step="0.01"></label>
+        <label class="range-row"><span>Emission <output id="emissiveIntensity-output">0.00</output></span><input id="emissiveIntensity" aria-label="Color 5 material emission" type="range" min="0" max="5" value="0" step="0.1"></label>
         <label class="range-row"><span>Opacity <output id="opacity-output">1.00</output></span><input id="opacity" aria-label="Color 5 material opacity" type="range" min="0" max="1" value="1" step="0.01"></label>
         <label class="range-row"><span>Transmission <output id="transmission-output">0.00</output></span><input id="transmission" aria-label="Color 5 material transmission" type="range" min="0" max="1" value="0" step="0.01"></label>
         <label class="range-row"><span>Refraction (IOR) <output id="ior-output">1.50</output></span><input id="ior" aria-label="Color 5 material index of refraction" type="range" min="1" max="2.5" value="1.5" step="0.01"></label>
-        <p class="panel-note material-note">Transmission creates glass and water; opacity controls simple see-through surfaces.</p>
+        <p class="panel-note material-note">Emission makes the swatch self-lit; transmission creates glass and water.</p>
         <div class="section-heading pbr-heading"><h2>Texture maps</h2><span id="pbr-map-count">No maps</span></div>
         <label class="texture-row"><span>Albedo <small data-pbr-name="map">No file</small></span><input type="file" data-pbr-map="map" accept="image/*"></label>
         <label class="texture-row"><span>Normal <small data-pbr-name="normalMap">No file</small></span><input type="file" data-pbr-map="normalMap" accept="image/*"></label>
@@ -252,22 +316,22 @@ app.innerHTML = `
 const studio = document.querySelector<HTMLElement>('.studio')!
 const projectName = document.querySelector<HTMLInputElement>('#project-name')!
 const stagePanel = document.querySelector<HTMLElement>('#stage-panel')!
+const layerPanel = document.querySelector<HTMLElement>('#layer-panel')!
 const toast = document.querySelector<HTMLElement>('#toast')!
 const announcer = document.querySelector<HTMLElement>('#announcer')!
 const welcome = document.querySelector<HTMLElement>('#welcome')!
 const saveStatus = document.querySelector<HTMLElement>('#save-status')!
 const resizeForm = document.querySelector<HTMLFormElement>('#resize-form')!
 const fileInput = document.querySelector<HTMLInputElement>('#file-input')!
-const selectionModes = document.querySelector<HTMLElement>('#selection-modes')!
-const paintOptions = document.querySelector<HTMLElement>('#paint-options')!
-const sculptModes = document.querySelector<HTMLElement>('#sculpt-modes')!
 const fillOptions = document.querySelector<HTMLElement>('#fill-options')!
-const selectionMenu = document.querySelector<HTMLElement>('#selection-menu')!
 const layerList = document.querySelector<HTMLElement>('#layer-list')!
+const toolPopups = [...document.querySelectorAll<HTMLElement>('.tool-popup, .layer-panel')]
 let toastTimer: ReturnType<typeof setTimeout> | undefined
-let selectionMenuReturnFocus: HTMLElement | undefined
+let hoverPopupTimer: ReturnType<typeof setTimeout> | undefined
+let shortcutPrefix: 'q' | 'w' | 's' | undefined
+let shortcutTimer: ReturnType<typeof setTimeout> | undefined
 
-if (localStorage.getItem('voxel-studio-guide') === 'seen') welcome.hidden = true
+if (readLocalStorage('voxel-studio-guide') === 'seen') welcome.hidden = true
 
 function colorHex(index: number) {
   return `#${(voxelDocument.palette[index] || 0).toString(16).padStart(6, '0')}`
@@ -296,7 +360,7 @@ function announce(message: string) {
 
 function dismissGuide() {
   welcome.hidden = true
-  localStorage.setItem('voxel-studio-guide', 'seen')
+  writeLocalStorage('voxel-studio-guide', 'seen')
 }
 
 function updateSaveStatus() {
@@ -323,11 +387,23 @@ function queueSave() {
   }, 420)
 }
 
-function paletteIndices() {
+function persistToolState() {
+  writeLocalStorage('voxel-studio-tool-state', JSON.stringify({ selectionMode, activeColor, recentColors }))
+}
+
+function paletteIndices(filter: PaletteFilter = paletteFilter) {
   const used = new Set<number>()
   voxelDocument.forEachVoxel((_x, _y, _z, color) => used.add(color))
   const indices: number[] = []
-  for (let index = 1; index < 256; index++) if (voxelDocument.palette[index] || used.has(index)) indices.push(index)
+  for (let index = 1; index < 256; index++) {
+    if (!voxelDocument.palette[index] && !used.has(index)) continue
+    const material = voxelDocument.materials[index]
+    if (filter === 'opaque' && (material.opacity < 1 || material.transmission > 0)) continue
+    if (filter === 'transparent' && material.opacity >= 1 && material.transmission === 0) continue
+    if (filter === 'metal' && material.metalness < 0.5) continue
+    if (filter === 'emissive' && material.emissiveIntensity === 0) continue
+    indices.push(index)
+  }
   return indices
 }
 
@@ -335,6 +411,7 @@ function selectColor(index: number) {
   if (!voxelDocument.palette[index]) return
   activeColor = index
   recentColors = [index, ...recentColors.filter(color => color !== index)].slice(0, 6)
+  persistToolState()
   renderer.setActiveColor(index)
   renderPalette()
   renderPaletteMaterial()
@@ -343,16 +420,17 @@ function selectColor(index: number) {
 
 function materialSummary(index: number) {
   const material = voxelDocument.materials[index]
+  const emissive = material.emissiveIntensity ? ` · E ${material.emissiveIntensity.toFixed(1)}` : ''
   const transparent = material.transmission ? ` · T ${Math.round(material.transmission * 100)}%`
     : material.opacity < 1 ? ` · O ${Math.round(material.opacity * 100)}%` : ''
-  return `R ${material.roughness.toFixed(2)} · M ${material.metalness.toFixed(2)}${transparent}`
+  return `R ${material.roughness.toFixed(2)} · M ${material.metalness.toFixed(2)}${emissive}${transparent}`
 }
 
 function materialPreviewStyle(index: number) {
   const material = voxelDocument.materials[index]
-  const highlight = Math.round(14 + (1 - material.roughness) * 24 + material.metalness * 18)
+  const highlight = 1 + (14 + (1 - material.roughness) * 24 + material.metalness * 18 + material.emissiveIntensity * 6) / 100
   const opacity = Math.max(0.35, material.opacity * (1 - material.transmission * 0.45))
-  return `--swatch:${colorHex(index)};--highlight:${highlight}%;--preview-opacity:${opacity}`
+  return `--swatch:${colorHex(index)};--preview-highlight:${highlight};--preview-opacity:${opacity};--preview-glow:${material.emissiveIntensity ? colorHex(index) : 'transparent'}`
 }
 
 function renderMaterialPreview() {
@@ -364,73 +442,115 @@ function renderMaterialPreview() {
 }
 
 function renderPalette() {
+  const focusedPalette = document.activeElement instanceof HTMLButtonElement ? document.activeElement.closest<HTMLElement>('.quick-palette') : null
+  const focusedColor = (document.activeElement as HTMLElement | null)?.dataset.color
   const activeMaterial = voxelDocument.materials[activeColor]
-  const activeSwatch = document.querySelector<HTMLButtonElement>('#active-swatch')!
-  activeSwatch.style.setProperty('--swatch', colorHex(activeColor))
-  activeSwatch.title = `${activeMaterial.name}, ${colorHex(activeColor)}`
-  document.querySelector('#quick-palette')!.innerHTML = recentColors.filter(index => voxelDocument.palette[index]).map(index =>
-    `<button type="button" data-color="${index}" aria-label="Use ${escapeHtml(voxelDocument.materials[index].name)}, ${colorHex(index)}" aria-pressed="${index === activeColor}" style="--swatch:${colorHex(index)}"></button>`,
+  for (const activeSwatch of document.querySelectorAll<HTMLButtonElement>('.active-swatch')) {
+    activeSwatch.style.cssText = materialPreviewStyle(activeColor)
+    activeSwatch.dataset.transparent = String(activeMaterial.opacity < 1 || activeMaterial.transmission > 0)
+    activeSwatch.setAttribute('aria-label', `Open ${activeMaterial.name} in palette`)
+    activeSwatch.title = `${activeMaterial.name}, ${colorHex(activeColor)}: open full palette`
+  }
+  const recentMaterials = recentColors.filter(index => index !== activeColor && voxelDocument.palette[index]).map(index =>
+    `<button type="button" data-color="${index}" data-transparent="${voxelDocument.materials[index].opacity < 1 || voxelDocument.materials[index].transmission > 0}" aria-label="Use ${escapeHtml(voxelDocument.materials[index].name)}, ${colorHex(index)}" aria-pressed="${index === activeColor}" style="${materialPreviewStyle(index)}">${materialCube}</button>`,
   ).join('')
+  for (const quickPalette of document.querySelectorAll<HTMLElement>('.quick-palette')) quickPalette.innerHTML = recentMaterials
+  if (focusedColor) (focusedPalette?.querySelector<HTMLButtonElement>(`[data-color="${focusedColor}"]`)
+    ?? focusedPalette?.parentElement?.querySelector<HTMLButtonElement>('.active-swatch'))?.focus({ preventScroll: true })
   const palette = document.querySelector<HTMLElement>('#palette-grid')!
   palette.dataset.view = paletteView
-  palette.innerHTML = paletteIndices().map(index => {
+  const filteredMaterials = paletteIndices()
+  palette.innerHTML = filteredMaterials.length ? filteredMaterials.map(index => {
     const material = voxelDocument.materials[index]
     return `<button type="button" data-color="${index}" data-transparent="${material.opacity < 1 || material.transmission > 0}" aria-label="Use ${escapeHtml(material.name)}, color ${index}, ${colorHex(index)}" aria-pressed="${index === activeColor}" style="${materialPreviewStyle(index)}">
       ${materialCube}<span class="swatch-copy"><strong>${escapeHtml(material.name)}</strong><small>${materialSummary(index)}</small></span><span class="swatch-index">${index}</span>
     </button>`
-  }).join('')
+  }).join('') : '<p class="palette-empty">No materials match this filter.</p>'
+  if (focusedColor && !focusedPalette) palette.querySelector<HTMLButtonElement>(`[data-color="${focusedColor}"]`)?.focus({ preventScroll: true })
   document.querySelectorAll<HTMLButtonElement>('[data-palette-view]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.paletteView === paletteView)))
+  document.querySelectorAll<HTMLButtonElement>('[data-palette-filter]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.paletteFilter === paletteFilter)))
   document.querySelector('#active-index')!.textContent = `Color ${activeColor}`
   const value = colorHex(activeColor)
   document.querySelector<HTMLInputElement>('#color-input')!.value = value
   document.querySelector<HTMLInputElement>('#hex-input')!.value = value.toUpperCase()
   document.querySelector<HTMLInputElement>('#material-name')!.value = activeMaterial.name
+  document.querySelector('#paint-material-name')!.textContent = activeMaterial.name
+  document.querySelector('#paint-material-value')!.textContent = value.toUpperCase()
+  document.querySelector<HTMLElement>('#paint-tool-swatch')!.style.background = value
   renderMaterialPreview()
+  renderToolControls()
 }
 
 const toolCopy: Record<Tool, [string, string]> = {
   select: ['Select', 'Choose voxels before changing them.'],
-  paint: ['Paint', 'Release over a voxel to paint its resolved selection.'],
+  paint: ['Place', 'Release over a voxel to paint its resolved selection.'],
   sculpt: ['Sculpt', 'Reshape the current selection.'],
-  fill: ['Fill', 'Drag a footprint, then fill it through the chosen depth.'],
+  layer: ['Layer', 'Choose the active layer from the model.'],
 }
 
 const selectionCopy: Record<SelectionMode, string> = {
   point: 'Click one voxel or drag a 3D box.',
   surface: 'Click a connected exposed surface.',
-  texture: 'Click a connected same-color surface.',
+  texture: 'Click contiguous voxels with the same texture.',
   body: 'Click a contiguous voxel body.',
+}
+
+const selectionLabels: Record<SelectionMode, string> = {
+  point: 'Point',
+  surface: 'Surface',
+  texture: 'Texture',
+  body: 'Body',
+}
+
+const paintLabels: Record<PaintMode, string> = {
+  paint: 'Paint',
+  fill: 'Volume',
 }
 
 const sculptCopy: Record<SculptMode, [string, string]> = {
   push: ['Push/Pull', 'Drag along a face normal to add or remove complete layers.'],
-  move: ['Move', 'Drag along a face normal. The preview stops before collisions.'],
+  move: ['Move', 'Drag along a face normal. Overlapping voxels are replaced on release.'],
   erase: ['Erase', 'Remove the resolved selection.'],
 }
 
 function renderToolControls() {
   document.querySelectorAll<HTMLButtonElement>('button[data-tool]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.tool === activeTool)))
   document.querySelectorAll<HTMLButtonElement>('[data-selection-mode]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.selectionMode === selectionMode)))
+  document.querySelectorAll<HTMLButtonElement>('[data-paint-mode]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.paintMode === paintMode)))
   document.querySelectorAll<HTMLButtonElement>('[data-sculpt-mode]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.sculptMode === sculptMode)))
   document.querySelectorAll<HTMLButtonElement>('[data-fill-shape]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.fillShape === fillShape)))
   document.querySelectorAll<HTMLButtonElement>('[data-auxiliary]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.auxiliary === auxiliaryTool)))
-  selectionModes.hidden = activeTool === 'fill'
-  paintOptions.hidden = activeTool !== 'paint'
-  sculptModes.hidden = activeTool !== 'sculpt'
-  fillOptions.hidden = activeTool !== 'fill'
+  const editable = voxelDocument.activeLayer.visible && !voxelDocument.activeLayer.locked
+  document.querySelectorAll<HTMLButtonElement>('[data-clipboard-action]').forEach(button => {
+    const action = button.dataset.clipboardAction
+    button.disabled = action === 'paste' ? selection.floating === true || !clipboard.length || !editable
+      : selection.floating === true || !selection.count || action === 'cut' && !editable
+  })
+  fillOptions.hidden = activeTool !== 'paint' || paintMode !== 'fill'
+  document.querySelector('#select-tool-mode')!.textContent = selectionLabels[selectionMode]
+  document.querySelector('#paint-tool-mode')!.textContent = auxiliaryTool ? 'Eyedropper' : paintMode === 'paint' ? voxelDocument.materials[activeColor].name : paintLabels[paintMode]
+  document.querySelector('#sculpt-tool-mode')!.textContent = sculptCopy[sculptMode][0]
+  document.querySelector('#layer-tool-mode')!.textContent = voxelDocument.activeLayer.name
+  document.querySelector('button[data-tool="paint"] use')!.setAttribute('href', `#icon-${auxiliaryTool ? 'pick' : paintMode}`)
+  document.querySelector('button[data-tool="sculpt"] use')!.setAttribute('href', `#icon-${sculptMode === 'push' ? 'push' : sculptMode}`)
   const count = formatNumber(selection.count)
-  const copy = auxiliaryTool === 'pick' ? 'Choose a color directly from the model.'
-    : activeTool === 'select' ? selection.count ? `${count} selected · right-click or hold for actions` : selectionCopy[selectionMode]
-    : activeTool === 'paint' ? selection.count ? `${count} selected · click to paint · right-click or hold for actions` : `${selectionMode} · release to select and paint`
-    : activeTool === 'fill' ? `${fillShape} · ${fillDepth} ${fillDepth === 1 ? 'voxel' : 'voxels'} deep · drag on the model or ground`
-    : selection.count ? `${count} selected · ${sculptCopy[sculptMode][0]} · right-click or hold for actions` : `${selectionMode} · select before ${sculptCopy[sculptMode][0]}`
+  const copy = selection.floating ? `${count} pasted ${selection.count === 1 ? 'voxel' : 'voxels'} · drag to place or press Escape to cancel`
+    : auxiliaryTool === 'pick' ? 'Choose a color directly from the model.'
+    : activeTool === 'select' ? selection.count ? `${count} selected` : selectionCopy[selectionMode]
+    : activeTool === 'paint' && paintMode === 'fill' ? `${fillShape} · ${fillDepth} ${fillDepth === 1 ? 'voxel' : 'voxels'} deep · drag on the model or guide grid`
+    : activeTool === 'paint' ? selection.count ? `${count} selected · click to paint` : `${selectionLabels[selectionMode]} scope · release to select and paint`
+    : activeTool === 'layer' ? 'Click a voxel to make its layer active.'
+    : selection.count ? `${count} selected · ${sculptCopy[sculptMode][0]}` : `${selectionMode} · select before ${sculptCopy[sculptMode][0]}`
   document.querySelector('#context-copy')!.textContent = copy
 }
 
 function renderLayers() {
+  const focusedButton = document.activeElement instanceof HTMLButtonElement && layerList.contains(document.activeElement) ? document.activeElement : undefined
+  const focusedLayer = focusedButton?.closest<HTMLElement>('[data-layer-id]')?.dataset.layerId
+  const focusedAction = focusedButton?.dataset.layerAction
   const counts = new Map<number, number>()
   voxelDocument.forEachVoxel((_x, _y, _z, _color, layerId) => counts.set(layerId, (counts.get(layerId) ?? 0) + 1))
-  layerList.innerHTML = voxelDocument.layers.map(layer => {
+  layerList.innerHTML = voxelDocument.layers.toReversed().map(layer => {
     const name = escapeHtml(layer.name)
     const count = counts.get(layer.id) ?? 0
     return `<div class="layer-row" data-active="${layer.id === voxelDocument.activeLayerId}" data-layer-id="${layer.id}" role="listitem">
@@ -441,60 +561,141 @@ function renderLayers() {
       <button type="button" data-layer-action="delete" aria-label="Delete ${name}" title="Delete layer" ${voxelDocument.layers.length === 1 ? 'disabled' : ''}>${icon('trash')}</button>
     </div>`
   }).join('')
+  if (focusedLayer && focusedAction) (layerList.querySelector<HTMLButtonElement>(`[data-layer-id="${focusedLayer}"] [data-layer-action="${focusedAction}"]`)
+    ?? layerList.querySelector<HTMLButtonElement>('[data-active="true"] [data-layer-action="select"]'))?.focus({ preventScroll: true })
 }
 
-function closeSelectionMenu(restoreFocus = false) {
-  if (selectionMenu.hidden) return
-  selectionMenu.hidden = true
-  if (restoreFocus) selectionMenuReturnFocus?.focus({ preventScroll: true })
-  selectionMenuReturnFocus = undefined
+function closeToolPopups() {
+  for (const popup of toolPopups) if (popup.matches(':popover-open')) popup.hidePopover()
 }
 
-function openSelectionMenu(x: number, y: number) {
-  if (!selection.count || renderMode) return
-  selectionMenuReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : undefined
-  selectionMenu.hidden = false
-  const margin = 12
-  selectionMenu.style.left = `${Math.max(margin, Math.min(x, innerWidth - selectionMenu.offsetWidth - margin))}px`
-  selectionMenu.style.top = `${Math.max(margin, Math.min(y, innerHeight - selectionMenu.offsetHeight - margin))}px`
-  selectionMenu.querySelector<HTMLButtonElement>('button')!.focus({ preventScroll: true })
-  announce('Selection actions opened')
+function popupForTrigger(trigger: HTMLButtonElement) {
+  const id = trigger.getAttribute('popovertarget')
+  return id ? document.getElementById(id) : null
+}
+
+function showToolPopup(tool: Tool) {
+  clearHoverPopupTimer()
+  const trigger = document.querySelector<HTMLButtonElement>(`.tool-dock button[data-tool="${tool}"]`)
+  const popup = trigger && popupForTrigger(trigger)
+  if (!trigger || !popup) return
+  trigger.focus({ preventScroll: true })
+  if (!popup.matches(':popover-open')) popup.showPopover()
+  ;(popup.querySelector<HTMLElement>('.tool-mode-list [aria-pressed="true"]')
+    ?? popup.querySelector<HTMLElement>('button:not(:disabled), input:not(:disabled)'))?.focus({ preventScroll: true })
+}
+
+function clearHoverPopupTimer() {
+  if (hoverPopupTimer) clearTimeout(hoverPopupTimer)
+  hoverPopupTimer = undefined
+}
+
+function scheduleHoverPopupClose(trigger: HTMLButtonElement, popup: HTMLElement) {
+  clearHoverPopupTimer()
+  hoverPopupTimer = setTimeout(() => {
+    hoverPopupTimer = undefined
+    if (!trigger.matches(':hover') && !popup.matches(':hover, :focus-within') && popup.matches(':popover-open')) popup.hidePopover()
+  }, 140)
+}
+
+for (const trigger of document.querySelectorAll<HTMLButtonElement>('.tool-dock button[data-tool][popovertarget]')) {
+  const popup = popupForTrigger(trigger)
+  if (!popup) continue
+  trigger.addEventListener('pointerenter', event => {
+    if (event.pointerType !== 'mouse') return
+    clearHoverPopupTimer()
+    if (!popup.matches(':popover-open')) popup.showPopover()
+  })
+  trigger.addEventListener('pointerleave', event => { if (event.pointerType === 'mouse') scheduleHoverPopupClose(trigger, popup) })
+  popup.addEventListener('pointerenter', clearHoverPopupTimer)
+  popup.addEventListener('pointerleave', event => { if (event.pointerType === 'mouse') scheduleHoverPopupClose(trigger, popup) })
 }
 
 function setTool(tool: Tool) {
-  closeSelectionMenu()
+  if (pendingPaste && tool !== 'sculpt') cancelPendingPaste()
+  closePanel()
   activeTool = tool
   auxiliaryTool = undefined
   studio.dataset.tool = tool
   renderer.setAuxiliary()
   renderer.setTool(tool)
+  renderer.setPaintMode(paintMode)
   renderer.setSculptMode(sculptMode)
   document.querySelector('#context-title')!.textContent = toolCopy[tool][0]
   renderToolControls()
   announce(`${toolCopy[tool][0]} tool selected`)
 }
 
+function setPaintMode(mode: PaintMode) {
+  paintMode = mode
+  auxiliaryTool = undefined
+  renderer.setAuxiliary()
+  renderer.setPaintMode(mode)
+  document.querySelector('#context-title')!.textContent = toolCopy[activeTool][0]
+  renderToolControls()
+  announce(`${paintLabels[mode]} operation selected`)
+}
+
 function setSculptMode(mode: SculptMode) {
-  closeSelectionMenu()
+  if (pendingPaste && mode !== 'move') cancelPendingPaste()
   sculptMode = mode
   renderer.setSculptMode(mode)
   renderToolControls()
-  announce(`${sculptCopy[mode][0]} sculpt operation selected`)
+  announce(`${sculptCopy[mode][0]} operation selected`)
 }
 
 function setFillShape(shape: FillShape) {
   fillShape = shape
   renderer.setFillShape(shape)
   renderToolControls()
-  announce(`${shape} fill shape selected`)
+  announce(`${shape} volume shape selected`)
 }
 
 function setAuxiliary(tool?: AuxiliaryTool) {
-  closeSelectionMenu()
   auxiliaryTool = auxiliaryTool === tool ? undefined : tool
   renderer.setAuxiliary(auxiliaryTool)
   document.querySelector('#context-title')!.textContent = auxiliaryTool ? 'Eyedropper' : toolCopy[activeTool][0]
   renderToolControls()
+}
+
+function clearShortcutPrefix() {
+  if (shortcutTimer) clearTimeout(shortcutTimer)
+  shortcutTimer = undefined
+  shortcutPrefix = undefined
+}
+
+function armShortcut(prefix: 'q' | 'w' | 's') {
+  clearShortcutPrefix()
+  shortcutPrefix = prefix
+  shortcutTimer = setTimeout(clearShortcutPrefix, 1500)
+  announce(prefix === 'q' ? 'Select selected. Press 1 for Point, 2 for Surface, 3 for Texture, or 4 for Body.'
+    : prefix === 'w' ? 'Place selected. Press 1 for Paint, 2 for Volume, or 3 for Eyedropper.'
+    : 'Sculpt selected. Press 1 for Push Pull, 2 for Move, or 3 for Erase.')
+}
+
+function runShortcutChord(prefix: 'q' | 'w' | 's', key: string) {
+  if (prefix === 'q') {
+    const mode = ({ 1: 'point', 2: 'surface', 3: 'texture', 4: 'body' } as const)[key as '1' | '2' | '3' | '4']
+    if (!mode) return false
+    selectionMode = mode
+    renderer.setSelectionMode(mode)
+    persistToolState()
+    renderToolControls()
+    announce(`${selectionLabels[mode]} selection mode`)
+    return true
+  }
+  if (prefix === 'w') {
+    if (key === '1') setPaintMode('paint')
+    else if (key === '2') setPaintMode('fill')
+    else if (key === '3') setAuxiliary('pick')
+    else return false
+    return true
+  }
+  if (key === '1') setSculptMode('push')
+  else if (key === '2') setSculptMode('move')
+  else if (key === '3') setSculptMode('erase')
+  else return false
+  return true
 }
 
 function renderDocumentFacts() {
@@ -533,9 +734,9 @@ function renderPbrMapCount() {
 
 function renderPaletteMaterial() {
   const material = voxelDocument.materials[activeColor]
-  for (const property of ['roughness', 'metalness', 'opacity', 'transmission', 'ior'] as const) {
+  for (const property of ['roughness', 'metalness', 'emissiveIntensity', 'opacity', 'transmission', 'ior'] as const) {
     const value = material[property]
-    const label = property === 'ior' ? 'index of refraction' : property
+    const label = property === 'ior' ? 'index of refraction' : property === 'emissiveIntensity' ? 'emission' : property
     const input = document.querySelector<HTMLInputElement>(`#${property}`)!
     input.value = String(value)
     input.setAttribute('aria-label', `${material.name} ${label}`)
@@ -594,7 +795,7 @@ function fillSelection() {
   renderer.markDirty(dirtyChunks(voxelDocument, command.changes.map(change => change.id)))
   renderDocumentFacts()
   queueSave()
-  announce(`Filled ${formatNumber(selection.count)} ${selection.count === 1 ? 'voxel' : 'voxels'}`)
+  announce(`Painted ${formatNumber(selection.count)} ${selection.count === 1 ? 'voxel' : 'voxels'}`)
 }
 
 function eraseSelection() {
@@ -614,11 +815,66 @@ function eraseSelection() {
   announce(`Erased ${formatNumber(count)} ${count === 1 ? 'voxel' : 'voxels'}`)
 }
 
+function copySelection(report = true) {
+  if (!selection.count || selection.floating) { showToast('Select placed voxels before copying.'); return false }
+  const copied: ClipboardVoxel[] = []
+  for (const cell of selection.cells) {
+    const color = voxelDocument.getLayerVoxel(cell.x, cell.y, cell.z)
+    if (color) copied.push({ ...cell, color })
+  }
+  if (!copied.length) return false
+  clipboard = copied
+  renderToolControls()
+  if (report) announce(`Copied ${formatNumber(copied.length)} ${copied.length === 1 ? 'voxel' : 'voxels'}`)
+  return true
+}
+
+function cutSelection() {
+  const count = selection.count
+  if (!canEditActiveLayer() || !copySelection(false)) return
+  eraseSelection()
+  announce(`Cut ${formatNumber(count)} ${count === 1 ? 'voxel' : 'voxels'}`)
+}
+
+function cancelPendingPaste() {
+  if (!pendingPaste) return
+  pendingPaste = undefined
+  renderer.clearSelection()
+}
+
+function pasteSelection() {
+  if (pendingPaste) { showToast('Place or cancel the current paste first.'); return }
+  if (!clipboard.length) { showToast('Copy or cut voxels before pasting.'); return }
+  if (!canEditActiveLayer()) return
+  const voxels = clipboard.filter(cell => voxelDocument.contains(cell.x, cell.y, cell.z)).map(cell => ({ ...cell }))
+  if (!voxels.length) { showToast('The copied voxels are outside this canvas.', 'warning'); return }
+  pendingPaste = { voxels, selectionBefore: selection.cells.map(cell => ({ ...cell })), layerId: voxelDocument.activeLayerId }
+  setTool('sculpt')
+  setSculptMode('move')
+  renderer.setFloatingSelection(voxels)
+  closeToolPopups()
+  renderer.focusViewport()
+  announce(`Pasted ${formatNumber(voxels.length)} ${voxels.length === 1 ? 'voxel' : 'voxels'}; drag to place`)
+}
+
 let renderer!: VoxelRenderer
+
+function activateLayer(id: number) {
+  const layer = voxelDocument.getLayer(id)
+  if (!layer) return
+  cancelPendingPaste()
+  voxelDocument.setActiveLayer(id)
+  renderer.clearSelection()
+  renderDocumentFacts()
+  renderToolControls()
+  queueSave()
+  announce(`${layer.name} active`)
+}
+
 renderer = new VoxelRenderer(document.querySelector('#viewport')!, voxelDocument, settings, {
   onSelectionChange(next) {
+    if (pendingPaste && !next.floating) pendingPaste = undefined
     selection = next
-    if (!next.count) closeSelectionMenu()
     if (next.count) dismissGuide()
     renderToolControls()
     announce(next.count ? `${formatNumber(next.count)} ${next.count === 1 ? 'voxel' : 'voxels'} selected` : 'Selection cleared')
@@ -633,23 +889,39 @@ renderer = new VoxelRenderer(document.querySelector('#viewport')!, voxelDocument
     session.fillShape(min, max, activeColor, shape, axis)
     const command = session.commit()
     history.push(command, selection.cells, selection.cells, voxelDocument.activeLayerId)
-    if (!command) { announce('Fill made no changes'); return }
+    if (!command) { announce('Volume made no changes'); return }
     renderer.markDirty(dirtyChunks(voxelDocument, command.changes.map(change => change.id)))
     renderDocumentFacts()
     queueSave()
     announce(`${shape} volume filled`)
   },
-  onSelectionMenu(position) {
-    if (position) openSelectionMenu(position.x, position.y)
-    else closeSelectionMenu()
-  },
   onPushPullCommit(cells, normal, distance, move) {
     if (!canEditActiveLayer()) return
+    if (pendingPaste && move) {
+      const paste = pendingPaste
+      pendingPaste = undefined
+      const session = new EditSession(voxelDocument)
+      const nextSelection = paste.voxels.map(voxel => ({
+        x: voxel.x + normal.x * distance,
+        y: voxel.y + normal.y * distance,
+        z: voxel.z + normal.z * distance,
+      }))
+      paste.voxels.forEach((voxel, index) => session.set(nextSelection[index].x, nextSelection[index].y, nextSelection[index].z, voxel.color))
+      const command = session.commit()
+      history.push(command, paste.selectionBefore, nextSelection, paste.layerId)
+      if (command) {
+        renderer.markDirty(dirtyChunks(voxelDocument, command.changes.map(change => change.id)))
+        renderDocumentFacts()
+        queueSave()
+      }
+      announce(`Placed ${formatNumber(nextSelection.length)} ${nextSelection.length === 1 ? 'voxel' : 'voxels'}`)
+      return
+    }
     const session = new EditSession(voxelDocument)
     const amount = move ? moveVoxels(voxelDocument, session, cells, normal, distance) : pushPull(voxelDocument, session, cells, normal, distance)
     const command = session.commit()
-    const nextSelection = cells.map(cell => ({ x: cell.x + normal.x * distance, y: cell.y + normal.y * distance, z: cell.z + normal.z * distance }))
-      .filter(cell => voxelDocument.getVoxelLayer(cell.x, cell.y, cell.z) === voxelDocument.activeLayerId)
+    const nextSelection = cells.map(cell => ({ x: cell.x + normal.x * amount, y: cell.y + normal.y * amount, z: cell.z + normal.z * amount }))
+      .filter(cell => voxelDocument.getVisibleVoxelLayer(cell.x, cell.y, cell.z) === voxelDocument.activeLayerId)
     history.push(command, selection.cells, nextSelection, voxelDocument.activeLayerId)
     if (!command) return
     renderer.markDirty(dirtyChunks(voxelDocument, command.changes.map(change => change.id)))
@@ -659,7 +931,9 @@ renderer = new VoxelRenderer(document.querySelector('#viewport')!, voxelDocument
   },
   onPushPullPreview(cells, distance, move) {
     if (cells === undefined) { renderToolControls(); return }
-    document.querySelector('#context-copy')!.textContent = distance
+    document.querySelector('#context-copy')!.textContent = pendingPaste
+      ? `${formatNumber(cells)} pasted ${cells === 1 ? 'voxel' : 'voxels'} · ${distance ? `move ${Math.abs(distance)}` : 'drag to place'}`
+      : distance
       ? `${move ? 'Move' : distance > 0 ? 'Pull' : 'Push'} ${Math.abs(distance)} · ${formatNumber(cells)} selected`
       : `${formatNumber(cells)} ${cells === 1 ? 'voxel' : 'voxels'} selected · drag to ${move ? 'move' : 'reshape'}`
   },
@@ -667,6 +941,7 @@ renderer = new VoxelRenderer(document.querySelector('#viewport')!, voxelDocument
     selectColor(color)
     setAuxiliary()
   },
+  onLayerSelect: activateLayer,
   onHover(cell) {
     document.querySelector('#coordinate-status')!.textContent = cell ? `X ${cell.x}   Y ${cell.y}   Z ${cell.z}` : 'X --   Y --   Z --'
   },
@@ -687,13 +962,16 @@ renderer = new VoxelRenderer(document.querySelector('#viewport')!, voxelDocument
 })
 
 function replaceDocument(next: VoxelDocument, preserveMaterials = false) {
+  pendingPaste = undefined
+  clipboard = []
   voxelDocument = next
   history = new History()
   if (!preserveMaterials) {
-    activeColor = paletteIndices()[0] ?? 1
+    activeColor = paletteIndices('all')[0] ?? 1
     recentColors = [activeColor]
     loadedPbrMaps.clear()
   }
+  persistToolState()
   renderer.setDocument(voxelDocument, preserveMaterials)
   renderer.setActiveColor(activeColor)
   renderPalette()
@@ -703,6 +981,8 @@ function replaceDocument(next: VoxelDocument, preserveMaterials = false) {
 }
 
 function openPanel(tab = 'model') {
+  if (layerPanel.matches(':popover-open')) layerPanel.hidePopover()
+  closeToolPopups()
   studio.dataset.panelOpen = 'true'
   stagePanel.dataset.open = 'true'
   stagePanel.setAttribute('aria-hidden', 'false')
@@ -733,6 +1013,7 @@ function filename(extension: string) {
 }
 
 function undo() {
+  if (pendingPaste) { cancelPendingPaste(); announce('Paste canceled'); return }
   const result = history.undo(voxelDocument)
   if (!result) return
   if (result.layerId !== undefined) voxelDocument.setActiveLayer(result.layerId)
@@ -744,6 +1025,7 @@ function undo() {
 }
 
 function redo() {
+  if (pendingPaste) { cancelPendingPaste(); announce('Paste canceled'); return }
   const result = history.redo(voxelDocument)
   if (!result) return
   if (result.layerId !== undefined) voxelDocument.setActiveLayer(result.layerId)
@@ -755,23 +1037,41 @@ function redo() {
 }
 
 function toggleRenderMode() {
-  closeSelectionMenu()
+  if (!renderMode) cancelPendingPaste()
   renderMode = !renderMode
-  studio.dataset.renderMode = String(renderMode)
-  document.querySelectorAll<HTMLElement>('.tool-dock, .color-rail, .context-dock').forEach(element => { element.inert = renderMode })
-  renderer.setRenderMode(renderMode)
   const button = document.querySelector<HTMLButtonElement>('[data-action="render"]')!
+  const focusFromTool = toolPopups.some(popup => popup.contains(document.activeElement)) || Boolean((document.activeElement as HTMLElement | null)?.closest('.tool-dock'))
+  if (renderMode) { clearShortcutPrefix(); closeToolPopups(); if (focusFromTool) button.focus({ preventScroll: true }) }
+  studio.dataset.renderMode = String(renderMode)
+  document.querySelectorAll<HTMLElement>('.tool-dock, .context-dock').forEach(element => { element.inert = renderMode })
+  renderer.setRenderMode(renderMode)
   button.setAttribute('aria-pressed', String(renderMode))
-  if (renderMode) openPanel('render')
+  if (renderMode && !matchMedia('(max-width: 840px)').matches) openPanel('render')
   announce(renderMode ? 'Render mode on' : 'Render mode off')
 }
 
 document.addEventListener('click', async event => {
   const target = event.target as HTMLElement
+  const clipboardButton = target.closest<HTMLButtonElement>('[data-clipboard-action]')
+  if (clipboardButton) {
+    const action = clipboardButton.dataset.clipboardAction
+    if (action === 'cut') cutSelection()
+    if (action === 'copy') copySelection()
+    if (action === 'paste') pasteSelection()
+    clipboardButton.closest<HTMLElement>('[popover]')?.hidePopover()
+    return
+  }
+  const paletteFilterButton = target.closest<HTMLButtonElement>('[data-palette-filter]')
+  if (paletteFilterButton) {
+    const filter = paletteFilterButton.dataset.paletteFilter as PaletteFilter
+    paletteFilter = paletteFilter === filter ? 'all' : filter
+    renderPalette()
+    return
+  }
   const paletteViewButton = target.closest<HTMLButtonElement>('[data-palette-view]')
   if (paletteViewButton) {
     paletteView = paletteViewButton.dataset.paletteView as typeof paletteView
-    localStorage.setItem('voxel-studio-palette-view', paletteView)
+    writeLocalStorage('voxel-studio-palette-view', paletteView)
     renderPalette()
     return
   }
@@ -782,6 +1082,7 @@ document.addEventListener('click', async event => {
       const layer = voxelDocument.createLayer()
       renderer.clearSelection()
       renderDocumentFacts()
+      renderToolControls()
       queueSave()
       announce(`${layer.name} created`)
       return
@@ -790,16 +1091,11 @@ document.addEventListener('click', async event => {
     const layer = voxelDocument.getLayer(id)
     if (!layer) return
     if (action === 'select') {
-      voxelDocument.setActiveLayer(id)
-      renderer.clearSelection()
-      renderDocumentFacts()
-      renderToolControls()
-      queueSave()
-      announce(`${layer.name} active`)
+      activateLayer(id)
     }
     if (action === 'visibility') {
       layer.visible = !layer.visible
-      if (id === voxelDocument.activeLayerId) renderer.clearSelection()
+      renderer.setSelection(selection.cells)
       renderer.markDirty(dirtyChunks(voxelDocument, voxelDocument.chunks.keys()))
       renderDocumentFacts()
       queueSave()
@@ -820,28 +1116,37 @@ document.addEventListener('click', async event => {
       renderer.clearSelection()
       renderer.markDirty(dirtyChunks(voxelDocument, ids))
       renderDocumentFacts()
+      renderToolControls()
       queueSave()
       announce(`${layer.name} deleted`)
     }
     return
   }
-  const selectionAction = target.closest<HTMLButtonElement>('[data-selection-action]')?.dataset.selectionAction
-  if (selectionAction) {
-    closeSelectionMenu(true)
-    selectionAction === 'paint' ? fillSelection() : eraseSelection()
-    return
-  }
   const selectionButton = target.closest<HTMLButtonElement>('[data-selection-mode]')
   if (selectionButton) {
+    if (activeTool !== 'select') setTool('select')
     selectionMode = selectionButton.dataset.selectionMode as SelectionMode
     renderer.setSelectionMode(selectionMode)
+    persistToolState()
     renderToolControls()
-    announce(`${selectionButton.textContent} selection mode`)
+    selectionButton.closest<HTMLElement>('[popover]')?.hidePopover()
+    announce(`${selectionLabels[selectionMode]} selection mode`)
+    return
+  }
+  const paintButton = target.closest<HTMLButtonElement>('[data-paint-mode]')
+  if (paintButton) {
+    if (activeTool !== 'paint') setTool('paint')
+    const mode = paintButton.dataset.paintMode as PaintMode
+    setPaintMode(mode)
+    paintButton.closest<HTMLElement>('[popover]')?.hidePopover()
+    if (mode === 'fill' && event.detail === 0) requestAnimationFrame(() => fillOptions.querySelector<HTMLButtonElement>('button')?.focus())
     return
   }
   const sculptButton = target.closest<HTMLButtonElement>('[data-sculpt-mode]')
   if (sculptButton) {
+    if (activeTool !== 'sculpt') setTool('sculpt')
     setSculptMode(sculptButton.dataset.sculptMode as SculptMode)
+    sculptButton.closest<HTMLElement>('[popover]')?.hidePopover()
     return
   }
   const fillShapeButton = target.closest<HTMLButtonElement>('[data-fill-shape]')
@@ -851,7 +1156,9 @@ document.addEventListener('click', async event => {
   }
   const auxiliaryButton = target.closest<HTMLButtonElement>('[data-auxiliary]')
   if (auxiliaryButton) {
+    if (activeTool !== 'paint') setTool('paint')
     setAuxiliary(auxiliaryButton.dataset.auxiliary as AuxiliaryTool)
+    auxiliaryButton.closest<HTMLElement>('[popover]')?.hidePopover()
     return
   }
   const toolButton = target.closest<HTMLButtonElement>('button[data-tool]')
@@ -860,7 +1167,11 @@ document.addEventListener('click', async event => {
     return
   }
   const colorButton = target.closest<HTMLButtonElement>('[data-color]')
-  if (colorButton) { selectColor(Number(colorButton.dataset.color)); return }
+  if (colorButton) {
+    if (colorButton.closest('#paint-tool-popup') && activeTool !== 'paint') setTool('paint')
+    selectColor(Number(colorButton.dataset.color))
+    return
+  }
   const tabButton = target.closest<HTMLButtonElement>('[data-tab]')
   if (tabButton) { openPanel(tabButton.dataset.tab); return }
   const button = target.closest<HTMLButtonElement>('[data-action]')
@@ -872,7 +1183,10 @@ document.addEventListener('click', async event => {
   if (action === 'render') toggleRenderMode()
   if (action === 'panel') stagePanel.dataset.open ? closePanel() : openPanel('model')
   if (action === 'close-panel') closePanel()
-  if (action === 'palette') openPanel('palette')
+  if (action === 'palette') {
+    if (button.closest('#paint-tool-popup') && activeTool !== 'paint') setTool('paint')
+    openPanel('palette')
+  }
   if (action === 'dismiss-guide') dismissGuide()
   if (action === 'clear-pbr') {
     renderer.clearPbrMaps(activeColor)
@@ -904,6 +1218,7 @@ document.addEventListener('click', async event => {
     voxelDocument.materials[free] = { ...voxelDocument.materials[activeColor], name: `${voxelDocument.materials[activeColor].name} copy`.slice(0, 40) }
     activeColor = free
     recentColors = [free, ...recentColors].slice(0, 6)
+    persistToolState()
     renderer.updatePalette()
     renderer.updatePaletteMaterial(free)
     renderPalette()
@@ -938,13 +1253,11 @@ resizeForm.addEventListener('submit', event => {
   event.preventDefault()
   const data = new FormData(resizeForm)
   const dimensions: Dimensions = { x: Number(data.get('x')), y: Number(data.get('y')), z: Number(data.get('z')) }
-  let cropped = 0
-  voxelDocument.forEachVoxel((x, y, z) => { if (x >= dimensions.x || y >= dimensions.y || z >= dimensions.z) cropped++ })
+  const anchor: ResizeAnchor = data.get('anchor') === 'origin' ? 'origin' : 'center'
+  const { document: resized, cropped } = resizeVoxelDocument(voxelDocument, dimensions, anchor)
   if (cropped && !confirm(`Resize and remove ${formatNumber(cropped)} voxels outside the new bounds?`)) return
-  const resized = new VoxelDocument(dimensions, voxelDocument.name, voxelDocument.palette, voxelDocument.materials, voxelDocument.layers, voxelDocument.activeLayerId)
-  voxelDocument.forEachVoxel((x, y, z, color, layerId) => { if (resized.contains(x, y, z)) resized.setVoxel(x, y, z, color, layerId) })
   replaceDocument(resized, true)
-  showToast(`Canvas resized to ${resized.dimensions.x} × ${resized.dimensions.y} × ${resized.dimensions.z}.`)
+  showToast(`Canvas resized to ${resized.dimensions.x} × ${resized.dimensions.y} × ${resized.dimensions.z} from ${anchor}.`)
 })
 
 function updateActiveColor(value: string) {
@@ -976,19 +1289,32 @@ layerList.addEventListener('change', event => {
     queueSave()
     announce(`Layer renamed to ${voxelDocument.getLayer(layer.id)!.name}`)
   }
-  renderLayers()
+  const name = voxelDocument.getLayer(layer.id)!.name
+  const row = input.closest<HTMLElement>('[data-layer-id]')!
+  input.value = name
+  input.setAttribute('aria-label', `Rename ${name}`)
+  row.querySelector<HTMLButtonElement>('[data-layer-action="select"]')!.setAttribute('aria-label', `Make ${name} active`)
+  row.querySelector<HTMLButtonElement>('[data-layer-action="visibility"]')!.setAttribute('aria-label', `${layer.visible ? 'Hide' : 'Show'} ${name}`)
+  row.querySelector<HTMLButtonElement>('[data-layer-action="lock"]')!.setAttribute('aria-label', `${layer.locked ? 'Unlock' : 'Lock'} ${name}`)
+  row.querySelector<HTMLButtonElement>('[data-layer-action="delete"]')!.setAttribute('aria-label', `Delete ${name}`)
+  renderToolControls()
 })
 
 layerList.addEventListener('keydown', event => {
-  if (event.key === 'Enter' && event.target instanceof HTMLInputElement) event.target.blur()
+  if (event.key === 'Enter' && !event.isComposing && event.target instanceof HTMLInputElement) {
+    event.preventDefault()
+    const select = event.target.closest<HTMLElement>('[data-layer-id]')?.querySelector<HTMLButtonElement>('[data-layer-action="select"]')
+    event.target.blur()
+    select?.focus()
+  }
 })
 
 document.querySelector<HTMLElement>('[data-panel="palette"]')!.addEventListener('input', event => {
   const target = event.target as HTMLInputElement | HTMLSelectElement
   if (target instanceof HTMLInputElement && target.dataset.pbrMap) { void loadPbrMap(target); return }
-  if (target.id === 'roughness' || target.id === 'metalness' || target.id === 'opacity' || target.id === 'transmission' || target.id === 'ior') {
+  if (target.id === 'roughness' || target.id === 'metalness' || target.id === 'emissiveIntensity' || target.id === 'opacity' || target.id === 'transmission' || target.id === 'ior') {
     const value = Number(target.value)
-    voxelDocument.materials[activeColor][target.id as 'roughness' | 'metalness' | 'opacity' | 'transmission' | 'ior'] = value
+    voxelDocument.materials[activeColor][target.id as 'roughness' | 'metalness' | 'emissiveIntensity' | 'opacity' | 'transmission' | 'ior'] = value
     document.querySelector(`#${target.id}-output`)!.textContent = value.toFixed(2)
     renderer.updatePaletteMaterial(activeColor)
     renderMaterialPreview()
@@ -998,7 +1324,7 @@ document.querySelector<HTMLElement>('[data-panel="palette"]')!.addEventListener(
 
 document.querySelector<HTMLElement>('[data-panel="palette"]')!.addEventListener('change', event => {
   const target = event.target as HTMLInputElement
-  if (target.matches('#roughness, #metalness, #opacity, #transmission, #ior')) renderPalette()
+  if (target.matches('#roughness, #metalness, #emissiveIntensity, #opacity, #transmission, #ior')) renderPalette()
 })
 
 document.querySelector<HTMLElement>('[data-panel="render"]')!.addEventListener('input', event => {
@@ -1035,14 +1361,21 @@ document.querySelector<HTMLInputElement>('#fill-depth')!.addEventListener('chang
 document.addEventListener('keydown', event => {
   const editingText = event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement || event.target instanceof HTMLTextAreaElement
   const key = event.key.toLowerCase()
-  if (event.key === 'Escape' && !selectionMenu.hidden) {
+  if (event.key === 'Escape' && toolPopups.some(popup => popup.matches(':popover-open'))) { clearShortcutPrefix(); return }
+  if (event.key === 'Escape' && shortcutPrefix) {
     event.preventDefault()
-    closeSelectionMenu(true)
+    clearShortcutPrefix()
     return
   }
   if (event.key === 'Escape' && auxiliaryTool) {
     event.preventDefault()
     setAuxiliary()
+    return
+  }
+  if (event.key === 'Escape' && pendingPaste) {
+    event.preventDefault()
+    cancelPendingPaste()
+    announce('Paste canceled')
     return
   }
   if (event.key === 'Escape' && selection.count) {
@@ -1052,18 +1385,43 @@ document.addEventListener('keydown', event => {
   }
   if ((event.metaKey || event.ctrlKey) && (key === 'z' || key === 'y') && !editingText) {
     event.preventDefault()
+    clearShortcutPrefix()
     event.shiftKey || key === 'y' ? redo() : undo()
     return
   }
-  if (editingText || event.metaKey || event.ctrlKey || event.altKey) return
-  const shortcuts: Record<string, Tool> = { q: 'select', w: 'paint', s: 'sculpt', a: 'fill' }
-  const tool = shortcuts[key]
-  if (tool) { event.preventDefault(); setTool(tool); return }
-  if (key === 'e') { event.preventDefault(); setTool('paint'); setAuxiliary('pick'); return }
-  if (key === 'd' || key === 'x') {
+  if ((event.metaKey || event.ctrlKey) && ['x', 'c', 'v'].includes(key) && !editingText && !renderMode) {
     event.preventDefault()
-    setTool('sculpt')
-    setSculptMode(key === 'd' ? 'move' : 'erase')
+    clearShortcutPrefix()
+    if (key === 'x') cutSelection()
+    if (key === 'c') copySelection()
+    if (key === 'v') pasteSelection()
+    return
+  }
+  if (editingText || event.metaKey || event.ctrlKey || event.altKey) { clearShortcutPrefix(); return }
+  if (shortcutPrefix) {
+    const prefix = shortcutPrefix
+    clearShortcutPrefix()
+    if (runShortcutChord(prefix, key)) {
+      event.preventDefault()
+      closeToolPopups()
+      return
+    }
+  }
+  const shortcuts: Record<string, Tool> = { q: 'select', w: 'paint', s: 'sculpt' }
+  const tool = shortcuts[key]
+  if (tool && !renderMode) {
+    event.preventDefault()
+    closeToolPopups()
+    setTool(tool)
+    armShortcut(key as 'q' | 'w' | 's')
+    showToolPopup(tool)
+    return
+  }
+  if (key === 'l' && !renderMode) {
+    event.preventDefault()
+    closeToolPopups()
+    setTool('layer')
+    showToolPopup('layer')
     return
   }
   if (key === 'f') { event.preventDefault(); renderer.frameModel() }
@@ -1071,21 +1429,9 @@ document.addEventListener('keydown', event => {
   if (event.key === '?') { welcome.hidden = false }
 })
 
-document.addEventListener('pointerdown', event => {
-  if (!selectionMenu.hidden && !selectionMenu.contains(event.target as Node)) closeSelectionMenu()
-})
-
-selectionMenu.addEventListener('keydown', event => {
-  if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
-  event.preventDefault()
-  const buttons = [...selectionMenu.querySelectorAll<HTMLButtonElement>('button')]
-  const direction = event.key === 'ArrowDown' ? 1 : -1
-  const index = Math.max(0, buttons.indexOf(document.activeElement as HTMLButtonElement))
-  buttons[(index + direction + buttons.length) % buttons.length].focus()
-})
-
 renderer.setActiveColor(activeColor)
 renderer.setSelectionMode(selectionMode)
+renderer.setPaintMode(paintMode)
 renderer.setFillShape(fillShape)
 renderer.setFillDepth(fillDepth)
 renderPalette()

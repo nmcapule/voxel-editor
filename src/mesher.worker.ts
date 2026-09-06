@@ -36,5 +36,6 @@ scope.onmessage = (event: MessageEvent<WorkerRequest>) => {
   for (const result of results) transfers.push(result.positions.buffer, result.normals.buffer, result.colors.buffer, result.uvs.buffer, result.indices.buffer, result.faceLines.buffer)
   scope.postMessage({ type: 'meshed', results }, transfers)
 }
+scope.postMessage({ type: 'ready' })
 
 export {}

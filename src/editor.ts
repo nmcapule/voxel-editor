@@ -12,11 +12,13 @@ export interface Vec3 {
 export interface Dimensions extends Vec3 {}
 
 export type FillShape = 'box' | 'sphere' | 'cylinder'
+export type ResizeAnchor = 'origin' | 'center'
 
 export interface PaletteMaterial {
   name: string
   roughness: number
   metalness: number
+  emissiveIntensity: number
   opacity: number
   transmission: number
   ior: number
@@ -29,12 +31,15 @@ export interface VoxelLayer {
   locked: boolean
 }
 
+export interface LayerChunkSnapshot {
+  layerId: number
+  data: Uint8Array
+}
+
 export interface ChunkChange {
   id: number
-  before?: Uint8Array
-  after?: Uint8Array
-  beforeLayers?: Uint16Array
-  afterLayers?: Uint16Array
+  before?: LayerChunkSnapshot[]
+  after?: LayerChunkSnapshot[]
 }
 
 export interface EditCommand {
@@ -60,10 +65,10 @@ export const DEFAULT_PALETTE = new Uint32Array([
   0xe54b4b, 0xb83b5e, 0x8f5db7, 0x4b55a8, 0x3978c5, 0x43a6c6, 0x56b4a6,
   0x57a773, 0x87b34d, 0xb9c46a, 0xe7d6a2, 0xd99f65, 0xaa6f46, 0x754f44,
   0x593c58, 0x765d86, 0x9d84b7, 0xc7afd4, 0xf0b7c8, 0xe86f92, 0xf39caa,
-  0x8bd3c7, 0xb8e0d2, 0xa9c6ea, 0xd7e3fc,
+  0x8bd3c7, 0xb8e0d2, 0xa9c6ea, 0xd7e3fc, 0xffb45e, 0x63d8ff,
 ])
 
-const material = (name: string, roughness: number, metalness = 0, opacity = 1, transmission = 0, ior = 1.5): PaletteMaterial => ({ name, roughness, metalness, opacity, transmission, ior })
+const material = (name: string, roughness: number, metalness = 0, opacity = 1, transmission = 0, ior = 1.5, emissiveIntensity = 0): PaletteMaterial => ({ name, roughness, metalness, emissiveIntensity, opacity, transmission, ior })
 const DEFAULT_MATERIAL = material('Matte', 0.68, 0.02)
 const DEFAULT_PALETTE_MATERIALS: readonly PaletteMaterial[] = [
   material('Empty', 0.68),
@@ -83,6 +88,8 @@ const DEFAULT_PALETTE_MATERIALS: readonly PaletteMaterial[] = [
   material('Rose ceramic', 0.26), material('Jade glass', 0.16, 0, 1, 0.8, 1.5),
   material('Mint plastic', 0.36), material('Frosted glass', 0.34, 0, 1, 0.68, 1.5),
   material('Blue glass', 0.08, 0, 1, 0.86, 1.5),
+  material('Warm light', 0.3, 0, 1, 0, 1.5, 2.5),
+  material('Cool light', 0.3, 0, 1, 0, 1.5, 2.5),
 ]
 
 function materialValue(value: number | undefined, fallback: number, min = 0, max = 1) {
@@ -108,6 +115,11 @@ function equalChunks(a?: ArrayLike<number>, b?: ArrayLike<number>) {
   return true
 }
 
+function equalChunkSnapshots(a?: LayerChunkSnapshot[], b?: LayerChunkSnapshot[]) {
+  if (!a || !b || a.length !== b.length) return a === b
+  return a.every((chunk, index) => chunk.layerId === b[index].layerId && equalChunks(chunk.data, b[index].data))
+}
+
 export function normalizeDimensions(dimensions: Dimensions): Dimensions {
   return {
     x: Math.max(16, Math.min(256, Math.round(dimensions.x))),
@@ -117,8 +129,7 @@ export function normalizeDimensions(dimensions: Dimensions): Dimensions {
 }
 
 export class VoxelDocument {
-  readonly chunks = new Map<number, Uint8Array>()
-  readonly layerChunks = new Map<number, Uint16Array>()
+  readonly chunks = new Map<number, Map<number, Uint8Array>>()
   readonly palette: Uint32Array
   readonly materials: PaletteMaterial[]
   readonly dimensions: Dimensions
@@ -132,15 +143,20 @@ export class VoxelDocument {
     this.name = name
     this.palette = new Uint32Array(256)
     this.palette.set(palette)
-    const defaultPalette = palette === DEFAULT_PALETTE || DEFAULT_PALETTE.every((color, index) => palette[index] === color)
+    const addedPresetStart = DEFAULT_PALETTE.length - 2
+    const legacyDefaultPalette = !this.palette[addedPresetStart] && !this.palette[addedPresetStart + 1]
+      && DEFAULT_PALETTE.subarray(0, addedPresetStart).every((color, index) => this.palette[index] === color)
+    if (legacyDefaultPalette) this.palette.set(DEFAULT_PALETTE.subarray(addedPresetStart), addedPresetStart)
+    const defaultPalette = DEFAULT_PALETTE.every((color, index) => this.palette[index] === color)
     const presets = materials ?? (defaultPalette ? DEFAULT_PALETTE_MATERIALS : [])
     this.materials = Array.from({ length: 256 }, (_, index) => {
-      const preset = presets[index]
+      const preset = legacyDefaultPalette && index >= addedPresetStart && index < DEFAULT_PALETTE.length ? undefined : presets[index]
       const fallback = defaultPalette ? DEFAULT_PALETTE_MATERIALS[index] ?? DEFAULT_MATERIAL : DEFAULT_MATERIAL
       return {
         name: typeof preset?.name === 'string' && preset.name.trim() ? preset.name.trim().slice(0, 40) : fallback.name === 'Matte' ? `Color ${index}` : fallback.name,
         roughness: materialValue(preset?.roughness, fallback.roughness),
         metalness: materialValue(preset?.metalness, fallback.metalness),
+        emissiveIntensity: materialValue(preset?.emissiveIntensity, fallback.emissiveIntensity, 0, 5),
         opacity: materialValue(preset?.opacity, fallback.opacity),
         transmission: materialValue(preset?.transmission, fallback.transmission),
         ior: materialValue(preset?.ior, fallback.ior, 1, 2.5),
@@ -185,22 +201,13 @@ export class VoxelDocument {
     const index = this.layers.findIndex(layer => layer.id === id)
     if (index < 0 || this.layers.length === 1) return []
     const changed: number[] = []
-    for (const [chunkId, owners] of this.layerChunks) {
-      const colors = this.chunks.get(chunkId)!
-      let touched = false
-      for (let cell = 0; cell < owners.length; cell++) {
-        if (owners[cell] !== id) continue
-        owners[cell] = 0
-        colors[cell] = 0
-        this.voxelCount--
-        touched = true
-      }
-      if (!touched) continue
+    for (const [chunkId, layers] of this.chunks) {
+      const colors = layers.get(id)
+      if (!colors) continue
+      for (const color of colors) if (color) this.voxelCount--
+      layers.delete(id)
       changed.push(chunkId)
-      if (!colors.some(Boolean)) {
-        this.chunks.delete(chunkId)
-        this.layerChunks.delete(chunkId)
-      }
+      if (!layers.size) this.chunks.delete(chunkId)
     }
     this.layers.splice(index, 1)
     if (this.activeLayerId === id) this.activeLayerId = this.layers[Math.min(index, this.layers.length - 1)].id
@@ -209,7 +216,7 @@ export class VoxelDocument {
 
   layerVoxelCount(id: number) {
     let count = 0
-    for (const owners of this.layerChunks.values()) for (const owner of owners) if (owner === id) count++
+    for (const layers of this.chunks.values()) for (const color of layers.get(id) ?? []) if (color) count++
     return count
   }
 
@@ -222,90 +229,110 @@ export class VoxelDocument {
   }
 
   getVoxel(x: number, y: number, z: number) {
-    if (!this.contains(x, y, z)) return 0
-    return this.chunks.get(this.idAt(x, y, z))?.[chunkIndex(x & 15, y & 15, z & 15)] ?? 0
+    return this.resolveVoxel(x, y, z)?.color ?? 0
   }
 
   getVoxelLayer(x: number, y: number, z: number) {
-    if (!this.contains(x, y, z)) return 0
-    return this.layerChunks.get(this.idAt(x, y, z))?.[chunkIndex(x & 15, y & 15, z & 15)] ?? 0
+    return this.resolveVoxel(x, y, z)?.layerId ?? 0
   }
 
   getVisibleVoxel(x: number, y: number, z: number) {
-    const color = this.getVoxel(x, y, z)
-    return color && this.getLayer(this.getVoxelLayer(x, y, z))?.visible ? color : 0
+    return this.resolveVoxel(x, y, z, true)?.color ?? 0
+  }
+
+  getVisibleVoxelLayer(x: number, y: number, z: number) {
+    return this.resolveVoxel(x, y, z, true)?.layerId ?? 0
+  }
+
+  getLayerVoxel(x: number, y: number, z: number, layerId = this.activeLayerId) {
+    if (!this.contains(x, y, z)) return 0
+    return this.chunks.get(this.idAt(x, y, z))?.get(layerId)?.[chunkIndex(x & 15, y & 15, z & 15)] ?? 0
+  }
+
+  private resolveVoxel(x: number, y: number, z: number, visibleOnly = false) {
+    if (!this.contains(x, y, z)) return
+    const layers = this.chunks.get(this.idAt(x, y, z))
+    if (!layers) return
+    const index = chunkIndex(x & 15, y & 15, z & 15)
+    for (let layerIndex = this.layers.length - 1; layerIndex >= 0; layerIndex--) {
+      const layer = this.layers[layerIndex]
+      if (visibleOnly && !layer.visible) continue
+      const color = layers.get(layer.id)?.[index] ?? 0
+      if (color) return { color, layerId: layer.id }
+    }
   }
 
   setVoxel(x: number, y: number, z: number, color: number, layerId?: number) {
     if (!this.contains(x, y, z)) return false
+    const targetLayer = layerId ?? this.activeLayerId
+    if (!this.getLayer(targetLayer)) return false
     const id = this.idAt(x, y, z)
-    let chunk = this.chunks.get(id)
-    let owners = this.layerChunks.get(id)
+    let layers = this.chunks.get(id)
+    let chunk = layers?.get(targetLayer)
     if (!chunk) {
       if (color === 0) return false
+      layers ??= new Map<number, Uint8Array>()
       chunk = new Uint8Array(CHUNK_VOLUME)
-      owners = new Uint16Array(CHUNK_VOLUME)
-      this.chunks.set(id, chunk)
-      this.layerChunks.set(id, owners)
-    } else if (!owners) {
-      owners = new Uint16Array(CHUNK_VOLUME)
-      for (let cell = 0; cell < chunk.length; cell++) if (chunk[cell]) owners[cell] = this.layers[0].id
-      this.layerChunks.set(id, owners)
+      layers.set(targetLayer, chunk)
+      this.chunks.set(id, layers)
     }
     const index = chunkIndex(x & 15, y & 15, z & 15)
     const before = chunk[index]
-    const beforeLayer = owners![index]
-    const nextLayer = color ? layerId ?? (before ? beforeLayer : this.activeLayerId) : 0
-    if (color && !this.getLayer(nextLayer) || before === color && beforeLayer === nextLayer) return false
+    if (before === color) return false
     chunk[index] = color
-    owners![index] = nextLayer
     if (before === 0) this.voxelCount++
     if (color === 0) this.voxelCount--
     if (color === 0 && !chunk.some(Boolean)) {
-      this.chunks.delete(id)
-      this.layerChunks.delete(id)
+      layers!.delete(targetLayer)
+      if (!layers!.size) this.chunks.delete(id)
     }
     return true
   }
 
   copyChunk(id: number) {
-    const chunk = this.chunks.get(id)
-    return chunk ? chunk.slice() : undefined
+    const layers = this.chunks.get(id)
+    if (!layers) return undefined
+    return this.layers.flatMap(layer => {
+      const data = layers.get(layer.id)
+      return data ? [{ layerId: layer.id, data: data.slice() }] : []
+    })
   }
 
-  copyLayerChunk(id: number) {
-    const chunk = this.layerChunks.get(id)
-    return chunk ? chunk.slice() : undefined
-  }
-
-  replaceChunk(id: number, data?: Uint8Array, layerData?: Uint16Array) {
+  replaceChunk(id: number, snapshot?: LayerChunkSnapshot[]) {
     const previous = this.chunks.get(id)
-    if (previous) for (const color of previous) if (color) this.voxelCount--
-    if (!data?.some(Boolean)) {
-      this.chunks.delete(id)
-      this.layerChunks.delete(id)
-      return
+    if (previous) for (const chunk of previous.values()) for (const color of chunk) if (color) this.voxelCount--
+    this.chunks.delete(id)
+    const layers = new Map<number, Uint8Array>()
+    for (const stored of snapshot ?? []) {
+      if (!this.getLayer(stored.layerId) || stored.data.length !== CHUNK_VOLUME || !stored.data.some(Boolean)) continue
+      const data = stored.data.slice()
+      layers.set(stored.layerId, data)
+      for (const color of data) if (color) this.voxelCount++
     }
-    const copy = data.slice()
-    const owners = layerData?.length === CHUNK_VOLUME ? layerData.slice() : new Uint16Array(CHUNK_VOLUME)
-    for (let index = 0; index < copy.length; index++) {
-      if (!copy[index]) owners[index] = 0
-      else if (!this.getLayer(owners[index])) owners[index] = this.layers[0].id
+    if (layers.size) this.chunks.set(id, layers)
+  }
+
+  replaceLegacyChunk(id: number, data: Uint8Array, layerData?: Uint16Array) {
+    const layers = new Map<number, Uint8Array>()
+    for (let index = 0; index < data.length; index++) {
+      if (!data[index]) continue
+      const layerId = this.getLayer(layerData?.[index] ?? 0)?.id ?? this.layers[0].id
+      let chunk = layers.get(layerId)
+      if (!chunk) { chunk = new Uint8Array(CHUNK_VOLUME); layers.set(layerId, chunk) }
+      chunk[index] = data[index]
     }
-    this.chunks.set(id, copy)
-    this.layerChunks.set(id, owners)
-    for (const color of copy) if (color) this.voxelCount++
+    this.replaceChunk(id, [...layers].map(([layerId, chunk]) => ({ layerId, data: chunk })))
   }
 
   fillChunkRegion(id: number, from: Vec3, to: Vec3, color: number, layerId = this.activeLayerId) {
-    let chunk = this.chunks.get(id)
-    let owners = this.layerChunks.get(id)
+    let layers = this.chunks.get(id)
+    let chunk = layers?.get(layerId)
     if (!chunk) {
       if (color === 0) return false
+      layers ??= new Map<number, Uint8Array>()
       chunk = new Uint8Array(CHUNK_VOLUME)
-      owners = new Uint16Array(CHUNK_VOLUME)
-      this.chunks.set(id, chunk)
-      this.layerChunks.set(id, owners)
+      layers.set(layerId, chunk)
+      this.chunks.set(id, layers)
     }
     let changed = false
     for (let z = from.z; z <= to.z; z++) {
@@ -313,10 +340,8 @@ export class VoxelDocument {
         for (let x = from.x; x <= to.x; x++) {
           const index = chunkIndex(x, y, z)
           const before = chunk[index]
-          if (before && owners![index] !== layerId) continue
           if (before === color) continue
           chunk[index] = color
-          owners![index] = color ? layerId : 0
           if (before === 0) this.voxelCount++
           if (color === 0) this.voxelCount--
           changed = true
@@ -324,8 +349,8 @@ export class VoxelDocument {
       }
     }
     if (color === 0 && !chunk.some(Boolean)) {
-      this.chunks.delete(id)
-      this.layerChunks.delete(id)
+      layers!.delete(layerId)
+      if (!layers!.size) this.chunks.delete(id)
     }
     return changed
   }
@@ -346,13 +371,32 @@ export class VoxelDocument {
   }
 
   forEachVoxel(visitor: (x: number, y: number, z: number, color: number, layerId: number) => void) {
-    for (const [id, chunk] of this.chunks) {
+    for (const [id, layers] of this.chunks) {
+      const origin = chunkCoords(id)
+      for (const layer of this.layers) {
+        const chunk = layers.get(layer.id)
+        if (!chunk) continue
+        for (let z = 0; z < CHUNK_SIZE; z++) {
+          for (let y = 0; y < CHUNK_SIZE; y++) {
+            for (let x = 0; x < CHUNK_SIZE; x++) {
+              const color = chunk[chunkIndex(x, y, z)]
+              if (color) visitor(origin.x * CHUNK_SIZE + x, origin.y * CHUNK_SIZE + y, origin.z * CHUNK_SIZE + z, color, layer.id)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  forEachVisibleVoxel(visitor: (x: number, y: number, z: number, color: number, layerId: number) => void) {
+    for (const id of this.chunks.keys()) {
       const origin = chunkCoords(id)
       for (let z = 0; z < CHUNK_SIZE; z++) {
         for (let y = 0; y < CHUNK_SIZE; y++) {
           for (let x = 0; x < CHUNK_SIZE; x++) {
-            const color = chunk[chunkIndex(x, y, z)]
-            if (color) visitor(origin.x * CHUNK_SIZE + x, origin.y * CHUNK_SIZE + y, origin.z * CHUNK_SIZE + z, color, this.layerChunks.get(id)?.[chunkIndex(x, y, z)] ?? this.layers[0].id)
+            const position = { x: origin.x * CHUNK_SIZE + x, y: origin.y * CHUNK_SIZE + y, z: origin.z * CHUNK_SIZE + z }
+            const resolved = this.resolveVoxel(position.x, position.y, position.z, true)
+            if (resolved) visitor(position.x, position.y, position.z, resolved.color, resolved.layerId)
           }
         }
       }
@@ -374,8 +418,51 @@ export class VoxelDocument {
   }
 }
 
+export function resizeVoxelDocument(source: VoxelDocument, dimensions: Dimensions, anchor: ResizeAnchor) {
+  const resized = new VoxelDocument(dimensions, source.name, source.palette, source.materials, source.layers, source.activeLayerId)
+  const offset = anchor === 'center' ? {
+    x: Math.trunc((resized.dimensions.x - source.dimensions.x) / 2),
+    y: Math.trunc((resized.dimensions.y - source.dimensions.y) / 2),
+    z: Math.trunc((resized.dimensions.z - source.dimensions.z) / 2),
+  } : { x: 0, y: 0, z: 0 }
+  let cropped = 0
+  source.forEachVoxel((x, y, z, color, layerId) => {
+    x += offset.x; y += offset.y; z += offset.z
+    if (resized.contains(x, y, z)) resized.setVoxel(x, y, z, color, layerId)
+    else cropped++
+  })
+  return { document: resized, cropped }
+}
+
+export function* fillShapeVoxels(min: Vec3, max: Vec3, shape: FillShape, axis: keyof Vec3, dimensions: Dimensions) {
+  const from = {
+    x: Math.max(0, Math.min(min.x, max.x)),
+    y: Math.max(0, Math.min(min.y, max.y)),
+    z: Math.max(0, Math.min(min.z, max.z)),
+  }
+  const to = {
+    x: Math.min(dimensions.x - 1, Math.max(min.x, max.x)),
+    y: Math.min(dimensions.y - 1, Math.max(min.y, max.y)),
+    z: Math.min(dimensions.z - 1, Math.max(min.z, max.z)),
+  }
+  const center = { x: (from.x + to.x + 1) / 2, y: (from.y + to.y + 1) / 2, z: (from.z + to.z + 1) / 2 }
+  const radius = { x: (to.x - from.x + 1) / 2, y: (to.y - from.y + 1) / 2, z: (to.z - from.z + 1) / 2 }
+  for (let z = from.z; z <= to.z; z++) {
+    for (let y = from.y; y <= to.y; y++) {
+      for (let x = from.x; x <= to.x; x++) {
+        const distance = { x: (x + 0.5 - center.x) / radius.x, y: (y + 0.5 - center.y) / radius.y, z: (z + 0.5 - center.z) / radius.z }
+        const inside = shape === 'box' || shape === 'sphere' && distance.x ** 2 + distance.y ** 2 + distance.z ** 2 <= 1
+          || shape === 'cylinder' && (axis === 'x' ? distance.y ** 2 + distance.z ** 2 <= 1
+            : axis === 'y' ? distance.x ** 2 + distance.z ** 2 <= 1
+              : distance.x ** 2 + distance.y ** 2 <= 1)
+        if (inside) yield { x, y, z }
+      }
+    }
+  }
+}
+
 export class EditSession {
-  private before = new Map<number, { colors?: Uint8Array; layers?: Uint16Array }>()
+  private before = new Map<number, LayerChunkSnapshot[] | undefined>()
   private changed = new Set<number>()
   private document: VoxelDocument
   private layerId: number
@@ -386,7 +473,7 @@ export class EditSession {
   }
 
   private capture(id: number) {
-    if (!this.before.has(id)) this.before.set(id, { colors: this.document.copyChunk(id), layers: this.document.copyLayerChunk(id) })
+    if (!this.before.has(id)) this.before.set(id, this.document.copyChunk(id))
   }
 
   private editable(layerId = this.layerId) {
@@ -396,8 +483,6 @@ export class EditSession {
 
   set(x: number, y: number, z: number, color: number) {
     if (!this.editable() || !this.document.contains(x, y, z)) return false
-    const owner = this.document.getVoxelLayer(x, y, z)
-    if (owner && owner !== this.layerId) return false
     const id = this.document.idAt(x, y, z)
     this.capture(id)
     if (!this.document.setVoxel(x, y, z, color, this.layerId)) return false
@@ -408,10 +493,13 @@ export class EditSession {
   reassign(cells: Vec3[], targetLayerId: number) {
     if (!this.editable() || !this.editable(targetLayerId)) return
     for (const cell of cells) {
-      if (this.document.getVoxelLayer(cell.x, cell.y, cell.z) !== this.layerId) continue
+      const color = this.document.getLayerVoxel(cell.x, cell.y, cell.z, this.layerId)
+      if (!color) continue
       const id = this.document.idAt(cell.x, cell.y, cell.z)
       this.capture(id)
-      if (this.document.setVoxel(cell.x, cell.y, cell.z, this.document.getVoxel(cell.x, cell.y, cell.z), targetLayerId)) this.changed.add(id)
+      const removed = this.document.setVoxel(cell.x, cell.y, cell.z, 0, this.layerId)
+      const added = this.document.setVoxel(cell.x, cell.y, cell.z, color, targetLayerId)
+      if (removed || added) this.changed.add(id)
     }
   }
 
@@ -452,50 +540,24 @@ export class EditSession {
   fillShape(min: Vec3, max: Vec3, color: number, shape: FillShape, axis: keyof Vec3 = 'y') {
     if (shape === 'box') { this.fill(min, max, color); return }
     if (!this.editable()) return
-    const from = {
-      x: Math.max(0, Math.min(min.x, max.x)),
-      y: Math.max(0, Math.min(min.y, max.y)),
-      z: Math.max(0, Math.min(min.z, max.z)),
-    }
-    const to = {
-      x: Math.min(this.document.dimensions.x - 1, Math.max(min.x, max.x)),
-      y: Math.min(this.document.dimensions.y - 1, Math.max(min.y, max.y)),
-      z: Math.min(this.document.dimensions.z - 1, Math.max(min.z, max.z)),
-    }
-    const center = { x: (from.x + to.x + 1) / 2, y: (from.y + to.y + 1) / 2, z: (from.z + to.z + 1) / 2 }
-    const radius = { x: (to.x - from.x + 1) / 2, y: (to.y - from.y + 1) / 2, z: (to.z - from.z + 1) / 2 }
-    for (let z = from.z; z <= to.z; z++) {
-      for (let y = from.y; y <= to.y; y++) {
-        for (let x = from.x; x <= to.x; x++) {
-          const distance = { x: (x + 0.5 - center.x) / radius.x, y: (y + 0.5 - center.y) / radius.y, z: (z + 0.5 - center.z) / radius.z }
-          const inside = shape === 'sphere' ? distance.x ** 2 + distance.y ** 2 + distance.z ** 2 <= 1
-            : axis === 'x' ? distance.y ** 2 + distance.z ** 2 <= 1
-              : axis === 'y' ? distance.x ** 2 + distance.z ** 2 <= 1
-                : distance.x ** 2 + distance.y ** 2 <= 1
-          if (inside) this.set(x, y, z, color)
-        }
-      }
-    }
+    for (const cell of fillShapeVoxels(min, max, shape, axis, this.document.dimensions)) this.set(cell.x, cell.y, cell.z, color)
   }
 
   commit(): EditCommand | undefined {
     const changes: ChunkChange[] = []
     let bytes = 0
     for (const id of this.changed) {
-      const snapshot = this.before.get(id)!
-      const before = snapshot.colors
-      const beforeLayers = snapshot.layers
+      const before = this.before.get(id)
       const after = this.document.copyChunk(id)
-      const afterLayers = this.document.copyLayerChunk(id)
-      if (equalChunks(before, after) && equalChunks(beforeLayers, afterLayers)) continue
-      bytes += (before?.byteLength ?? 0) + (after?.byteLength ?? 0) + (beforeLayers?.byteLength ?? 0) + (afterLayers?.byteLength ?? 0)
-      changes.push({ id, before, after, beforeLayers, afterLayers })
+      if (equalChunkSnapshots(before, after)) continue
+      bytes += [...before ?? [], ...after ?? []].reduce((sum, chunk) => sum + chunk.data.byteLength, 0)
+      changes.push({ id, before, after })
     }
     return changes.length ? { changes, bytes } : undefined
   }
 
   cancel() {
-    for (const [id, before] of this.before) this.document.replaceChunk(id, before.colors, before.layers)
+    for (const [id, before] of this.before) this.document.replaceChunk(id, before)
     return [...this.changed]
   }
 }
@@ -521,7 +583,7 @@ export class History {
   undo(document: VoxelDocument): HistoryResult | undefined {
     const command = this.undoStack.pop()
     if (!command) return
-    for (const change of command.changes) document.replaceChunk(change.id, change.before, change.beforeLayers)
+    for (const change of command.changes) document.replaceChunk(change.id, change.before)
     this.redoStack.push(command)
     this.bytes -= command.bytes
     return { ids: command.changes.map(change => change.id), selection: command.selectionBefore, layerId: command.layerBefore }
@@ -530,7 +592,7 @@ export class History {
   redo(document: VoxelDocument): HistoryResult | undefined {
     const command = this.redoStack.pop()
     if (!command) return
-    for (const change of command.changes) document.replaceChunk(change.id, change.after, change.afterLayers)
+    for (const change of command.changes) document.replaceChunk(change.id, change.after)
     this.undoStack.push(command)
     this.bytes += command.bytes
     return { ids: command.changes.map(change => change.id), selection: command.selectionAfter, layerId: command.layerAfter }
@@ -547,46 +609,29 @@ export function pushPullRange(document: VoxelDocument, cells: Vec3[], normal: Ve
   let pull = Infinity
   let push = Infinity
   for (const cell of cells) {
-    const layerId = document.getVoxelLayer(cell.x, cell.y, cell.z)
+    const layerId = document.activeLayerId
     let free = 0
     while (document.contains(cell.x + normal.x * (free + 1), cell.y + normal.y * (free + 1), cell.z + normal.z * (free + 1))
-      && !document.getVoxel(cell.x + normal.x * (free + 1), cell.y + normal.y * (free + 1), cell.z + normal.z * (free + 1))) free++
+      && !document.getLayerVoxel(cell.x + normal.x * (free + 1), cell.y + normal.y * (free + 1), cell.z + normal.z * (free + 1), layerId)) free++
     pull = Math.min(pull, free)
 
     let filled = 0
-    while (document.getVoxel(cell.x - normal.x * filled, cell.y - normal.y * filled, cell.z - normal.z * filled)
-      && document.getVoxelLayer(cell.x - normal.x * filled, cell.y - normal.y * filled, cell.z - normal.z * filled) === layerId) filled++
+    while (document.getLayerVoxel(cell.x - normal.x * filled, cell.y - normal.y * filled, cell.z - normal.z * filled, layerId)) filled++
     push = Math.min(push, filled)
   }
   return { pull: Number.isFinite(pull) ? pull : 0, push: Number.isFinite(push) ? push : 0 }
 }
 
-function voxelKey(document: VoxelDocument, cell: Vec3) {
-  return cell.x + cell.y * document.dimensions.x + cell.z * document.dimensions.x * document.dimensions.y
-}
-
 export function moveRange(document: VoxelDocument, cells: Vec3[], normal: Vec3) {
-  const selected = new Set(cells.map(cell => voxelKey(document, cell)))
   const available = (direction: number) => {
     let limit = Infinity
     for (const cell of cells) {
-      const adjacent = {
-        x: cell.x + normal.x * direction,
-        y: cell.y + normal.y * direction,
-        z: cell.z + normal.z * direction,
-      }
-      if (selected.has(voxelKey(document, adjacent))) continue
       let free = 0
-      while (true) {
-        const destination = {
-          x: cell.x + normal.x * direction * (free + 1),
-          y: cell.y + normal.y * direction * (free + 1),
-          z: cell.z + normal.z * direction * (free + 1),
-        }
-        if (!document.contains(destination.x, destination.y, destination.z)
-          || document.getVoxel(destination.x, destination.y, destination.z) && !selected.has(voxelKey(document, destination))) break
-        free++
-      }
+      while (document.contains(
+        cell.x + normal.x * direction * (free + 1),
+        cell.y + normal.y * direction * (free + 1),
+        cell.z + normal.z * direction * (free + 1),
+      )) free++
       limit = Math.min(limit, free)
     }
     return Number.isFinite(limit) ? limit : 0
@@ -598,7 +643,7 @@ export function moveVoxels(document: VoxelDocument, session: EditSession, cells:
   const range = moveRange(document, cells, normal)
   const amount = Math.max(-range.push, Math.min(range.pull, Math.round(distance)))
   if (!amount) return 0
-  const moving = cells.map(cell => ({ ...cell, color: document.getVoxel(cell.x, cell.y, cell.z) }))
+  const moving = cells.map(cell => ({ ...cell, color: document.getLayerVoxel(cell.x, cell.y, cell.z) }))
   for (const cell of moving) session.set(cell.x, cell.y, cell.z, 0)
   for (const cell of moving) session.set(cell.x + normal.x * amount, cell.y + normal.y * amount, cell.z + normal.z * amount, cell.color)
   return amount
@@ -609,7 +654,7 @@ export function pushPull(document: VoxelDocument, session: EditSession, cells: V
   const amount = Math.max(-range.push, Math.min(range.pull, Math.round(distance)))
   if (amount > 0) {
     for (const cell of cells) {
-      const color = document.getVoxel(cell.x, cell.y, cell.z)
+      const color = document.getLayerVoxel(cell.x, cell.y, cell.z)
       for (let step = 1; step <= amount; step++) session.set(cell.x + normal.x * step, cell.y + normal.y * step, cell.z + normal.z * step, color)
     }
   } else if (amount < 0) {

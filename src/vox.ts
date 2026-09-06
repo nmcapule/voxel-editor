@@ -43,7 +43,7 @@ function writeChunkHeader(view: DataView, offset: number, id: string, size: numb
 
 export function exportVox(document: VoxelDocument) {
   let visibleVoxels = 0
-  document.forEachVoxel((_x, _y, _z, _color, layerId) => { if (document.getLayer(layerId)?.visible) visibleVoxels++ })
+  document.forEachVisibleVoxel(() => visibleVoxels++)
   const voxelBytes = visibleVoxels * 4
   const childrenSize = 24 + 16 + voxelBytes + 12 + 1024
   const buffer = new ArrayBuffer(20 + childrenSize)
@@ -63,8 +63,7 @@ export function exportVox(document: VoxelDocument) {
   writeChunkHeader(view, offset, 'XYZI', 4 + voxelBytes)
   view.setUint32(offset + 12, visibleVoxels, true)
   offset += 16
-  document.forEachVoxel((x, y, z, color, layerId) => {
-    if (!document.getLayer(layerId)?.visible) return
+  document.forEachVisibleVoxel((x, y, z, color) => {
     view.setUint8(offset++, x)
     view.setUint8(offset++, z)
     view.setUint8(offset++, y)

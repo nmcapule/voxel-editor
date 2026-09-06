@@ -33,37 +33,47 @@ It should feel like drawing in space rather than operating a traditional desktop
 
 Creators work in one full-screen 3D viewport using a mouse and keyboard, pen, or
 touch. They retain a point, surface, texture, or body selection mode while using
-four primary tools: Select, Paint, Sculpt, and Fill. Eyedropper is a momentary Paint
-action. Creators can also navigate the camera, adjust the palette and lighting,
-and import or export files.
+four primary tools: Select, Place, Sculpt, and Layer. Place reuses the selection mode,
+with Paint and Volume operations plus a momentary Eyedropper; Layer activates
+the owner of a clicked voxel. Creators can also navigate the camera,
+adjust the palette and lighting, and import or export files.
 
 ## Capabilities and Constraints
 
-- One model per document with dimensions from 16 to 256 voxels on each axis.
+- One model per document with dimensions from 16 to 256 voxels on each axis and
+  resizing anchored to either the coordinate origin or the canvas center.
 - Named voxel layers with one active layer, visibility and locking controls,
-  per-voxel ownership, and local persistence. A coordinate can hold one voxel;
-  VOX export flattens visible layers into one model.
-- Point clicks and occupied 3D box drags, connected-surface, same-color texture,
+  overlapping per-layer voxels, and local persistence. The highest visible layer
+  wins at each coordinate; clicking a visible voxel with the Layer tool activates
+  its owner, and VOX export flattens visible layers into one model.
+- Point clicks and occupied 3D box drags, connected-surface, contiguous same-texture,
   contiguous-body, and marquee selection with Paint plus Push/Pull, Move, and
   Erase Sculpt operations. In Point mode, Paint and Erase preview the dragged
-  box and commit on release; Push/Pull and Move first select an unselected target
-  and apply on the next drag. Right-clicking or holding an existing selection
-  opens Paint and Erase selection actions. The editor also includes a momentary
-  eyedropper, undo and redo with matching selection and layer restoration, and
-  selection-centered camera orbit.
-- Box, sphere, and cylinder Fill shapes use a dragged footprint and explicit
-  depth to create undoable volumes in the active material and layer.
+  box and commit on release; clicking either operation within the current selection
+  applies it to the full selection, while clicking elsewhere resolves a new scope.
+  Push/Pull and Move first select an unselected target
+  and apply on the next drag. Move overwrites occupied destinations on the active
+  layer while preserving overlapping voxels on other layers. The Select popup and
+  standard keyboard shortcuts provide Cut, Copy, and movable ghost Paste. The editor also includes a momentary eyedropper,
+  undo and redo with matching selection and layer restoration, and
+  selection-centered camera orbit. Right-drag remains dedicated to camera orbit.
+- The Place Volume operation provides box, sphere, and cylinder shapes with a
+  dragged footprint and explicit depth to create undoable volumes in the active
+  material and layer. Footprints can start on the model, floor, or visible side
+  grids of the guide volume.
 - Orthographic and perspective camera modes, editing-grid, voxel-face-grid, and
   shadow and ambient-occlusion controls, an FPS readout, palette-scoped
-  roughness, metalness, opacity, transmission, refraction, albedo, normal,
+  roughness, metalness, emissive intensity, opacity, transmission, refraction, albedo, normal,
   roughness, and metalness maps, progressive PBR rendering with an
   ambient-occluded realtime fallback, and PNG capture.
 - Grid and list palette views with named, editable presets for common surfaces
-  including concrete, grass, wood, organic material, water, metals, and glass.
+  including concrete, grass, wood, organic material, water, metals, glass, and warm and cool lights.
+  The palette filters materials by opacity, transmission, metalness, and emission.
   Opaque surfaces remain visible where they meet transparent or transmissive
   voxels.
 - Single-model MagicaVoxel VOX import and VOX 150 export with a 255-color palette.
 - One local autosave in IndexedDB. No account or network service is required.
+- Selection scope plus active and recent materials persist across refreshes.
 - Desktop-first interaction with pen and touch support and a mobile-safe layout.
 - Animation, multiple scene objects, per-voxel material metadata, cloud sync,
   and collaboration are outside the first release.

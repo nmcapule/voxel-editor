@@ -1,0 +1,77 @@
+.voxel-assistant-toggle.voxel-assistant-toggle { min-height: 44px; }
+.voxel-assistant-toggle[aria-checked="true"] { color: var(--cobalt-dark); background: var(--field); }
+
+.voxel-assistant {
+  position: absolute;
+  z-index: 9;
+  top: calc(max(18px, env(safe-area-inset-top)) + 66px);
+  left: max(18px, env(safe-area-inset-left));
+  width: min(352px, calc(100vw - 36px));
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.voxel-assistant [hidden] { display: none !important; }
+.voxel-assistant button, .voxel-assistant input, .voxel-assistant textarea { font: inherit; }
+.voxel-assistant button, .voxel-assistant input, .voxel-assistant summary { min-height: 44px; }
+.voxel-assistant button { padding: 9px 12px; border: 1px solid var(--line); border-radius: 11px; color: var(--ink); background: var(--paper); font-weight: 650; }
+.voxel-assistant button:not(:disabled):hover { background: var(--field); }
+.voxel-assistant button:disabled { opacity: 0.45; cursor: default; }
+.voxel-assistant :is(button, input, textarea, summary, [tabindex]):focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+.voxel-assistant input, .voxel-assistant textarea { min-width: 0; width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 11px; color: var(--ink); background: var(--paper); caret-color: var(--cobalt); font-weight: 400; }
+.voxel-assistant input { font-size: 1rem; }
+.voxel-assistant textarea { min-height: 88px; max-height: 160px; resize: vertical; }
+.voxel-assistant textarea::placeholder { color: var(--muted); opacity: 1; }
+.voxel-assistant h2, .voxel-assistant h3, .voxel-assistant p { margin: 0; }
+.voxel-assistant h2 { font-size: 0.95rem; font-weight: 700; }
+.voxel-assistant h3 { font-size: 0.88rem; font-weight: 700; }
+.voxel-assistant code { font-size: 0.78rem; overflow-wrap: anywhere; }
+.voxel-assistant .assistant-primary { color: var(--paper); border-color: var(--cobalt); background: var(--cobalt); }
+.voxel-assistant .assistant-primary:not(:disabled):hover { border-color: var(--cobalt-dark); background: var(--cobalt-dark); }
+.voxel-assistant .assistant-quiet { background: transparent; border-color: transparent; }
+
+.voxel-assistant .assistant-panel, .voxel-assistant .assistant-launcher {
+  border: 1px solid var(--line);
+  background: var(--porcelain);
+  box-shadow: var(--shadow);
+}
+
+.voxel-assistant .assistant-panel { display: flex; flex-direction: column; max-height: calc(100dvh - max(18px, env(safe-area-inset-top)) - 164px); border-radius: 22px; }
+.voxel-assistant .assistant-launcher { border-radius: 16px; padding-inline: 18px; }
+.voxel-assistant .assistant-header { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 12px 12px 18px; border-bottom: 1px solid var(--line); }
+.voxel-assistant .assistant-heading { min-width: 0; }
+.voxel-assistant .assistant-status { color: var(--muted); font-size: 0.72rem; }
+.voxel-assistant .assistant-body { min-height: 0; padding: 16px; display: flex; flex-direction: column; flex: 1; overflow-y: auto; overscroll-behavior: contain; }
+.voxel-assistant .assistant-label { display: grid; gap: 6px; font-size: 0.75rem; font-weight: 650; }
+.voxel-assistant .assistant-note, .voxel-assistant .assistant-empty { color: var(--muted); font-size: 0.78rem; line-height: 1.55; overflow-wrap: anywhere; }
+.voxel-assistant .assistant-empty { margin-bottom: 18px; }
+.voxel-assistant .assistant-connection { display: grid; gap: 12px; margin-bottom: 18px; }
+.voxel-assistant .assistant-notice { margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid var(--line); font-weight: 600; overflow-wrap: anywhere; }
+.voxel-assistant .assistant-reconnect { width: 100%; margin-bottom: 18px; }
+.voxel-assistant .assistant-approval { display: grid; gap: 10px; margin-bottom: 18px; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+.voxel-assistant .assistant-revision { color: var(--muted); font-size: 0.75rem; font-variant-numeric: tabular-nums; }
+.voxel-assistant .assistant-command { max-height: 144px; margin: 0; padding: 12px; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); font-size: 0.75rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.voxel-assistant .assistant-activity { min-height: 64px; max-height: 240px; flex: 1 1 auto; margin: 0 0 18px; padding: 0; overflow-y: auto; overscroll-behavior: contain; list-style: none; }
+.voxel-assistant .assistant-entry { padding-block: 12px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.voxel-assistant .assistant-entry:first-child { padding-top: 0; }
+.voxel-assistant .assistant-entry:last-child { border-bottom: 0; }
+.voxel-assistant .assistant-entry-label { display: block; margin-bottom: 5px; font-size: 0.75rem; }
+.voxel-assistant .assistant-entry-text { white-space: pre-wrap; }
+.voxel-assistant .assistant-entry[data-kind="status"] { color: var(--muted); font-size: 0.75rem; }
+.voxel-assistant .assistant-entry summary { padding-block: 11px; color: var(--muted); font-size: 0.75rem; font-weight: 650; cursor: pointer; }
+.voxel-assistant .assistant-entry details > p { padding-bottom: 8px; font-size: 0.78rem; }
+.voxel-assistant .assistant-composer { flex-shrink: 0; display: grid; gap: 10px; }
+.voxel-assistant .assistant-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.voxel-assistant .assistant-count { margin-right: auto; color: var(--muted); font-size: 0.69rem; font-variant-numeric: tabular-nums; }
+.voxel-assistant .assistant-footer { flex-shrink: 0; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px; margin-inline: 16px; padding-block: 8px 12px; border-top: 1px solid var(--line); }
+
+@media (max-width: 840px) {
+  .voxel-assistant { top: auto; bottom: calc(82px + env(safe-area-inset-bottom)); left: max(10px, env(safe-area-inset-left)); width: calc(100vw - max(10px, env(safe-area-inset-left)) - max(10px, env(safe-area-inset-right))); }
+  .voxel-assistant .assistant-panel { max-height: min(440px, 55dvh, calc(100dvh - 208px - env(safe-area-inset-bottom))); }
+  .voxel-assistant .assistant-header { padding-block: 8px; }
+  .voxel-assistant .assistant-body { padding: 12px 16px; }
+  .voxel-assistant .assistant-activity { max-height: min(160px, 20dvh); }
+  .voxel-assistant textarea { min-height: 72px; height: 72px; font-size: 1rem; }
+}

@@ -1,6 +1,6 @@
 import './style.css'
 import { VoxelDocument, type Dimensions, type FillShape, type ResizeAnchor, type Vec3 } from './editor'
-import { SerialCommandQueue, base64ToBytes, bytesToBase64, decodeProjectSnapshot, encodeProjectSnapshot, type RemoteCommand } from './protocol'
+import { SerialCommandQueue, base64ToBytes, bytesToBase64, decodeProjectSnapshot, encodeProjectSnapshot, parseCommand, type RemoteCommand } from './protocol'
 import { connectRemote } from './remote'
 import { VoxelRenderer } from './renderer'
 import { Studio, StudioCommandError, type AuxiliaryTool, type PaintMode, type PbrMap, type SculptMode, type SelectionMode, type SelectionState, type StudioCommand, type StudioOutcome, type Tool } from './studio'
@@ -403,7 +403,7 @@ async function flushSave() {
   else await pendingSave
 }
 
-type CommandSource = 'ui' | 'renderer' | 'remote'
+type CommandSource = 'ui' | 'renderer' | 'remote' | 'assistant'
 type CommandEvent = { sequence: number; source: CommandSource; command: RemoteCommand; outcome: StudioOutcome }
 const commandListeners = new Set<(event: CommandEvent) => void>()
 let commandSequence = 0
@@ -467,7 +467,7 @@ function applyStudioEffects(command: RemoteCommand, outcome: StudioOutcome, sour
   if (effects.paletteChanged || effects.activeColorChanged || effects.documentReplaced) {
     renderPalette()
     renderPaletteMaterial()
-  } else if (effects.materialChanged && source === 'remote') {
+  } else if (effects.materialChanged && (source === 'remote' || source === 'assistant')) {
     renderPalette()
     renderPaletteMaterial()
   }
@@ -1451,6 +1451,22 @@ renderPaletteMaterial()
 setTool(activeTool)
 updateSaveStatus()
 if (storageError) showToast(storageError, 'warning')
+
+if (import.meta.env.VITE_CANVAS_ASSISTANT === 'true') {
+  void import('../plugins/assistant/client').then(({ mountAssistant }) => {
+    const dispose = mountAssistant({
+      root: studio,
+      menu: document.querySelector('#project-menu .menu-sheet')!,
+      execute: (command, { signal, ifRevision }) => applicationQueue.dispatch({ command: parseCommand(command), source: 'assistant', ifRevision }, signal),
+      subscribe(listener) {
+        const forward = (event: CommandEvent) => listener({ source: event.source, command: event.command.type, revision: event.outcome.revision, changed: event.outcome.changed })
+        commandListeners.add(forward)
+        return () => commandListeners.delete(forward)
+      },
+    })
+    import.meta.hot?.dispose(dispose)
+  }).catch(() => showToast('The optional assistant could not be loaded.', 'warning'))
+}
 
 connectRemote({
   dispatch: request => dispatchApplicationCommand(request.command, 'remote', request.ifRevision),

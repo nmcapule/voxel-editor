@@ -252,7 +252,7 @@ export function parseCommand(value: unknown): RemoteCommand {
 }
 
 export class SerialCommandQueue<C, R> {
-  private queued: { command: C; resolve: (result: R) => void; reject: (error: unknown) => void }[] = []
+  private queued: { command: C; signal?: AbortSignal; resolve: (result: R) => void; reject: (error: unknown) => void }[] = []
   private running = false
   private execute: (command: C) => R | Promise<R>
   private limit: number
@@ -262,9 +262,10 @@ export class SerialCommandQueue<C, R> {
     this.limit = limit
   }
 
-  dispatch(command: C) {
+  dispatch(command: C, signal?: AbortSignal) {
+    if (signal?.aborted) return Promise.reject(signal.reason)
     if (this.queued.length >= this.limit) return Promise.reject(new StudioCommandError('limit_exceeded', 'The command queue is full.'))
-    const pending = new Promise<R>((resolve, reject) => this.queued.push({ command, resolve, reject }))
+    const pending = new Promise<R>((resolve, reject) => this.queued.push({ command, signal, resolve, reject }))
     void this.drain()
     return pending
   }
@@ -274,7 +275,7 @@ export class SerialCommandQueue<C, R> {
     this.running = true
     while (this.queued.length) {
       const next = this.queued.shift()!
-      try { next.resolve(await this.execute(next.command)) }
+      try { next.signal?.throwIfAborted(); next.resolve(await this.execute(next.command)) }
       catch (error) { next.reject(error) }
     }
     this.running = false

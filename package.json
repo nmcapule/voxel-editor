@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:assistant": "bun plugins/assistant/dev.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "build": "bun run typecheck && vite build",
@@ -18,6 +19,8 @@
     "xatlas-web": "^0.1.0"
   },
   "devDependencies": {
+    "@opencode-ai/plugin": "1.18.29",
+    "@opencode-ai/sdk": "1.18.29",
     "@types/bun": "^1.4.0",
     "@types/three": "^0.185.4",
     "typescript": "~6.0.2",

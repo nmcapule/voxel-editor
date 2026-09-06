@@ -14,6 +14,7 @@ export function acceptsGzip(header = '') {
 }
 
 export default defineConfig({
+  define: { 'import.meta.env.VITE_CANVAS_ASSISTANT': JSON.stringify(process.env.VOXEL_ASSISTANT_PORT ? 'true' : 'false') },
   plugins: [{
     name: 'minify-dev-bundles',
     apply: 'serve',
@@ -55,5 +56,8 @@ export default defineConfig({
   },
   server: {
     allowedHosts: ['.exe.xyz'],
+    proxy: process.env.VOXEL_ASSISTANT_PORT ? {
+      '^/__assistant/socket$': { target: `http://127.0.0.1:${process.env.VOXEL_ASSISTANT_PORT}`, ws: true },
+    } : undefined,
   },
 })

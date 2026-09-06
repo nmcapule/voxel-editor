@@ -4,7 +4,7 @@ import { StudioCommandError } from './studio'
 export interface RemoteStateEvent {
   sequence: number
   revision: number
-  source: 'ui' | 'renderer'
+  source: 'ui' | 'renderer' | 'assistant'
   command: string
   changed: boolean
 }

@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Assistant browser checks</title></head>
+  <body>
+    <p id="result" role="status">Running assistant browser checks...</p>
+    <script type="module">
+      import { runAssistantChecks } from './client.browser-test.ts'
+      const result = document.querySelector('#result')
+      runAssistantChecks().then(message => { result.textContent = message; result.dataset.passed = 'true' })
+        .catch(error => { result.textContent = String(error); result.dataset.passed = 'false' })
+    </script>
+  </body>
+</html>

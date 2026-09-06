@@ -46,6 +46,24 @@ describe('scripting protocol', () => {
     expect(() => parseRequest({ protocol: PROTOCOL, id: 'bad', command: { type: 'palette.setColor', index: 2.5, color: 0 } })).toThrow('integer')
   })
 
+  test('never executes an aborted command waiting behind another operation', async () => {
+    const gate = Promise.withResolvers<void>()
+    const executed: number[] = []
+    const queue = new SerialCommandQueue(async (value: number) => {
+      if (value === 1) await gate.promise
+      executed.push(value)
+    })
+    const first = queue.dispatch(1)
+    const controller = new AbortController()
+    const canceled = queue.dispatch(2, controller.signal).catch(error => error)
+    controller.abort(new Error('Stopped'))
+    gate.resolve()
+    await first
+    expect(await canceled).toMatchObject({ message: 'Stopped' })
+    await queue.dispatch(3)
+    expect(executed).toEqual([1, 3])
+  })
+
   test('round-trips deterministic lossless project snapshots', () => {
     const document = new VoxelDocument({ x: 32, y: 16, z: 16 }, 'Layers')
     document.setVoxel(20, 1, 1, 5)

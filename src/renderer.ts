@@ -372,6 +372,7 @@ export class VoxelRenderer {
   private materials: THREE.MeshPhysicalMaterial[]
   private faceGridMaterial = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.46, depthWrite: false, toneMapped: false })
   private meshVerticesMaterial = new THREE.PointsMaterial({ size: 5, sizeAttenuation: false, depthWrite: false, toneMapped: false })
+  private meshTrianglesMaterial = new THREE.LineBasicMaterial({ depthWrite: false, toneMapped: false })
   private model = new THREE.Group()
   private chunkMeshes = new Map<number, THREE.Group>()
   private chunkQuads = new Map<number, number>()
@@ -1333,6 +1334,7 @@ export class VoxelRenderer {
       chunkMesh.updateWorldMatrix(true, true)
       if (result.faceLines.length) this.receiveGrid(result)
       else if (this.settings.faceGrid) this.queuedGrids.add(result.id)
+      this.updateMeshOverlayVisibility([chunkMesh])
     }
     this.renderer.shadowMap.needsUpdate = true
     this.pump()
@@ -1845,6 +1847,7 @@ export class VoxelRenderer {
     const luminance = background.r * 0.2126 + background.g * 0.7152 + background.b * 0.0722
     this.faceGridMaterial.color.setHex(luminance > 0.35 ? 0x20262c : 0xf9faf8)
     this.meshVerticesMaterial.color.copy(this.faceGridMaterial.color)
+    this.meshTrianglesMaterial.color.copy(this.faceGridMaterial.color)
     this.hemisphere.intensity = settings.ambient
     this.scene.environmentIntensity = settings.ambient / Math.PI
     this.sunlight.intensity = settings.light
@@ -1892,11 +1895,23 @@ export class VoxelRenderer {
     this.render()
   }
 
-  private updateMeshOverlayVisibility() {
-    this.model.traverse(child => {
+  private updateMeshOverlayVisibility(chunks: Iterable<THREE.Group> = this.chunkMeshes.values()) {
+    const showTriangles = this.settings.meshTriangles && !this.renderMode
+    for (const chunk of chunks) for (const child of chunk.children) {
       if (child.userData.faceGrid) child.visible = this.settings.faceGrid && !this.renderMode
       if (child.userData.meshVertices) child.visible = this.settings.meshVertices && !this.renderMode
-    })
+      if (!(child instanceof THREE.Mesh)) continue
+      let triangles = child.children.find(overlay => overlay.userData.meshTriangles)
+      if (!triangles && showTriangles) {
+        triangles = new THREE.LineSegments(new THREE.WireframeGeometry(child.geometry), this.meshTrianglesMaterial)
+        triangles.userData.meshTriangles = true
+        triangles.userData.editorOverlay = true
+        triangles.renderOrder = 1
+        child.add(triangles)
+        triangles.updateWorldMatrix(true, false)
+      }
+      if (triangles) triangles.visible = showTriangles
+    }
   }
 
   private updateWorkspaceGridVisibility() {
@@ -2272,6 +2287,8 @@ export class VoxelRenderer {
 
   private renderRaster(camera = this.camera, raster = this.raster) {
     if (this.contextLost) return
+    // FXAA washes out pixel-wide triangle edges; keep the topology inspection view sharp.
+    if (raster === this.raster) raster.antialias = !this.settings.meshTriangles || this.renderMode || !!this.sceneContent
     raster.render(camera)
     this.rasterError = undefined
     if (raster === this.raster) {
@@ -2386,7 +2403,7 @@ export class VoxelRenderer {
         for (const object of [this.grid, this.limits, this.ground, this.hover, this.marqueePreview, this.selectionPreview, this.fillPreview, this.pushPullPreview]) {
           if (object) visibility.set(object, object.visible)
         }
-        this.model.traverse(object => { if (object.userData.faceGrid || object.userData.meshVertices) visibility.set(object, object.visible) })
+        this.model.traverse(object => { if (object.userData.faceGrid || object.userData.meshVertices || object.userData.meshTriangles) visibility.set(object, object.visible) })
         for (const object of visibility.keys()) object.visible = false
         for (const name of isometric) {
           const x = name.endsWith('right') ? 1 : -1

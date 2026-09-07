@@ -40,7 +40,7 @@ async function integration(name: typeof cases[number]) {
   const { encodeProjectSnapshot, PROTOCOL } = await import('./protocol')
   const storage = { ...await import('./storage') }
   const sceneStorage = { ...await import('./scene-storage') }
-  const settings: ViewSettings = { background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42, ambientOcclusion: true, shadows: true, grid: true, faceGrid: false, meshVertices: false, projection: 'orthographic', pathTracing: false }
+  const settings: ViewSettings = { background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42, ambientOcclusion: true, shadows: true, grid: true, faceGrid: false, meshVertices: false, meshTriangles: false, projection: 'orthographic', pathTracing: false }
   const original = new VoxelDocument(undefined, 'Standalone')
   original.setVoxel(1, 1, 1, 5)
   let standalone = storage.snapshotProject(original, settings, { id: 'source', version: 1, tags: ['test'], dirty: false })

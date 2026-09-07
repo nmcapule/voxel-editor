@@ -85,7 +85,7 @@ test('ambient environment follows the path tracer +Y => V=1 convention', () => {
   texture.dispose()
 })
 
-test('mesh vertices use merged corners, follow chunk transforms and visibility, and dispose on replacement and removal', () => {
+test('mesh overlays use merged geometry, follow chunk transforms and visibility, and dispose on replacement and removal', () => {
   const document = new VoxelDocument({ x: 64, y: 32, z: 64 })
   document.setVoxel(18, 19, 20, 1)
   document.setVoxel(19, 19, 20, 1)
@@ -95,8 +95,8 @@ test('mesh vertices use merged corners, follow chunk transforms and visibility, 
   const material = new MeshPhysicalMaterial(), meshVerticesMaterial = new PointsMaterial(), faceGridMaterial = new LineBasicMaterial()
   const model = new Group()
   const probe = Object.assign(Object.create(VoxelRenderer.prototype), {
-    document, model, materials: [material, material], meshVerticesMaterial, faceGridMaterial,
-    settings: { faceGrid: false, meshVertices: false }, renderMode: false, versions: new Map([[id, 1]]),
+    document, model, materials: [material, material], meshVerticesMaterial, faceGridMaterial, meshTrianglesMaterial: faceGridMaterial,
+    settings: { faceGrid: false, meshVertices: false, meshTriangles: false }, renderMode: false, versions: new Map([[id, 1]]),
     chunkMeshes: new Map(), chunkQuads: new Map(), queuedGrids: new Set(),
     renderer: { shadowMap: { needsUpdate: false } }, pump() {}, requestPathTraceRebuild() {}, render() {},
   })
@@ -131,15 +131,36 @@ test('mesh vertices use merged corners, follow chunk transforms and visibility, 
     ]))
     const surfaceIndex = surface.geometry.index!
     expect(surfaceIndex.array).toEqual(indices)
-    for (const faceGrid of [false, true]) for (const meshVertices of [false, true]) for (const renderMode of [false, true]) {
-      Object.assign(probe.settings, { faceGrid, meshVertices })
+    expect(surface.children).toHaveLength(0)
+    for (const faceGrid of [false, true]) for (const meshVertices of [false, true]) for (const meshTriangles of [false, true]) for (const renderMode of [false, true]) {
+      Object.assign(probe.settings, { faceGrid, meshVertices, meshTriangles })
       probe.renderMode = renderMode
       probe.updateMeshOverlayVisibility()
       expect(points.visible).toBe(meshVertices && !renderMode)
       expect(grid.visible).toBe(faceGrid && !renderMode)
+      expect(surface.children.some(child => child.userData.meshTriangles && child.visible)).toBe(meshTriangles && !renderMode)
       expect(surface.visible).toBe(true)
       expect(points.geometry).toBe(geometry)
     }
+    expect(surface.children).toHaveLength(1)
+    const triangles = surface.children[0] as LineSegments
+    const lines = triangles.geometry.attributes.position
+    expect(triangles.userData.editorOverlay).toBe(true)
+    expect(triangles.matrixWorld).toEqual(surface.matrixWorld)
+    const expectedEdges = new Set<string>(), actualEdges = new Set<string>()
+    const corner = (index: number) => new Vector3().fromBufferAttribute(position, index).toArray().join(',')
+    for (let i = 0; i < indices.length; i += 3) for (let j = 0; j < 3; j++) {
+      expectedEdges.add([corner(indices[i + j]), corner(indices[i + (j + 1) % 3])].sort().join(';'))
+    }
+    for (let i = 0; i < lines.count; i += 2) {
+      actualEdges.add([i, i + 1].map(index => new Vector3().fromBufferAttribute(lines, index).toArray().join(',')).sort().join(';'))
+    }
+    expect(actualEdges).toEqual(expectedEdges)
+    expect(actualEdges.size).toBe(18) // Twelve box edges and six face diagonals.
+    let trianglesDisposed = 0
+    triangles.geometry.addEventListener('dispose', () => { trianglesDisposed++ })
+    probe.updateMeshOverlayVisibility()
+    expect(surface.children[0]).toBe(triangles)
     expect(surface.geometry.index).toBe(surfaceIndex)
     expect(surfaceIndex.array).toEqual(indices)
     expect(data.indices).toEqual(indices)
@@ -149,6 +170,7 @@ test('mesh vertices use merged corners, follow chunk transforms and visibility, 
     probe.versions.set(id, 2)
     probe.receiveMeshes({ type: 'meshed', results: [{ ...replacement, id, version: 2 }] })
     expect(disposed).toBe(1)
+    expect(trianglesDisposed).toBe(1)
     expect(chunk.parent).toBeNull()
     expect(model.children).toHaveLength(1)
     const nextOverlays = model.children[0].children.filter(child => child instanceof Points)
@@ -158,9 +180,17 @@ test('mesh vertices use merged corners, follow chunk transforms and visibility, 
     expect(next.geometry.attributes.position.array).toBe(replacement.positions)
     expect(next.material).toBe(meshVerticesMaterial)
     expect(next.visible).toBe(false)
+    probe.renderMode = false
+    probe.updateMeshOverlayVisibility()
+    const nextSurface = model.children[0].children.find(child => child instanceof Mesh)!
+    const nextTriangles = nextSurface.children[0] as LineSegments
+    expect(nextTriangles.visible).toBe(true)
+    expect(nextTriangles.geometry).not.toBe(triangles.geometry)
+    nextTriangles.geometry.addEventListener('dispose', () => { trianglesDisposed++ })
     next.geometry.addEventListener('dispose', () => { disposed++ })
     probe.removeChunk(id)
     expect(disposed).toBe(2)
+    expect(trianglesDisposed).toBe(2)
     expect(model.children).toHaveLength(0)
     expect(probe.chunkMeshes.has(id)).toBe(false)
     expect(materialDisposed).toBe(0)
@@ -178,9 +208,10 @@ test('installed material-local meshes and vertex overlays do not multiply path-t
   const data = meshChunk(document.paddedChunk(0), document.palette)
   const materials = document.materials.map(() => new MeshPhysicalMaterial())
   const meshVerticesMaterial = new PointsMaterial()
+  const meshTrianglesMaterial = new LineBasicMaterial()
   const model = new Group()
   const probe = Object.assign(Object.create(VoxelRenderer.prototype), {
-    document, materials, model, meshVerticesMaterial, settings: { faceGrid: false, meshVertices: true }, renderMode: false, versions: new Map([[0, 1]]),
+    document, materials, model, meshVerticesMaterial, meshTrianglesMaterial, settings: { faceGrid: false, meshVertices: true, meshTriangles: true }, renderMode: false, versions: new Map([[0, 1]]),
     chunkMeshes: new Map(), chunkQuads: new Map(), queuedGrids: new Set(),
     renderer: { shadowMap: { needsUpdate: false } }, pump() {}, requestPathTraceRebuild() {}, render() {},
   })
@@ -206,5 +237,6 @@ test('installed material-local meshes and vertex overlays do not multiply path-t
     probe.removeChunk(0)
     materials.forEach(material => material.dispose())
     meshVerticesMaterial.dispose()
+    meshTrianglesMaterial.dispose()
   }
 })

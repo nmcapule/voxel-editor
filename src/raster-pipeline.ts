@@ -93,7 +93,7 @@ export class RasterPipeline {
 
   private readonly renderer: THREE.WebGLRenderer
   private readonly scene: THREE.Scene
-  private readonly antialias: boolean
+  antialias: boolean
   private readonly maxFrameMilliseconds: number
   private readonly beauty = colorTarget(true)
   private readonly scratch = colorTarget()

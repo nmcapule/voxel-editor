@@ -13,6 +13,7 @@ export interface ViewSettings {
   grid: boolean
   faceGrid: boolean
   meshVertices: boolean
+  meshTriangles: boolean
   projection: 'orthographic' | 'perspective'
   pathTracing: boolean
 }
@@ -112,7 +113,7 @@ export function restoreProjectSnapshot(stored: StoredProject) {
   } else {
     for (const chunk of stored.chunks) document.replaceLegacyChunk(chunk.id, new Uint8Array(chunk.data), stored.version === 2 && chunk.layerData ? new Uint16Array(chunk.layerData) : undefined)
   }
-  return { document, settings: { ...stored.settings, meshVertices: stored.settings.meshVertices ?? false }, library: stored.library }
+  return { document, settings: { ...stored.settings, meshVertices: stored.settings.meshVertices ?? false, meshTriangles: stored.settings.meshTriangles ?? false }, library: stored.library }
 }
 
 export async function clearProject() {

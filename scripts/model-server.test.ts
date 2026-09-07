@@ -23,7 +23,7 @@ upper.visible = false
 upper.locked = true
 const snapshot = encodeProjectSnapshot(document, {
   background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42,
-  ambientOcclusion: true, shadows: true, grid: true, faceGrid: false, meshVertices: false,
+  ambientOcclusion: true, shadows: true, grid: true, faceGrid: false, meshVertices: false, meshTriangles: false,
   projection: 'orthographic', pathTracing: true,
 })
 

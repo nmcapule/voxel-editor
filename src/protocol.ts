@@ -163,7 +163,7 @@ function materialPatch(value: unknown): MaterialPatch {
 function settingsPatch(value: unknown): Partial<ViewSettings> {
   const input = record(value, 'command.patch')
   const patch: Partial<ViewSettings> = {}
-  const allowed = new Set(['background', 'ambient', 'light', 'lightAzimuth', 'ambientOcclusion', 'shadows', 'grid', 'faceGrid', 'meshVertices', 'projection', 'pathTracing'])
+  const allowed = new Set(['background', 'ambient', 'light', 'lightAzimuth', 'ambientOcclusion', 'shadows', 'grid', 'faceGrid', 'meshVertices', 'meshTriangles', 'projection', 'pathTracing'])
   for (const key of Object.keys(input)) if (!allowed.has(key)) throw invalid(`Unknown setting: ${key}.`)
   if (input.background !== undefined) {
     const background = stringValue(input.background, 'command.patch.background', 7)
@@ -178,6 +178,7 @@ function settingsPatch(value: unknown): Partial<ViewSettings> {
   if (input.grid !== undefined) patch.grid = booleanValue(input.grid, 'command.patch.grid')
   if (input.faceGrid !== undefined) patch.faceGrid = booleanValue(input.faceGrid, 'command.patch.faceGrid')
   if (input.meshVertices !== undefined) patch.meshVertices = booleanValue(input.meshVertices, 'command.patch.meshVertices')
+  if (input.meshTriangles !== undefined) patch.meshTriangles = booleanValue(input.meshTriangles, 'command.patch.meshTriangles')
   if (input.pathTracing !== undefined) patch.pathTracing = booleanValue(input.pathTracing, 'command.patch.pathTracing')
   if (input.projection !== undefined) patch.projection = oneOf(input.projection, 'command.patch.projection', ['orthographic', 'perspective'] as const)
   if (!Object.keys(patch).length) throw invalid('command.patch must change at least one setting.')
@@ -399,7 +400,7 @@ function parseSettings(value: unknown): ViewSettings {
   const patch = settingsPatch(input)
   const required = ['background', 'ambient', 'light', 'lightAzimuth', 'ambientOcclusion', 'shadows', 'grid', 'faceGrid', 'projection', 'pathTracing'] as const
   if (required.some(property => patch[property] === undefined)) throw invalid('snapshot.settings is incomplete.')
-  return { meshVertices: false, ...patch } as ViewSettings
+  return { meshVertices: false, meshTriangles: false, ...patch } as ViewSettings
 }
 
 export function decodeProjectSnapshot(value: unknown) {

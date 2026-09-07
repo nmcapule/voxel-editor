@@ -6,41 +6,53 @@ import { restoreProjectSnapshot, snapshotProject, type ViewSettings } from './st
 
 const settings: ViewSettings = {
   background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42,
-  ambientOcclusion: true, shadows: true, grid: true, faceGrid: false, meshVertices: false,
+  ambientOcclusion: true, shadows: true, grid: true, faceGrid: false, meshVertices: false, meshTriangles: false,
   projection: 'orthographic', pathTracing: true,
 }
 
 describe('scripting protocol', () => {
-  test('mesh vertices settings updates accept only booleans', () => {
-    const parse = (meshVertices: unknown) => parseRequest({ protocol: PROTOCOL, id: 'vertices', command: { type: 'settings.update', patch: { meshVertices } } }).command
-    for (const meshVertices of [false, true]) {
-      expect(parse(meshVertices)).toEqual({ type: 'settings.update', patch: { meshVertices } })
-    }
-    for (const value of [null, 0, 1, 'false', 'true', [], {}]) {
-      expect(() => parse(value)).toThrow('command.patch.meshVertices must be a boolean')
+  test('mesh overlay settings updates accept only booleans', () => {
+    for (const flag of ['meshVertices', 'meshTriangles'] as const) {
+      const parse = (value: unknown) => parseRequest({ protocol: PROTOCOL, id: flag, command: { type: 'settings.update', patch: { [flag]: value } } }).command
+      for (const value of [false, true]) {
+        expect(parse(value)).toEqual({ type: 'settings.update', patch: { [flag]: value } })
+      }
+      for (const value of [null, 0, 1, 'false', 'true', [], {}]) {
+        expect(() => parse(value)).toThrow(`command.patch.${flag} must be a boolean`)
+      }
     }
   })
 
-  test('mesh vertices round-trip through snapshots and default to false in older projects', () => {
+  test('mesh overlays round-trip through snapshots and default to false in older projects', () => {
     const document = new VoxelDocument()
-    const enabled = { ...settings, meshVertices: true }
+    const enabled = { ...settings, meshVertices: true, meshTriangles: true }
     const snapshot = encodeProjectSnapshot(document, enabled)
+    expect(snapshot.settings).toEqual(enabled)
     expect(parseProjectSnapshot(snapshot).settings).toEqual(enabled)
     const decoded = decodeProjectSnapshot(JSON.parse(JSON.stringify(snapshot)))
     expect(decoded.settings).toEqual(enabled)
     expect(encodeProjectSnapshot(decoded.document, decoded.settings)).toEqual(snapshot)
     const stored = snapshotProject(document, enabled)
+    expect(stored.settings).toEqual(enabled)
     expect(restoreProjectSnapshot(structuredClone(stored))!.settings).toEqual(enabled)
 
-    Reflect.deleteProperty(snapshot.settings, 'meshVertices')
-    expect(parseProjectSnapshot(snapshot).settings).toEqual(settings)
-    expect(decodeProjectSnapshot(snapshot).settings).toEqual(settings)
-    Reflect.deleteProperty(stored.settings, 'meshVertices')
-    for (const version of [1, 2, 3] as const) {
-      expect(restoreProjectSnapshot({ ...stored, version })!.settings).toEqual(settings)
+    for (const missing of [['meshVertices'], ['meshTriangles'], ['meshVertices', 'meshTriangles']] as const) {
+      const legacy = structuredClone(snapshot), legacyStored = structuredClone(stored), expected = { ...enabled }
+      for (const flag of missing) {
+        Reflect.deleteProperty(legacy.settings, flag)
+        Reflect.deleteProperty(legacyStored.settings, flag)
+        expected[flag] = false
+      }
+      expect(parseProjectSnapshot(legacy).settings).toEqual(expected)
+      expect(decodeProjectSnapshot(legacy).settings).toEqual(expected)
+      for (const version of [1, 2, 3] as const) {
+        expect(restoreProjectSnapshot({ ...legacyStored, version })!.settings).toEqual(expected)
+      }
     }
-    for (const meshVertices of [null, 0, 1, 'false', 'true', [], {}]) {
-      expect(() => parseProjectSnapshot({ ...snapshot, settings: { ...snapshot.settings, meshVertices } })).toThrow('meshVertices')
+    for (const flag of ['meshVertices', 'meshTriangles'] as const) {
+      for (const value of [null, 0, 1, 'false', 'true', [], {}]) {
+        expect(() => parseProjectSnapshot({ ...snapshot, settings: { ...snapshot.settings, [flag]: value } })).toThrow(flag)
+      }
     }
   })
 

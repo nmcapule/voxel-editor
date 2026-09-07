@@ -1,6 +1,6 @@
 // Browser checks, loaded by tests/transparency.ts. Run the suites sequentially.
 // Runtime imports are deferred so merely opening the harness does not start GPU checks.
-import type { Camera, DirectionalLight, InstancedMesh, Mesh, Object3D, Points, WebGLRenderer, WebGLRenderTarget } from 'three'
+import type { Camera, DirectionalLight, InstancedMesh, LineSegments, Mesh, Object3D, Points, WebGLRenderer, WebGLRenderTarget } from 'three'
 import type { VoxelDocument } from '../src/editor'
 import type { VoxelRenderer } from '../src/renderer'
 import type { ViewSettings } from '../src/storage'
@@ -95,7 +95,7 @@ async function withViewport<T>(renderer: VoxelRenderer, size: number, run: () =>
 export async function runRenderingChecks(renderer: VoxelRenderer, settings: ViewSettings, errors: string[]) {
   const [{ VoxelDocument }, THREE] = await Promise.all([import('../src/editor'), import('three')])
   return withViewport(renderer, 512, async () => {
-    const baseline: ViewSettings = { ...settings, projection: 'orthographic', pathTracing: false, ambientOcclusion: false, shadows: false, grid: false, faceGrid: false, meshVertices: false }
+    const baseline: ViewSettings = { ...settings, projection: 'orthographic', pathTracing: false, ambientOcclusion: false, shadows: false, grid: false, faceGrid: false, meshVertices: false, meshTriangles: false }
     const webgl = Reflect.get(renderer, 'renderer') as WebGLRenderer
     const errorStart = errors.length
     const counters = { raster: 0, webgl: 0, workerMessages: 0, meshJobs: 0, gridJobs: 0 }
@@ -483,6 +483,51 @@ export async function runRenderingChecks(renderer: VoxelRenderer, settings: View
         for (const points of markers()) bounds.expandByObject(points)
         check(bounds.max.x === 15 - document.dimensions.x / 2, 'Updated vertex bounds must include the extended merged face')
         return { corner, hidden, interior }
+      })
+
+      await run('mesh triangles expose merged diagonals without voxel divisions or hidden edges', async () => {
+        const document = fixture()
+        fill(document, 42, 6, 5, 18, 14, 13, 19)
+        document.setVoxel(9, 10, 14, 42)
+        await load(document)
+        const model = Reflect.get(renderer, 'model') as Object3D
+        const wires = () => {
+          const lines: LineSegments[] = []
+          model.traverse(object => { if (object.userData.meshTriangles) lines.push(object as LineSegments) })
+          return lines
+        }
+        check(wires().length === 0, 'Disabled triangle overlays must not allocate wireframe geometry')
+        const before = await image(renderer), start = jobs.length
+        renderer.setSettings({ ...baseline, meshTriangles: true })
+        const after = await image(renderer)
+        const diagonal = difference(at(before, 10, 9, 19, 3), at(after, 10, 9, 19, 3))
+        check(!Reflect.get(renderer, 'raster').antialias, 'Triangle inspection must keep pixel-wide edges sharp')
+        const hidden = difference(at(before, 9.5, 10.5, 15, 3), at(after, 9.5, 10.5, 15, 3))
+        const interior = difference(at(before, 8, 9, 19, 3), at(after, 8, 9, 19, 3))
+        check(diagonal.max > 30, 'A merged quad must show its triangle diagonal')
+        check(hidden.max <= 2 && interior.max <= 2, 'Hidden edges and unmerged voxel divisions must remain absent')
+        const geometries = wires().map(lines => lines.geometry)
+        check(geometries.length === 2, 'Each material-local mesh needs one wireframe')
+        renderer.setSettings(baseline)
+        check(wires().every(lines => !lines.visible), 'Disabling triangles must hide the wireframe')
+        check(difference(before.data, (await image(renderer)).data).max <= 2, 'Disabling triangles must restore original pixels')
+        check(Reflect.get(renderer, 'raster').antialias, 'Disabling triangles must restore antialiasing')
+        renderer.setSettings({ ...baseline, meshTriangles: true, meshVertices: true })
+        renderer.setRenderMode(true)
+        check(wires().every(lines => !lines.visible), 'Render mode must hide triangle overlays')
+        await image(renderer)
+        check(Reflect.get(renderer, 'raster').antialias, 'Render mode must retain antialiasing')
+        renderer.setRenderMode(false)
+        check(wires().every(lines => lines.visible && geometries.includes(lines.geometry)), 'Triangle toggles must reuse cached geometry')
+        check(jobs.length === start, 'Triangle toggles must not send mesher or grid jobs')
+        fill(document, 42, 14, 5, 18, 15, 13, 19)
+        renderer.markDirty(document.chunks.keys())
+        await renderer.whenMeshIdle()
+        check(wires().every(lines => lines.visible && !geometries.includes(lines.geometry)), 'Edits must refresh the visible triangles')
+        const bounds = new THREE.Box3()
+        for (const lines of wires()) bounds.expandByObject(lines)
+        check(bounds.max.x === 15 - document.dimensions.x / 2, 'Wireframe must follow the extended merged surface')
+        return { diagonal, hidden, interior }
       })
 
       await run('push preview capacity follows requested cells, not maximum range', async () => {

@@ -12,7 +12,7 @@ import { SCENE_GEOMETRY_BUDGET, type SceneAsset, type SceneTransform } from './s
 import { describeSceneChunk } from './scene-storage'
 import * as sceneStorage from './scene-storage'
 
-const defaultSettings: ViewSettings = { background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42, ambientOcclusion: true, shadows: true, grid: true, faceGrid: false, meshVertices: false, projection: 'orthographic', pathTracing: false }
+const defaultSettings: ViewSettings = { background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42, ambientOcclusion: true, shadows: true, grid: true, faceGrid: false, meshVertices: false, meshTriangles: false, projection: 'orthographic', pathTracing: false }
 
 function rendererProbe(document: SceneDocument) {
   const camera = new THREE.OrthographicCamera(-1000, 1000, 1000, -1000, 0.1, 10000)

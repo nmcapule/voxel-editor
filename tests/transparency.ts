@@ -19,7 +19,7 @@ const callbacks = new Proxy({
 }, { get: (target, key) => target[key as keyof typeof target] ?? (() => {}) }) as unknown as RendererCallbacks
 const settings: ViewSettings = {
   background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42,
-  ambientOcclusion: false, shadows: false, grid: false, faceGrid: false, meshVertices: false,
+  ambientOcclusion: false, shadows: false, grid: false, faceGrid: false, meshVertices: false, meshTriangles: false,
   projection: 'perspective', pathTracing: true,
 }
 const renderer = new VoxelRenderer(host, new VoxelDocument(), settings, callbacks)
@@ -95,7 +95,7 @@ async function runRasterChecks() {
 
 async function runInspectionChecks() {
   renderer.setRenderMode(false)
-  renderer.setSettings({ ...settings, pathTracing: false, grid: true, faceGrid: true, meshVertices: true })
+  renderer.setSettings({ ...settings, pathTracing: false, grid: true, faceGrid: true, meshVertices: true, meshTriangles: true })
   const fixture = new VoxelDocument({ x: 19, y: 23, z: 29 })
   // Unequal extents, boundary voxels and overlapping rays expose flips, depth and framing errors.
   for (let x = 0; x < 8; x++) for (let y = 0; y < 4; y++) for (let z = 0; z < 12; z++) {
@@ -158,11 +158,13 @@ async function runInspectionChecks() {
   }
   let faceGrids = 0
   let meshVertices = 0
+  let meshTriangles = 0
   sceneObject.traverse(object => {
     if (object.userData.faceGrid) { overlays.set(object, object.visible); faceGrids++ }
     if (object.userData.meshVertices) { overlays.set(object, object.visible); meshVertices++ }
+    if (object.userData.meshTriangles) { overlays.set(object, object.visible); meshTriangles++ }
   })
-  check(faceGrids > 0 && meshVertices > 0 && !!Reflect.get(renderer, 'selectionPreview'), 'Fixture must contain face grids, mesh vertices and a selection overlay')
+  check(faceGrids > 0 && meshVertices > 0 && meshTriangles > 0 && !!Reflect.get(renderer, 'selectionPreview'), 'Fixture must contain face grids, mesh vertices, mesh triangles and a selection overlay')
   let populated: Awaited<ReturnType<typeof inspect>>
   try {
     for (const object of overlays.keys()) object.visible = true

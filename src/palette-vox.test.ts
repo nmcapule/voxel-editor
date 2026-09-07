@@ -9,7 +9,7 @@ import { exportVox, importVox, VOX_EXPORT_WARNING } from './vox'
 
 const settings: ViewSettings = {
   background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42,
-  ambientOcclusion: true, shadows: true, grid: true, faceGrid: false, meshVertices: false,
+  ambientOcclusion: true, shadows: true, grid: true, faceGrid: false, meshVertices: false, meshTriangles: false,
   projection: 'orthographic', pathTracing: true,
 }
 

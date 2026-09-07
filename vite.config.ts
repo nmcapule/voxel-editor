@@ -37,13 +37,14 @@ export default defineConfig({
           }
           if (!acceptsGzip(req.headers['accept-encoding'])) return end.call(res, chunk as never, encoding as never, callback)
           const done = typeof encoding === 'function' ? encoding : callback
-          const input = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string | Uint8Array, typeof encoding === 'string' ? encoding : undefined)
+          const input = Buffer.isBuffer(chunk) ? chunk : typeof chunk === 'string'
+            ? Buffer.from(chunk, typeof encoding === 'string' ? encoding : undefined) : Buffer.from(chunk as Uint8Array)
           if (input.byteLength < 1024) return end.call(res, chunk as never, encoding as never, callback)
           gzip(input, (error, compressed) => {
             if (error) { end.call(res, chunk as never, encoding as never, callback); return }
             res.setHeader('Content-Encoding', 'gzip')
             res.setHeader('Content-Length', compressed.byteLength)
-            end.call(res, compressed, done)
+            end.call(res, compressed, done as never)
           })
           return res
         } as typeof res.end
@@ -56,8 +57,14 @@ export default defineConfig({
   },
   server: {
     allowedHosts: ['.exe.xyz'],
-    proxy: process.env.VOXEL_ASSISTANT_PORT ? {
-      '^/__assistant/socket$': { target: `http://127.0.0.1:${process.env.VOXEL_ASSISTANT_PORT}`, ws: true },
-    } : undefined,
+    // Vite preview inherits server.proxy. Preserve Host and browser Origin for the API's origin check.
+    proxy: {
+      ...(process.env.VOXEL_MODEL_PORT ? {
+        '^/api/models(?:[/?]|$)': { target: `http://127.0.0.1:${process.env.VOXEL_MODEL_PORT}`, changeOrigin: false },
+      } : {}),
+      ...(process.env.VOXEL_ASSISTANT_PORT ? {
+        '^/__assistant/socket$': { target: `http://127.0.0.1:${process.env.VOXEL_ASSISTANT_PORT}`, ws: true },
+      } : {}),
+    },
   },
 })

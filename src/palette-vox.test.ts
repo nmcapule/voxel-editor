@@ -134,6 +134,18 @@ describe('palette occupancy', () => {
     }
   })
 
+  test('local recovery keeps the server association with its matching document', () => {
+    const document = new VoxelDocument(undefined, 'Library model')
+    const library = { id: crypto.randomUUID(), version: 3, tags: ['props'], dirty: true }
+    const stored = snapshotProject(document, settings, library)
+    library.tags.push('later')
+    library.version++
+    const restored = restoreProjectSnapshot(structuredClone(stored))!
+    expect(restored.document.name).toBe('Library model')
+    expect(restored.library).toEqual({ id: library.id, version: 3, tags: ['props'], dirty: true })
+    expect(restoreProjectSnapshot(snapshotProject(new VoxelDocument(), settings))!.library).toBeUndefined()
+  })
+
   test('validates optional snapshot occupancy at the protocol boundary', () => {
     const snapshot = encodeProjectSnapshot(new VoxelDocument(), settings)
     for (const flags of [null, [], new Array(256), Array(256).fill(2), Array(256).fill(0.5), [1, ...Array(255).fill(0)]]) {

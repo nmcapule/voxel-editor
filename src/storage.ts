@@ -27,6 +27,14 @@ export interface StoredProject {
   activeLayerId?: number
   chunks: { id: number; data: ArrayBuffer; layerId?: number; layerData?: ArrayBuffer }[]
   settings: ViewSettings
+  library?: LibraryLink
+}
+
+export interface LibraryLink {
+  id: string
+  version: number
+  tags: string[]
+  dirty: boolean
 }
 
 function database() {
@@ -46,7 +54,7 @@ function complete(transaction: IDBTransaction) {
   })
 }
 
-export function snapshotProject(document: VoxelDocument, settings: ViewSettings): StoredProject {
+export function snapshotProject(document: VoxelDocument, settings: ViewSettings, library?: LibraryLink): StoredProject {
   return {
     version: 3,
     name: document.name,
@@ -57,7 +65,8 @@ export function snapshotProject(document: VoxelDocument, settings: ViewSettings)
     layers: document.layers.map(layer => ({ ...layer })),
     activeLayerId: document.activeLayerId,
     chunks: [...document.chunks].flatMap(([id, layers]) => [...layers].map(([layerId, data]) => ({ id, layerId, data: data.slice().buffer }))),
-    settings,
+    settings: { ...settings },
+    library: library ? { ...library, tags: [...library.tags] } : undefined,
   }
 }
 
@@ -102,7 +111,7 @@ export function restoreProjectSnapshot(stored: StoredProject) {
   } else {
     for (const chunk of stored.chunks) document.replaceLegacyChunk(chunk.id, new Uint8Array(chunk.data), stored.version === 2 && chunk.layerData ? new Uint16Array(chunk.layerData) : undefined)
   }
-  return { document, settings: stored.settings }
+  return { document, settings: stored.settings, library: stored.library }
 }
 
 export async function clearProject() {

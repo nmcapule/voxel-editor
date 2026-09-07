@@ -41,6 +41,12 @@ data uses tabular figures.
 
 - The WebGL canvas fills the viewport.
 - Project controls sit top-left; camera and stage actions sit top-right.
+- Model browsing opens a dedicated gallery overlay with a fixed header and search
+  controls above a scrolling grid of isometric thumbnails. Preview buttons open
+  the saved model; names, dimensions, save dates, and clickable tags sit below.
+  Save model uses a separate compact dialog, never a form inside the gallery.
+  The gallery expands on desktop and remains usable as a single-column overlay
+  at 320 px, with close and search controls remaining visible while browsing.
 - Select, Place, Sculpt, and Layer sit bottom-center. Each tool shows its retained
   state beneath its name and opens its popup from the tool bar.
   Place's popup contains Paint, Volume, Eyedropper, and material selection; Place

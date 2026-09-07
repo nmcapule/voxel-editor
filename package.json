@@ -4,12 +4,13 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "bun scripts/dev.ts",
     "dev:assistant": "bun plugins/assistant/dev.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "build": "bun run typecheck && vite build",
-    "preview": "vite preview",
+    "preview": "bun scripts/dev.ts --preview",
+    "start": "bun scripts/model-server.ts",
     "relay": "bun scripts/relay.ts"
   },
   "dependencies": {

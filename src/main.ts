@@ -1,10 +1,11 @@
 import './style.css'
 import { VoxelDocument, type Dimensions, type FillShape, type ResizeAnchor, type Vec3 } from './editor'
+import { mountModelLibrary } from './model-library'
 import { SerialCommandQueue, base64ToBytes, bytesToBase64, decodeProjectSnapshot, encodeProjectSnapshot, parseCommand, type RemoteCommand } from './protocol'
 import { connectRemote } from './remote'
 import { VoxelRenderer } from './renderer'
 import { Studio, StudioCommandError, type AuxiliaryTool, type PaintMode, type PbrMap, type SculptMode, type SelectionMode, type SelectionState, type StudioCommand, type StudioOutcome, type Tool } from './studio'
-import { loadProject, saveProjectSnapshot, snapshotProject, type ViewSettings } from './storage'
+import { loadProject, saveProjectSnapshot, snapshotProject, type LibraryLink, type ViewSettings } from './storage'
 import { exportVox, importVox, VOX_EXPORT_WARNING } from './vox'
 
 const DEFAULT_SETTINGS: ViewSettings = {
@@ -44,6 +45,9 @@ try {
 
 let voxelDocument = restored?.document ?? new VoxelDocument()
 let settings: ViewSettings = { ...DEFAULT_SETTINGS, ...restored?.settings }
+let libraryLink: LibraryLink | undefined = restored?.library
+let libraryGeneration = 0
+let libraryChanges = 0
 const storedToolState: StoredToolState = (() => {
   try {
     const parsed: unknown = JSON.parse(readLocalStorage('voxel-studio-tool-state') ?? '{}')
@@ -120,6 +124,8 @@ app.innerHTML = `
           <summary aria-label="Open project menu" title="Project menu">${icon('menu')}</summary>
           <div class="menu-sheet" role="menu">
             <strong>Project</strong>
+            <button type="button" data-action="save-model" role="menuitem">Save model...</button>
+            <button type="button" data-action="browse-models" role="menuitem">Browse models...</button>
             <button type="button" data-action="new" role="menuitem">New document</button>
             <button type="button" data-action="import" role="menuitem">Import VOX</button>
             <button type="button" data-action="export" role="menuitem">Export VOX</button>
@@ -369,7 +375,8 @@ function dismissGuide() {
 
 function updateSaveStatus() {
   saveStatus.dataset.state = saveState
-  saveStatus.querySelector('span')!.textContent = saveState === 'saving' ? 'Saving…' : saveState === 'error' ? 'Export to keep changes' : 'Saved locally'
+  saveStatus.querySelector('span')!.textContent = saveState === 'saving' ? 'Saving locally…' : saveState === 'error' ? 'Local save failed' : libraryLink && !libraryLink.dirty ? 'Saved to server' : 'Saved locally'
+  saveStatus.title = libraryLink?.dirty ? 'Local recovery saved. Use Save model to update the server copy.' : 'Local autosave is separate from the shared server library.'
 }
 
 function queueSave() {
@@ -383,7 +390,7 @@ function queueSave() {
 
 function persistSave(revision: number) {
   saveTimer = undefined
-  const snapshot = snapshotProject(voxelDocument, settings)
+  const snapshot = snapshotProject(voxelDocument, settings, libraryLink)
   pendingSave = pendingSave.catch(() => {}).then(() => saveProjectSnapshot(snapshot)).then(() => {
     if (revision === saveRevision) { saveState = 'saved'; updateSaveStatus() }
   }).catch(error => {
@@ -429,6 +436,14 @@ function syncStudioState() {
 function applyStudioEffects(command: RemoteCommand, outcome: StudioOutcome, source: CommandSource) {
   const effects = outcome.effects
   syncStudioState()
+  if (effects.documentReplaced && command.type !== 'document.resize') {
+    libraryLink = undefined
+    libraryGeneration++
+  }
+  if (effects.save) {
+    libraryChanges++
+    if (libraryLink) libraryLink = { ...libraryLink, dirty: true }
+  }
   if (effects.documentReplaced) {
     renderer.setDocument(voxelDocument, effects.preserveMaterials)
     renderer.setActiveColor(activeColor)
@@ -1046,6 +1061,15 @@ renderer = new VoxelRenderer(document.querySelector('#viewport')!, voxelDocument
   },
 })
 
+const modelLibrary = mountModelLibrary({
+  current: () => ({ name: voxelDocument.name, revision: studioController.revision, generation: libraryGeneration, changes: libraryChanges, library: libraryLink, hasTextureMaps: loadedPbrMaps.size > 0 }),
+  snapshot: () => encodeProjectSnapshot(voxelDocument, settings),
+  execute: (command, revision) => dispatchApplicationCommand(command, 'ui', revision),
+  link(library) { libraryLink = library; queueSave(); updateSaveStatus() },
+  notify: showToast,
+})
+import.meta.hot?.dispose(() => modelLibrary.dispose())
+
 function openPanel(tab = 'model') {
   if (layerPanel.matches(':popover-open')) layerPanel.hidePopover()
   closeToolPopups()
@@ -1203,6 +1227,11 @@ document.addEventListener('click', async event => {
   const button = target.closest<HTMLButtonElement>('[data-action]')
   if (!button) return
   const action = button.dataset.action
+  if (action === 'save-model' || action === 'browse-models') {
+    clearShortcutPrefix()
+    closeToolPopups()
+    modelLibrary.open(action === 'save-model')
+  }
   if (action === 'undo') undo()
   if (action === 'redo') redo()
   if (action === 'frame') void dispatchApplicationCommand({ type: 'view.frame' }).catch(commandFailed)

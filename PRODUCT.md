@@ -9,7 +9,8 @@ web
 ## Stack
 
 Delegated recommendation confirmed: Bun, TypeScript, Vite, and Three.js. The
-application is a client-only editor with native browser storage and file APIs.
+application uses a browser-based editor with native local recovery and file APIs,
+plus a Bun/SQLite server for a shared model library.
 
 ## Users
 
@@ -72,7 +73,12 @@ adjust the palette and lighting, and import or export files.
   Opaque surfaces remain visible where they meet transparent or transmissive
   voxels.
 - Single-model MagicaVoxel VOX import and VOX 150 export with a 255-color palette.
-- One local autosave in IndexedDB. No account or network service is required.
+- One local autosave in IndexedDB, plus explicit server saves in a shared model
+  library. A dedicated gallery overlay shows isometric model thumbnails with
+  name search and custom-tag filters. Saving and saving copies use a separate
+  dialog. Server saves include layers, palette, material properties and lighting,
+  but not texture image files, camera position or undo history. No account is
+  required; the shared library is for personal or trusted-team servers.
 - Selection scope plus active and recent materials persist across refreshes.
 - Desktop-first interaction with pen and touch support and a mobile-safe layout.
 - Animation, multiple scene objects, per-voxel material metadata, cloud sync,

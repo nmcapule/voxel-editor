@@ -3,6 +3,10 @@ import { StudioCommandError } from '../../src/studio'
 
 export type CommandResult = { revision: number; changed?: boolean; result: unknown }
 export type ToolResponse = { ok: true } & CommandResult | { ok: false; error: { code: string; message: string } }
+export type BatchResponse = { results: ToolResponse[] } & (
+  | { ok: true }
+  | (Extract<ToolResponse, { ok: false }> & { failedIndex: number | null })
+)
 export type AssistantModel = { providerID: string; modelID: string; providerName: string; name: string }
 export type AssistantHost = {
   root: HTMLElement

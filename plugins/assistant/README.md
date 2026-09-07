@@ -69,6 +69,73 @@ OpenCode instance still requires server-only basic authentication. When checking
 from inside the VM, its `/etc/hosts` entry may resolve its public hostname back
 to the VM rather than the external HTTPS proxy.
 
+## Command Batches
+
+The `canvas` tool's existing `command` argument is a JSON **string**, encoding
+either a single command object or an array of 1 to 16 command objects. Single
+commands keep their existing behavior and response shape:
+
+```json
+{"command":"{\"type\":\"state.get\"}"}
+```
+
+For a batch, encode the array in that same string, not in a new argument or a
+batch command object. For example, with an existing layer ID of `1`:
+
+```json
+{"command":"[{\"type\":\"palette.setColor\",\"index\":5,\"color\":15909198},{\"type\":\"edit.setVoxels\",\"layerId\":1,\"voxels\":[{\"x\":1,\"y\":1,\"z\":1,\"color\":5}]},{\"type\":\"view.inspect\",\"views\":[\"front\"]}]"}
+```
+
+The server validates every command before executing any of them, then serializes
+the whole batch against other AI tool calls. It sends ordinary frontend command
+messages in array order, carrying each successful command's returned revision
+forward to the next command. Execution stops at the first error or cancellation;
+later commands are not executed. This does not lock out manual canvas edits.
+
+Each result entry is an ordinary `ToolResponse`: a success has `ok: true`,
+`revision`, `result`, and optional `changed`; a failure has `ok: false` and
+`error: { code, message }`. Batch envelopes have these shapes (`failedIndex` is
+zero-based):
+
+```ts
+// Success: one response per command, in input order.
+{ ok: true, results: [ToolResponse, ...] }
+
+// Execution error or cancellation: includes the failed command's response.
+{ ok: false, error: { code, message }, failedIndex: 2,
+  results: [successfulResponse, successfulResponse, failedResponse] }
+
+// Invalid item: nothing executes, even if earlier items were valid.
+{ ok: false, error: { code: "invalid_argument", message }, failedIndex: 2,
+  results: [] }
+
+// Whole-batch rejection: invalid count (empty or more than 16) or full queue.
+{ ok: false, error: { code: "invalid_argument" | "limit_exceeded", message },
+  failedIndex: null, results: [] }
+```
+
+Batches are not atomic: completed edits remain after failure or Stop, and normal
+Undo stays per edit rather than becoming a single batch Undo. Destructive commands
+still require individual local approval of their exact command and revision;
+there is no blanket batch approval. Existing autosave and non-undoable operation
+semantics are unchanged.
+
+Only batch commands whose arguments are already known. Result-dependent calls
+must remain separate: call `layer.create`, read its returned `layer.id`, then use
+that ID in a later call. Nested batches and result-reference placeholders are not
+supported. Every command counts toward the existing 128-command run limit,
+including the initial automatic `state.get`; a batch is not counted as one command.
+The 16-command batch maximum does not replace the per-command voxel/volume limits.
+
+The tool metadata/title is `Canvas batch (N commands)`. Successful inspection and
+capture entries produce PNG attachments even if a later command fails. Text output
+preserves the ordered results, revisions, image metadata, and any failure but
+strips image base64. Inspection filenames are
+`command-<zero-based index>-<name>.png`; viewport captures use
+`command-<zero-based index>-viewport.png`. The command index prevents collisions
+when views repeat. Single-command image behavior is unchanged. Batches require no
+new frontend messages or UI controls.
+
 ## Editing And Stop
 
 The assistant prefers `view.inspect` for visual understanding and final verification.
@@ -104,7 +171,8 @@ discarded. Declining approval stops the run. Approval expires after 60 seconds.
 Stop aborts the local run immediately, invalidates waiting command signals, and
 aborts OpenCode. It cannot retract a command already applied to the document.
 
-Runs are limited to 40 model steps, 128 canvas commands, and 10 minutes. Explicit
+Runs are limited to 40 model steps, 128 canvas commands (including the initial
+`state.get` and each command within a batch), and 10 minutes. Explicit
 voxel/cell batches are limited to 4096; fill bounding volumes to 32768. Viewport
 capture settles meshing, not progressive-render convergence. Heartbeats detect
 lost connections; pending canvas calls time out rather than replaying.
@@ -130,6 +198,7 @@ The standalone scripting relay is unchanged and not required by the assistant.
 
 ```sh
 bun test
+bun test plugins/assistant/opencode.test.ts
 bun test plugins/assistant/server.test.ts scripts/relay.test.ts
 bun run build
 bunx impeccable detect plugins/assistant/client.ts plugins/assistant/style.css src/main.ts

@@ -1,8 +1,9 @@
 import type { ServerWebSocket } from 'bun'
 import type { OpencodeClient, Part } from '@opencode-ai/sdk/v2/client'
 import { SerialCommandQueue, type RemoteCommand } from '../../src/protocol'
+import { StudioCommandError } from '../../src/studio'
 import { tokensMatch } from '../../scripts/relay'
-import { parseCanvasCommand, type AssistantModel, type ServerMessage, type ToolResponse } from './shared'
+import { parseCanvasCommand, type AssistantModel, type BatchResponse, type ServerMessage, type ToolResponse } from './shared'
 
 type Run = {
   id: string
@@ -11,7 +12,7 @@ type Run = {
   abortTask?: Promise<unknown>
   revision?: number
   calls: number
-  queue: SerialCommandQueue<RemoteCommand, ToolResponse>
+  queue: SerialCommandQueue<RemoteCommand | RemoteCommand[], ToolResponse | BatchResponse>
   pending?: { id: string; resolve: (response: ToolResponse) => void }
   assistantIDs: Set<string>
   parts: Map<string, Extract<ServerMessage, { type: 'part' }>>
@@ -35,7 +36,7 @@ export function createAssistantService(client: OpencodeClient, internalKey: stri
   const send = (socket: ServerWebSocket<Connection>, message: ServerMessage) => {
     if (socket.readyState === 1 && socket.send(JSON.stringify(message)) === 0) socket.close(1013, 'Connection backpressure')
   }
-  const failure = (code: string, message: string): ToolResponse => ({ ok: false, error: { code, message } })
+  const failure = (code: string, message: string): Extract<ToolResponse, { ok: false }> => ({ ok: false, error: { code, message } })
 
   async function discoverModels(socket: ServerWebSocket<Connection>) {
     const controller = new AbortController()
@@ -153,7 +154,17 @@ export function createAssistantService(client: OpencodeClient, internalKey: stri
     const run: Run = {
       id: crypto.randomUUID(), userMessageID: `msg_${crypto.randomUUID().replaceAll('-', '')}`,
       controller: new AbortController(), calls: 0, assistantIDs: new Set(), parts: new Map(),
-      queue: new SerialCommandQueue(command => requestCanvas(socket, run, command), 16),
+      // Queue whole batches; requestCanvas checks cancellation before every command.
+      queue: new SerialCommandQueue(async command => {
+        if (!Array.isArray(command)) return requestCanvas(socket, run, command)
+        const results: ToolResponse[] = []
+        for (const item of command) {
+          const response = await requestCanvas(socket, run, item)
+          results.push(response)
+          if (!response.ok) return { ...response, results, failedIndex: results.length - 1 }
+        }
+        return { ok: true, results }
+      }, 16),
     }
     socket.data.run = run
     send(socket, { type: 'run', runID: run.id })
@@ -203,8 +214,10 @@ export function createAssistantService(client: OpencodeClient, internalKey: stri
       // Not proxied by Vite. Only the child OpenCode tool knows this separate key.
       if (path !== '/tool' || request.method !== 'POST') return new Response('Not found', { status: 404 })
       if (!tokensMatch(request.headers.get('authorization'), `Bearer ${internalKey}`)) return new Response('Unauthorized', { status: 401 })
+      let batch = false
       try {
         const body = await request.json() as { sessionID?: unknown; messageID?: unknown; command?: unknown }
+        batch = Array.isArray(body.command)
         const socket = [...sockets].find(socket => socket.data.sessionID === body.sessionID)
         const run = socket?.data.run
         if (!socket || !run || run.controller.signal.aborted) return new Response('No active canvas run', { status: 409 })
@@ -216,10 +229,22 @@ export function createAssistantService(client: OpencodeClient, internalKey: stri
           run.assistantIDs.add(body.messageID)
         }
         if (socket.data.run !== run || run.controller.signal.aborted) return new Response('Run stopped', { status: 409 })
-        const command = parseCanvasCommand(body.command)
-        return Response.json(await run.queue.dispatch(command, run.controller.signal))
+        const inputs = Array.isArray(body.command) ? body.command : [body.command]
+        if (!inputs.length || inputs.length > 16) throw new StudioCommandError('invalid_argument', 'Use 1 to 16 commands per batch.')
+        const commands: RemoteCommand[] = []
+        for (const input of inputs) {
+          try { commands.push(parseCanvasCommand(input)) }
+          catch (error) {
+            const response = failure('invalid_argument', error instanceof Error ? error.message.slice(0, 512) : 'Invalid canvas command')
+            return Response.json(batch ? { ...response, results: [], failedIndex: commands.length } : response)
+          }
+        }
+        // Run and command deadlines bound the wait, including batches and local approvals.
+        server.timeout(request, 0)
+        return Response.json(await run.queue.dispatch(batch ? commands : commands[0]))
       } catch (error) {
-        return Response.json(failure('invalid_argument', error instanceof Error ? error.message.slice(0, 512) : 'Invalid canvas command'))
+        const response = failure(error instanceof StudioCommandError ? error.code : 'invalid_argument', error instanceof Error ? error.message.slice(0, 512) : 'Invalid canvas command')
+        return Response.json(batch ? { ...response, results: [], failedIndex: null } : response)
       }
     },
     websocket: {

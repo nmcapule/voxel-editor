@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import { createOpencodeClient } from '@opencode-ai/sdk/v2/client'
 import { createAssistantService, sameOrigin } from './server'
-import { isInspection, needsApproval, parseCanvasCommand, type ServerMessage } from './shared'
+import { isInspection, needsApproval, parseCanvasCommand, type ServerMessage, type ToolResponse } from './shared'
 
 const Socket = WebSocket as unknown as new (url: string, options: Bun.WebSocketOptions) => WebSocket
 const selection = { providerID: 'connected', modelID: 'vision' }
@@ -210,9 +210,10 @@ test('rapid upgrades admit only one canvas; unavailable service closes without d
   }
 })
 
-async function modelBridge(providerResponse = async () => Response.json(catalog()), configResponse = async () => Response.json({ model: 'connected/vision', secret: 'config-secret' })) {
+async function modelBridge(providerResponse = async () => Response.json(catalog()), configResponse = async () => Response.json({ model: 'connected/vision', secret: 'config-secret' }), pendingPrompt?: Promise<void>) {
   const requests: string[] = []
-  const prompts: { path: string; body: { model: unknown } }[] = []
+  const prompts: { path: string; body: { model: unknown; messageID: string } }[] = []
+  const prompted = Promise.withResolvers<void>()
   const upstream = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: async request => {
     const path = new URL(request.url).pathname
     requests.push(`${request.method} ${path}`)
@@ -223,9 +224,12 @@ async function modelBridge(providerResponse = async () => Response.json(catalog(
     if (path === '/config') return configResponse()
     if (path === '/session' && request.method === 'POST') return Response.json({ id: 'ses_shared' })
     if (path.endsWith('/message')) {
-      prompts.push({ path, body: await request.json() as { model: unknown } })
+      prompts.push({ path, body: await request.json() as { model: unknown; messageID: string } })
+      prompted.resolve()
+      await pendingPrompt
       return Response.json({ info: { id: `reply_${prompts.length}` }, parts: [] })
     }
+    if (path.endsWith('/message/reply_1')) return Response.json({ info: { role: 'assistant', parentID: prompts[0].body.messageID }, parts: [] })
     if (request.method === 'DELETE' || path.endsWith('/abort')) return Response.json(true)
     return new Response('Not found', { status: 404 })
   } })
@@ -237,8 +241,13 @@ async function modelBridge(providerResponse = async () => Response.json(catalog(
   socket.onmessage = event => inbox.push(JSON.parse(String(event.data)))
   await new Promise<void>(resolve => { socket.onopen = () => resolve() })
   return {
-    socket, requests, prompts, inbox,
+    socket, requests, prompts, inbox, prompted: prompted.promise,
     send(message: unknown) { socket.send(JSON.stringify(message)) },
+    async tool(command: unknown) {
+      const response = await fetch(`${origin}/tool`, { method: 'POST', headers: { authorization: 'Bearer internal-key', 'content-type': 'application/json' }, body: JSON.stringify({ sessionID: 'ses_shared', messageID: 'reply_1', command }) })
+      expect(response.status).toBe(200)
+      return response.json()
+    },
     async next<T extends ServerMessage['type']>(type: T, timeout = 3000) {
       const deadline = Date.now() + timeout
       while (Date.now() < deadline) {
@@ -251,6 +260,144 @@ async function modelBridge(providerResponse = async () => Response.json(catalog(
     async close() { socket.close(); await bridge.close(); upstream.stop(true) },
   }
 }
+
+test('batches validate all inputs first, preserve returned revisions, and stop on conflicts', async () => {
+  const pending = Promise.withResolvers<void>()
+  const fixture = await modelBridge(undefined, undefined, pending.promise)
+  try {
+    await fixture.next('ready')
+    fixture.send({ type: 'prompt', text: 'Build', model: selection })
+    const run = await fixture.next('run')
+    const respond = (command: Extract<ServerMessage, { type: 'command' }>, response: ToolResponse) => fixture.send({ type: 'result', runID: run.runID, id: command.id, response })
+    respond(await fixture.next('command'), { ok: true, revision: 7, result: {} })
+    await fixture.prompted
+
+    for (const input of [[], Array(17).fill({ type: 'state.get' })]) {
+      expect(await fixture.tool(input)).toEqual({ ok: false, error: { code: 'invalid_argument', message: 'Use 1 to 16 commands per batch.' }, results: [], failedIndex: null })
+    }
+    for (const invalid of [null, [{ type: 'state.get' }], { type: 'history.undo' }, { type: 'edit.paint', color: 5 }, { type: 'edit.setVoxels', layerId: 1, voxels: Array(4097).fill({ x: 1, y: 1, z: 1, color: 5 }) }]) {
+      expect(await fixture.tool([{ type: 'document.rename', name: 'Must not execute' }, invalid])).toMatchObject({ ok: false, error: { code: 'invalid_argument' }, results: [], failedIndex: 1 })
+    }
+    expect(fixture.inbox.some(message => message.type === 'command')).toBe(false)
+
+    const commands = [{ type: 'palette.setColor', index: 5, color: 15909198 }, { type: 'view.frame' }, { type: 'document.rename', name: 'Tower' }, { type: 'view.get' }] as const
+    const results: ToolResponse[] = []
+    const batch = fixture.tool(commands)
+    let revision = 7
+    for (const [index, nextRevision] of [9, 9, 12, 12].entries()) {
+      const command = await fixture.next('command')
+      expect(command.command).toEqual(commands[index])
+      expect(command.ifRevision).toBe(revision)
+      const response = { ok: true as const, revision: nextRevision, changed: nextRevision !== revision, result: { index } }
+      respond(command, response)
+      results.push(response)
+      revision = nextRevision
+    }
+    expect(await batch).toEqual({ ok: true, results })
+
+    const conflict = fixture.tool([{ type: 'view.get' }, { type: 'document.rename', name: 'Stale' }, { type: 'state.get' }])
+    const inspected = { ok: true as const, revision: 12, result: {} }
+    respond(await fixture.next('command'), inspected)
+    const stale = await fixture.next('command')
+    expect(stale.ifRevision).toBe(12)
+    const failure = { ok: false as const, error: { code: 'revision_conflict', message: 'User edited' } }
+    respond(stale, failure)
+    expect(await conflict).toEqual({ ...failure, failedIndex: 1, results: [inspected, failure] })
+    expect(await fixture.tool([{ type: 'view.get' }])).toMatchObject({ ok: false, error: { code: 'revision_conflict' }, failedIndex: 0 })
+    expect(fixture.inbox.some(message => message.type === 'command')).toBe(false)
+
+    const refreshed = fixture.tool([{ type: 'state.get' }, { type: 'document.rename', name: 'Updated' }])
+    const inspect = await fixture.next('command')
+    expect(inspect.command.type).toBe('state.get')
+    expect(inspect.ifRevision).toBeUndefined()
+    respond(inspect, { ok: true, revision: 15, result: {} })
+    const rename = await fixture.next('command')
+    expect(rename.ifRevision).toBe(15)
+    respond(rename, { ok: true, revision: 16, result: {} })
+    expect(await refreshed).toMatchObject({ ok: true, results: [{ revision: 15 }, { revision: 16 }] })
+  } finally { pending.resolve(); await fixture.close() }
+})
+
+test.each(['stop', 'approval_denied'])('batches preserve individual approvals, do not interleave, and cancel queued work on %s', async action => {
+  const pending = Promise.withResolvers<void>()
+  const fixture = await modelBridge(undefined, undefined, pending.promise)
+  try {
+    await fixture.next('ready')
+    fixture.send({ type: 'prompt', text: 'Build', model: selection })
+    const run = await fixture.next('run')
+    const respond = (command: Extract<ServerMessage, { type: 'command' }>, response: ToolResponse) => fixture.send({ type: 'result', runID: run.runID, id: command.id, response })
+    respond(await fixture.next('command'), { ok: true, revision: 7, result: {} })
+    await fixture.prompted
+
+    const batch = fixture.tool([
+      { type: 'document.rename', name: 'Keep this edit' },
+      { type: 'document.resize', dimensions: { x: 16, y: 16, z: 16 }, anchor: 'origin', allowCrop: true },
+      { type: 'layer.delete', id: 1, allowNonEmpty: true },
+      { type: 'view.get' },
+    ])
+    const edited = { ok: true as const, revision: 8, result: { name: 'Keep this edit' } }
+    respond(await fixture.next('command'), edited)
+    const resize = await fixture.next('command')
+    expect(resize).toMatchObject({ ifRevision: 8, command: { type: 'document.resize', allowCrop: false } })
+    expect(needsApproval(resize.command)).toBe(true)
+
+    // Overflow confirms all 16 waiting calls were admitted before releasing this command.
+    const waiting = Array.from({ length: 17 }, () => fixture.tool([{ type: 'document.rename', name: 'Must not execute' }]))
+    expect(await Promise.race(waiting)).toEqual({ ok: false, error: { code: 'limit_exceeded', message: 'The command queue is full.' }, results: [], failedIndex: null })
+    const resized = { ok: true as const, revision: 9, result: {} }
+    respond(resize, resized)
+    const deletion = await fixture.next('command')
+    expect(deletion).toMatchObject({ ifRevision: 9, command: { type: 'layer.delete', allowNonEmpty: false } })
+    expect(needsApproval(deletion.command)).toBe(true)
+
+    if (action === 'stop') fixture.send({ type: 'stop', runID: run.runID })
+    else respond(deletion, { ok: false, error: { code: 'approval_denied', message: 'Declined' } })
+    const code = action === 'stop' ? 'aborted' : 'approval_denied'
+    expect(await batch).toMatchObject({ ok: false, error: { code }, failedIndex: 2, results: [edited, resized, { ok: false, error: { code } }] })
+    const queuedResults = await Promise.all(waiting)
+    expect(queuedResults.filter(result => result.error.code === 'limit_exceeded')).toHaveLength(1)
+    const aborted = queuedResults.filter(result => result.error.code === 'aborted')
+    expect(aborted).toHaveLength(16)
+    for (const result of aborted) expect(result).toMatchObject({ failedIndex: 0, results: [{ ok: false, error: { code: 'aborted' } }] })
+    expect(await fixture.next('done')).toMatchObject({ stopped: true })
+    expect(fixture.inbox.some(message => message.type === 'command')).toBe(false)
+  } finally { pending.resolve(); await fixture.close() }
+})
+
+test('each command in a batch counts toward the run limit, including initial inspection', async () => {
+  const pending = Promise.withResolvers<void>()
+  const fixture = await modelBridge(undefined, undefined, pending.promise)
+  try {
+    await fixture.next('ready')
+    fixture.send({ type: 'prompt', text: 'Inspect', model: selection })
+    const run = await fixture.next('run')
+    const initial = await fixture.next('command')
+    const response = { ok: true, revision: 7, result: {} }
+    fixture.send({ type: 'result', runID: run.runID, id: initial.id, response })
+    await fixture.prompted
+    let executed = 0
+    fixture.socket.onmessage = event => {
+      const message = JSON.parse(String(event.data)) as ServerMessage
+      if (message.type !== 'command') { fixture.inbox.push(message); return }
+      executed++
+      expect(message.command.type).toBe('view.get')
+      expect(message.ifRevision).toBe(7)
+      fixture.send({ type: 'result', runID: run.runID, id: message.id, response })
+    }
+    for (let batch = 0; batch < 8; batch++) {
+      const result = await fixture.tool(Array(16).fill({ type: 'view.get' }))
+      if (batch < 7) expect(result).toEqual({ ok: true, results: Array(16).fill(response) })
+      else {
+        expect(result).toMatchObject({ ok: false, error: { code: 'limit_exceeded' }, failedIndex: 15 })
+        expect(result.results).toHaveLength(16)
+        expect(result.results.slice(0, 15)).toEqual(Array(15).fill(response))
+        expect(result.results[15]).toMatchObject({ ok: false, error: { code: 'limit_exceeded' } })
+      }
+    }
+    expect(await fixture.tool({ type: 'state.get' })).toMatchObject({ ok: false, error: { code: 'limit_exceeded' } })
+    expect(executed).toBe(127)
+  } finally { pending.resolve(); await fixture.close() }
+})
 
 test('connection sends ready without a client frame, filters incompatible models, and excludes secrets', async () => {
   const data = catalog()

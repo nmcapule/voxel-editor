@@ -131,6 +131,7 @@ export function normalizeDimensions(dimensions: Dimensions): Dimensions {
 export class VoxelDocument {
   readonly chunks = new Map<number, Map<number, Uint8Array>>()
   readonly palette: Uint32Array
+  readonly paletteOccupied: Uint8Array
   readonly materials: PaletteMaterial[]
   readonly dimensions: Dimensions
   readonly layers: VoxelLayer[]
@@ -138,16 +139,18 @@ export class VoxelDocument {
   name: string
   voxelCount = 0
 
-  constructor(dimensions: Dimensions = { x: 32, y: 32, z: 32 }, name = 'Untitled', palette: ArrayLike<number> = DEFAULT_PALETTE, materials?: readonly Partial<PaletteMaterial>[], layers?: readonly VoxelLayer[], activeLayerId?: number) {
+  constructor(dimensions: Dimensions = { x: 32, y: 32, z: 32 }, name = 'Untitled', palette: ArrayLike<number> = DEFAULT_PALETTE, materials?: readonly Partial<PaletteMaterial>[], layers?: readonly VoxelLayer[], activeLayerId?: number, paletteOccupied?: ArrayLike<number>) {
     this.dimensions = normalizeDimensions(dimensions)
     this.name = name.trim().slice(0, 60) || 'Untitled'
     this.palette = new Uint32Array(256)
     this.palette.set(palette)
     const addedPresetStart = DEFAULT_PALETTE.length - 2
-    const legacyDefaultPalette = !this.palette[addedPresetStart] && !this.palette[addedPresetStart + 1]
+    // Only a short legacy palette proves these slots are absent, not authored black.
+    const legacyDefaultPalette = paletteOccupied === undefined && palette.length === addedPresetStart
       && DEFAULT_PALETTE.subarray(0, addedPresetStart).every((color, index) => this.palette[index] === color)
     if (legacyDefaultPalette) this.palette.set(DEFAULT_PALETTE.subarray(addedPresetStart), addedPresetStart)
-    const defaultPalette = DEFAULT_PALETTE.every((color, index) => this.palette[index] === color)
+    this.paletteOccupied = Uint8Array.from(this.palette, (color, index) => Number(index > 0 && Boolean(color || paletteOccupied?.[index] || palette.length < 256 && index < palette.length)))
+    const defaultPalette = palette === DEFAULT_PALETTE || paletteOccupied === undefined && DEFAULT_PALETTE.every((color, index) => this.palette[index] === color)
     const presets = materials ?? (defaultPalette ? DEFAULT_PALETTE_MATERIALS : [])
     this.materials = Array.from({ length: 256 }, (_, index) => {
       const preset = legacyDefaultPalette && index >= addedPresetStart && index < DEFAULT_PALETTE.length ? undefined : presets[index]
@@ -170,6 +173,11 @@ export class VoxelDocument {
   }
 
   get activeLayer() { return this.layers.find(layer => layer.id === this.activeLayerId)! }
+
+  hasPaletteColor(index: unknown): index is number {
+    return typeof index === 'number' && Number.isInteger(index) && index > 0 && index < 256
+      && Boolean(this.paletteOccupied[index] || this.palette[index])
+  }
 
   getLayer(id: number) { return this.layers.find(layer => layer.id === id) }
 
@@ -266,6 +274,7 @@ export class VoxelDocument {
     if (!this.contains(x, y, z)) return false
     const targetLayer = layerId ?? this.activeLayerId
     if (!this.getLayer(targetLayer)) return false
+    if (color) this.paletteOccupied[color] = 1
     const id = this.idAt(x, y, z)
     let layers = this.chunks.get(id)
     let chunk = layers?.get(targetLayer)
@@ -307,7 +316,7 @@ export class VoxelDocument {
       if (!this.getLayer(stored.layerId) || stored.data.length !== CHUNK_VOLUME || !stored.data.some(Boolean)) continue
       const data = stored.data.slice()
       layers.set(stored.layerId, data)
-      for (const color of data) if (color) this.voxelCount++
+      for (const color of data) if (color) { this.voxelCount++; this.paletteOccupied[color] = 1 }
     }
     if (layers.size) this.chunks.set(id, layers)
   }
@@ -325,6 +334,7 @@ export class VoxelDocument {
   }
 
   fillChunkRegion(id: number, from: Vec3, to: Vec3, color: number, layerId = this.activeLayerId) {
+    if (color) this.paletteOccupied[color] = 1
     let layers = this.chunks.get(id)
     let chunk = layers?.get(layerId)
     if (!chunk) {
@@ -358,12 +368,30 @@ export class VoxelDocument {
   paddedChunk(id: number, visibleOnly = false) {
     const origin = chunkCoords(id)
     const padded = new Uint8Array(PADDED_SIZE ** 3)
-    let index = 0
-    for (let z = -1; z <= CHUNK_SIZE; z++) {
-      for (let y = -1; y <= CHUNK_SIZE; y++) {
-        for (let x = -1; x <= CHUNK_SIZE; x++) {
-          const position = { x: origin.x * CHUNK_SIZE + x, y: origin.y * CHUNK_SIZE + y, z: origin.z * CHUNK_SIZE + z }
-          padded[index++] = visibleOnly ? this.getVisibleVoxel(position.x, position.y, position.z) : this.getVoxel(position.x, position.y, position.z)
+    const start = { x: origin.x * CHUNK_SIZE - 1, y: origin.y * CHUNK_SIZE - 1, z: origin.z * CHUNK_SIZE - 1 }
+    const min = { x: Math.max(0, start.x), y: Math.max(0, start.y), z: Math.max(0, start.z) }
+    const max = { x: Math.min(this.dimensions.x - 1, start.x + PADDED_SIZE - 1), y: Math.min(this.dimensions.y - 1, start.y + PADDED_SIZE - 1), z: Math.min(this.dimensions.z - 1, start.z + PADDED_SIZE - 1) }
+    const layers = this.layers.filter(layer => !visibleOnly || layer.visible).reverse()
+    // Resolve at most 27 chunk/layer stacks once, including edge and corner halo cells.
+    for (let cz = min.z >> 4; cz <= max.z >> 4; cz++) {
+      for (let cy = min.y >> 4; cy <= max.y >> 4; cy++) {
+        for (let cx = min.x >> 4; cx <= max.x >> 4; cx++) {
+          const stored = this.chunks.get(chunkId(cx, cy, cz))
+          if (!stored) continue
+          const chunks = layers.flatMap(layer => { const data = stored.get(layer.id); return data ? [data] : [] })
+          if (!chunks.length) continue
+          const fromX = Math.max(min.x, cx * CHUNK_SIZE), toX = Math.min(max.x, cx * CHUNK_SIZE + 15)
+          const fromY = Math.max(min.y, cy * CHUNK_SIZE), toY = Math.min(max.y, cy * CHUNK_SIZE + 15)
+          const fromZ = Math.max(min.z, cz * CHUNK_SIZE), toZ = Math.min(max.z, cz * CHUNK_SIZE + 15)
+          for (let z = fromZ; z <= toZ; z++) {
+            for (let y = fromY; y <= toY; y++) {
+              let source = chunkIndex(fromX & 15, y & 15, z & 15)
+              let target = fromX - start.x + (y - start.y) * PADDED_SIZE + (z - start.z) * PADDED_SIZE ** 2
+              for (let x = fromX; x <= toX; x++, source++, target++) {
+                for (const chunk of chunks) if (chunk[source]) { padded[target] = chunk[source]; break }
+              }
+            }
+          }
         }
       }
     }
@@ -437,7 +465,7 @@ export function croppedVoxelCount(source: VoxelDocument, dimensions: Dimensions,
 }
 
 export function resizeVoxelDocument(source: VoxelDocument, dimensions: Dimensions, anchor: ResizeAnchor) {
-  const resized = new VoxelDocument(dimensions, source.name, source.palette, source.materials, source.layers, source.activeLayerId)
+  const resized = new VoxelDocument(dimensions, source.name, source.palette, source.materials, source.layers, source.activeLayerId, source.paletteOccupied)
   const offset = resizeOffset(source.dimensions, resized.dimensions, anchor)
   let cropped = 0
   source.forEachVoxel((x, y, z, color, layerId) => {
@@ -480,10 +508,12 @@ export class EditSession {
   private changed = new Set<number>()
   private document: VoxelDocument
   private layerId: number
+  private paletteBefore: Uint8Array
 
   constructor(document: VoxelDocument, layerId = document.activeLayerId) {
     this.document = document
     this.layerId = layerId
+    this.paletteBefore = document.paletteOccupied.slice()
   }
 
   private capture(id: number) {
@@ -567,11 +597,13 @@ export class EditSession {
       bytes += [...before ?? [], ...after ?? []].reduce((sum, chunk) => sum + chunk.data.byteLength, 0)
       changes.push({ id, before, after })
     }
+    if (!changes.length) this.document.paletteOccupied.set(this.paletteBefore)
     return changes.length ? { changes, bytes } : undefined
   }
 
   cancel() {
     for (const [id, before] of this.before) this.document.replaceChunk(id, before)
+    this.document.paletteOccupied.set(this.paletteBefore)
     return [...this.changed]
   }
 }
@@ -619,7 +651,13 @@ export class History {
   }
 }
 
+function axisNormal(normal: Vec3) {
+  return Number.isInteger(normal.x) && Number.isInteger(normal.y) && Number.isInteger(normal.z)
+    && Math.abs(normal.x) + Math.abs(normal.y) + Math.abs(normal.z) === 1
+}
+
 export function pushPullRange(document: VoxelDocument, cells: Vec3[], normal: Vec3, layerId = document.activeLayerId) {
+  if (!axisNormal(normal)) return { pull: 0, push: 0 }
   let pull = Infinity
   let push = Infinity
   for (const cell of cells) {
@@ -636,6 +674,7 @@ export function pushPullRange(document: VoxelDocument, cells: Vec3[], normal: Ve
 }
 
 export function moveRange(document: VoxelDocument, cells: Vec3[], normal: Vec3) {
+  if (!axisNormal(normal)) return { pull: 0, push: 0 }
   const available = (direction: number) => {
     let limit = Infinity
     for (const cell of cells) {

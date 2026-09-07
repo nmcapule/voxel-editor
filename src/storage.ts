@@ -21,6 +21,7 @@ export interface StoredProject {
   name: string
   dimensions: Dimensions
   palette: ArrayBuffer
+  paletteOccupied?: ArrayBuffer
   materials?: Partial<PaletteMaterial>[]
   layers?: VoxelLayer[]
   activeLayerId?: number
@@ -51,6 +52,7 @@ export function snapshotProject(document: VoxelDocument, settings: ViewSettings)
     name: document.name,
     dimensions: document.dimensions,
     palette: document.palette.slice().buffer,
+    paletteOccupied: Uint8Array.from(document.palette, (_color, index) => Number(document.hasPaletteColor(index))).buffer,
     materials: document.materials.map(material => ({ ...material })),
     layers: document.layers.map(layer => ({ ...layer })),
     activeLayerId: document.activeLayerId,
@@ -79,11 +81,15 @@ export async function loadProject() {
     request.onerror = () => reject(request.error)
   })
   db.close()
+  return stored ? restoreProjectSnapshot(stored) : undefined
+}
+
+export function restoreProjectSnapshot(stored: StoredProject) {
   if (!stored || stored.version !== 1 && stored.version !== 2 && stored.version !== 3) return undefined
   const legacy = stored.settings as ViewSettings & Partial<PaletteMaterial>
   const materials = stored.materials ?? (legacy.roughness === undefined && legacy.metalness === undefined ? undefined
     : Array.from({ length: 256 }, () => ({ roughness: legacy.roughness ?? 0.68, metalness: legacy.metalness ?? 0.02 })))
-  const document = new VoxelDocument(stored.dimensions, stored.name, new Uint32Array(stored.palette), materials, stored.version >= 2 ? stored.layers : undefined, stored.activeLayerId)
+  const document = new VoxelDocument(stored.dimensions, stored.name, new Uint32Array(stored.palette), materials, stored.version >= 2 ? stored.layers : undefined, stored.activeLayerId, stored.paletteOccupied ? new Uint8Array(stored.paletteOccupied) : undefined)
   if (stored.version === 3) {
     const chunks = new Map<number, LayerChunkSnapshot[]>()
     for (const chunk of stored.chunks) {

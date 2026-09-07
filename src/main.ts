@@ -5,7 +5,7 @@ import { connectRemote } from './remote'
 import { VoxelRenderer } from './renderer'
 import { Studio, StudioCommandError, type AuxiliaryTool, type PaintMode, type PbrMap, type SculptMode, type SelectionMode, type SelectionState, type StudioCommand, type StudioOutcome, type Tool } from './studio'
 import { loadProject, saveProjectSnapshot, snapshotProject, type ViewSettings } from './storage'
-import { exportVox, importVox } from './vox'
+import { exportVox, importVox, VOX_EXPORT_WARNING } from './vox'
 
 const DEFAULT_SETTINGS: ViewSettings = {
   background: '#dfe7ec',
@@ -51,8 +51,8 @@ const storedToolState: StoredToolState = (() => {
   } catch { return {} }
 })()
 const isSelectionMode = (value: unknown): value is SelectionMode => typeof value === 'string' && ['point', 'surface', 'texture', 'body'].includes(value)
-const isPaletteColor = (value: unknown): value is number => Number.isInteger(value) && Number(value) > 0 && Number(value) < 256 && Boolean(voxelDocument.palette[Number(value)])
-const defaultActiveColor = voxelDocument.palette[5] ? 5 : Math.max(1, voxelDocument.palette.findIndex((color, index) => index > 0 && Boolean(color)))
+const isPaletteColor = (value: unknown): value is number => voxelDocument.hasPaletteColor(value)
+const defaultActiveColor = voxelDocument.hasPaletteColor(5) ? 5 : Math.max(1, voxelDocument.palette.findIndex((_color, index) => voxelDocument.hasPaletteColor(index)))
 let activeTool: Tool = 'select'
 let paintMode: PaintMode = 'paint'
 let sculptMode: SculptMode = 'push'
@@ -548,15 +548,12 @@ async function executeApplicationCommand({ command, source, ifRevision, viewVers
       return { changed: true, revision: outcome.revision, result: { voxelCount: imported.document.voxelCount, warning: imported.warning ?? null } }
     }
     case 'io.vox.export':
-      return { changed: false, revision: studioController.revision, result: { mime: 'application/octet-stream', filename: filename('vox'), dataBase64: bytesToBase64(new Uint8Array(exportVox(voxelDocument))) } }
+      return { changed: false, revision: studioController.revision, result: { mime: 'application/octet-stream', filename: filename('vox'), dataBase64: bytesToBase64(new Uint8Array(exportVox(voxelDocument))), warning: VOX_EXPORT_WARNING } }
     case 'material.map.set': {
       const bytes = base64ToBytes(command.dataBase64)
-      await renderer.setPbrMap(command.index, command.map, new Blob([bytes], { type: command.mime }))
-      const maps = loadedPbrMaps.get(command.index) ?? new Map<PbrMap, string>()
-      maps.set(command.map, command.name)
-      loadedPbrMaps.set(command.index, maps)
+      const outcome = await studioController.loadPbrMap(command.index, command.map, command.name,
+        () => renderer.setPbrMap(command.index, command.map, new Blob([bytes], { type: command.mime })))
       if (activeColor === command.index) renderPaletteMaterial()
-      const outcome = studioController.recordChange({ index: command.index, map: command.map }, { mutation: true, announcement: `${command.name} loaded for color ${command.index}` })
       applyStudioEffects(command, outcome, source)
       emitCommandEvent(command, source, outcome)
       return { changed: true, revision: outcome.revision, result: outcome.result }
@@ -607,11 +604,9 @@ function persistToolState() {
 }
 
 function paletteIndices(filter: PaletteFilter = paletteFilter) {
-  const used = new Set<number>()
-  voxelDocument.forEachVoxel((_x, _y, _z, color) => used.add(color))
   const indices: number[] = []
   for (let index = 1; index < 256; index++) {
-    if (!voxelDocument.palette[index] && !used.has(index)) continue
+    if (!voxelDocument.hasPaletteColor(index)) continue
     const material = voxelDocument.materials[index]
     if (filter === 'opaque' && (material.opacity < 1 || material.transmission > 0)) continue
     if (filter === 'transparent' && material.opacity >= 1 && material.transmission === 0) continue
@@ -661,7 +656,7 @@ function renderPalette() {
     activeSwatch.setAttribute('aria-label', `Open ${activeMaterial.name} in palette`)
     activeSwatch.title = `${activeMaterial.name}, ${colorHex(activeColor)}: open full palette`
   }
-  const recentMaterials = recentColors.filter(index => index !== activeColor && voxelDocument.palette[index]).map(index =>
+  const recentMaterials = recentColors.filter(index => index !== activeColor && voxelDocument.hasPaletteColor(index)).map(index =>
     `<button type="button" data-color="${index}" data-transparent="${voxelDocument.materials[index].opacity < 1 || voxelDocument.materials[index].transmission > 0}" aria-label="Use ${escapeHtml(voxelDocument.materials[index].name)}, ${colorHex(index)}" aria-pressed="${index === activeColor}" style="${materialPreviewStyle(index)}">${materialCube}</button>`,
   ).join('')
   for (const quickPalette of document.querySelectorAll<HTMLElement>('.quick-palette')) quickPalette.innerHTML = recentMaterials
@@ -1232,9 +1227,9 @@ document.addEventListener('click', async event => {
   if (action === 'export') {
     try {
       const response = await dispatchApplicationCommand({ type: 'io.vox.export' })
-      const result = response.result as { dataBase64: string; filename: string; mime: string }
+      const result = response.result as { dataBase64: string; filename: string; mime: string; warning: string }
       download(base64ToBytes(result.dataBase64), result.filename, result.mime)
-      showToast('VOX file exported.')
+      showToast(`VOX file exported. ${result.warning}`, 'warning')
     }
     catch { showToast('The VOX file could not be created.', 'warning') }
   }

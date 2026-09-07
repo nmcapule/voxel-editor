@@ -1,0 +1,798 @@
+diff --git a/build/index.umd.cjs b/build/index.umd.cjs
+index 820b20465257564ddca61a195afc444be3c6dfee..659d8cb03a4d9bc2b7a614b6390c7e0ab4eb6b45 100644
+--- a/build/index.umd.cjs
++++ b/build/index.umd.cjs
+@@ -188,6 +188,7 @@
+ 		trimMismatchedAttributes( targetGeometry, totalIndexCount, totalAttributeCount );
+ 
+ 		// set up groups
++		targetGeometry.clearGroups();
+ 		if ( useGroups ) {
+ 
+ 			let offset = 0;
+@@ -1144,6 +1145,7 @@
+ 
+ 			unusedMeshKeys.forEach( key => {
+ 
++				_intermediateGeometry.get( key ).dispose();
+ 				_intermediateGeometry.delete( key );
+ 
+ 			} );
+@@ -1164,6 +1166,22 @@
+ 
+ 		}
+ 
++		dispose() {
++
++			this._intermediateGeometry.forEach( geometry => geometry.dispose() );
++			this._intermediateGeometry.clear();
++			this._geometryMergeSets = new WeakMap();
++			this.objects = [];
++			if ( this._dummyMesh ) {
++
++				this._dummyMesh.geometry.dispose();
++				this._dummyMesh.material.dispose();
++				this._dummyMesh = null;
++
++			}
++
++		}
++
+ 		generate( targetGeometry = new three.BufferGeometry() ) {
+ 
+ 			// track which attributes have been updated and which to skip to avoid unnecessary attribute copies
+@@ -1360,14 +1378,18 @@
+ 				// and build another with the latest data while sharing the results.
+ 				if ( ! this._pendingGenerate ) {
+ 
+-					this._pendingGenerate = new Promise( async () => {
++					this._pendingGenerate = this.bvh.then( () => {
+ 
+-						await this.bvh;
+ 						this._pendingGenerate = null;
+ 
+ 						// TODO: support multiple callbacks queued?
+ 						return this.generateAsync( onProgress );
+ 
++					}, error => {
++
++						this._pendingGenerate = null;
++						throw error;
++
+ 					} );
+ 
+ 				}
+@@ -1377,9 +1399,19 @@
+ 			} else {
+ 
+ 				this._buildAsync = true;
+-				const result = this.generate( onProgress );
+-				this._buildAsync = false;
++				let result;
++				try {
++
++					result = this.generate( onProgress );
++
++				} finally {
++
++					this._buildAsync = false;
++
++				}
+ 
++				// Keep failed BVH promises rejected: transferred buffers may be detached.
++				// Recovery requires a new generator and worker, not just clearing this.bvh.
+ 				result.bvh = this.bvh = await result.bvh;
+ 				return result;
+ 
+@@ -1412,7 +1444,7 @@
+ 			// generate the geometry
+ 			const result = staticGeometryGenerator.generate( geometry );
+ 			const materials = result.materials;
+-			let needsMaterialIndexUpdate = result.changeType !== NO_CHANGE || this._materialUuids === null || this._materialUuids.length !== length;
++			let needsMaterialIndexUpdate = result.changeType !== NO_CHANGE || this._materialUuids === null || this._materialUuids.length !== materials.length;
+ 			if ( ! needsMaterialIndexUpdate ) {
+ 
+ 				for ( let i = 0, length = materials.length; i < length; i ++ ) {
+@@ -1489,6 +1521,13 @@
+ 
+ 		}
+ 
++		dispose() {
++
++			this.geometry.dispose();
++			this.staticGeometryGenerator.dispose();
++
++		}
++
+ 	}
+ 
+ 	class DynamicPathTracingSceneGenerator extends PathTracingSceneGenerator {
+@@ -1973,6 +2012,7 @@
+ 			quad.render( renderer );
+ 
+ 			renderer.setRenderTarget( ogTarget );
++			quad.material.dispose();
+ 			quad.dispose();
+ 
+ 			return target;
+@@ -3389,6 +3429,7 @@
+ 			};
+ 
+ 			super( width, height, 1, textureOptions );
++			this.texture.renderTarget = this;
+ 
+ 			// manually assign the options because passing options into the
+ 			// constructor does not work
+@@ -3472,6 +3513,7 @@
+ 		dispose() {
+ 
+ 			super.dispose();
++			this.fsQuad.material.dispose();
+ 			this.fsQuad.dispose();
+ 
+ 		}
+@@ -7221,6 +7263,23 @@ bool bvhIntersectFogVolumeHit(
+ 
+ 	class PhysicalPathTracingMaterial extends MaterialBase {
+ 
++		dispose() {
++
++			// Only generated GPU data is owned here, never backgroundMap or input maps.
++			this.bvh.dispose();
++			this.attributesArray.dispose();
++			this.materialIndexAttribute.dispose();
++			this.materials.dispose();
++			this.textures.renderTarget.dispose();
++			this.iesProfiles.renderTarget.dispose();
++			this.lights.tex.dispose();
++			this.envMapInfo.dispose();
++			this.stratifiedTexture.dispose();
++			this.stratifiedOffsetTexture.dispose();
++			super.dispose();
++
++		}
++
+ 		onBeforeRender() {
+ 
+ 			this.setDefine( 'FEATURE_DOF', this.physicalCamera.bokehSize === 0 ? 0 : 1 );
+@@ -8001,10 +8060,14 @@ bool bvhIntersectFogVolumeHit(
+ 			this._renderer = renderer;
+ 			this._alpha = false;
+ 			this._fsQuad = new Pass_js.FullScreenQuad( new PhysicalPathTracingMaterial() );
++			// The low-res renderer can borrow another renderer's material.
++			this._ownedMaterial = this.material;
+ 			this._blendQuad = new Pass_js.FullScreenQuad( new BlendMaterial() );
+ 			this._task = null;
+ 			this._currentTile = 0;
+ 			this._compilePromise = null;
++			this._compileError = null;
++			this._disposed = false;
+ 
+ 			this._sobolTarget = new SobolNumberMapGenerator().generate( renderer );
+ 
+@@ -8033,7 +8096,10 @@ bool bvhIntersectFogVolumeHit(
+ 			// before starting to render
+ 			this._compileFunction = () => {
+ 
+-				const promise = this.compileMaterial( this._fsQuad._mesh );
++				if ( this._disposed ) return;
++				this._compileError = null;
++				const promise = this.compileMaterial();
++				this._compilePromise = promise;
+ 				promise.then( () => {
+ 
+ 					if ( this._compilePromise === promise ) {
+@@ -8042,9 +8108,16 @@ bool bvhIntersectFogVolumeHit(
+ 
+ 					}
+ 
+-				} );
++				}, error => {
+ 
+-				this._compilePromise = promise;
++					if ( this._compilePromise === promise ) {
++
++						this._compilePromise = null;
++						this._compileError = error || new Error( 'PathTracingRenderer: Shader compilation failed.' );
++
++					}
++
++				} );
+ 
+ 			};
+ 
+@@ -8052,8 +8125,9 @@ bool bvhIntersectFogVolumeHit(
+ 
+ 		}
+ 
+-		compileMaterial() {
++		async compileMaterial() {
+ 
++			if ( this._disposed ) throw new DOMException( 'PathTracingRenderer: Renderer disposed.', 'AbortError' );
+ 			return this._renderer.compileAsync( this._fsQuad._mesh );
+ 
+ 		}
+@@ -8117,11 +8191,19 @@ bool bvhIntersectFogVolumeHit(
+ 
+ 		dispose() {
+ 
++			if ( this._disposed ) return;
++			this._disposed = true;
++			this._compilePromise = null;
++			this._compileError = null;
++
+ 			this._primaryTarget.dispose();
+ 			this._blendTargets[ 0 ].dispose();
+ 			this._blendTargets[ 1 ].dispose();
+ 			this._sobolTarget.dispose();
+ 
++			this.material.removeEventListener( 'recompilation', this._compileFunction );
++			this._ownedMaterial.dispose();
++			this._blendQuad.material.dispose();
+ 			this._fsQuad.dispose();
+ 			this._blendQuad.dispose();
+ 			this._task = null;
+@@ -8139,13 +8221,15 @@ bool bvhIntersectFogVolumeHit(
+ 			_renderer.setClearColor( 0, 0 );
+ 			_renderer.clearColor();
+ 
+-			_renderer.setRenderTarget( _blendTargets[ 0 ] );
+-			_renderer.setClearColor( 0, 0 );
+-			_renderer.clearColor();
++			if ( this.alpha ) {
+ 
+-			_renderer.setRenderTarget( _blendTargets[ 1 ] );
+-			_renderer.setClearColor( 0, 0 );
+-			_renderer.clearColor();
++				_renderer.setRenderTarget( _blendTargets[ 0 ] );
++				_renderer.clearColor();
++
++				_renderer.setRenderTarget( _blendTargets[ 1 ] );
++				_renderer.clearColor();
++
++			}
+ 
+ 			_renderer.setClearColor( ogClearColor, ogClearAlpha );
+ 			_renderer.setRenderTarget( ogRenderTarget );
+@@ -8165,6 +8249,9 @@ bool bvhIntersectFogVolumeHit(
+ 
+ 		update() {
+ 
++			if ( this._disposed ) return;
++			if ( this._compileError ) throw this._compileError;
++
+ 			// ensure we've updated our defines before rendering so we can ensure we
+ 			// can wait for compilation to finish
+ 			this.material.onBeforeRender();
+@@ -8531,6 +8618,7 @@ bool bvhIntersectFogVolumeHit(
+ 
+ 		dispose() {
+ 
++			this._quad.material.dispose();
+ 			this._quad.dispose();
+ 
+ 		}
+@@ -8639,6 +8727,7 @@ bool bvhIntersectFogVolumeHit(
+ 			this._queueReset = false;
+ 			this._clock = new three.Clock();
+ 			this._compilePromise = null;
++			this._disposed = false;
+ 
+ 			this._lowResPathTracer = new PathTracingRenderer( renderer );
+ 			this._lowResPathTracer.tiles.set( 1, 1 );
+@@ -8722,10 +8811,15 @@ bool bvhIntersectFogVolumeHit(
+ 		setSceneAsync( ...args ) {
+ 
+ 			this._buildAsync = true;
+-			const result = this.setScene( ...args );
+-			this._buildAsync = false;
++			try {
+ 
+-			return result;
++				return this.setScene( ...args );
++
++			} finally {
++
++				this._buildAsync = false;
++
++			}
+ 
+ 		}
+ 
+@@ -8783,7 +8877,7 @@ bool bvhIntersectFogVolumeHit(
+ 			const scene = this.scene;
+ 			const material = this._pathTracer.material;
+ 
+-			if ( this._internalBackground ) {
++			if ( this._internalBackground && scene.background !== this._previousBackground ) {
+ 
+ 				this._internalBackground.dispose();
+ 				this._internalBackground = null;
+@@ -8821,7 +8915,17 @@ bool bvhIntersectFogVolumeHit(
+ 
+ 				if ( scene.background !== this._previousBackground ) {
+ 
+-					const background = new CubeToEquirectGenerator( this._renderer ).generate( scene.background );
++					const generator = new CubeToEquirectGenerator( this._renderer );
++					let background;
++					try {
++
++						background = generator.generate( scene.background );
++
++					} finally {
++
++						generator.dispose();
++
++					}
+ 					this._internalBackground = background;
+ 					material.backgroundMap = background;
+ 					material.backgroundAlpha = 1;
+@@ -8844,8 +8948,19 @@ bool bvhIntersectFogVolumeHit(
+ 
+ 					if ( scene.environment.isCubeTexture ) {
+ 
+-						const environment = new CubeToEquirectGenerator( this._renderer ).generate( scene.environment );
+-						material.envMapInfo.updateFrom( environment );
++						const generator = new CubeToEquirectGenerator( this._renderer );
++						let environment;
++						try {
++
++							environment = generator.generate( scene.environment );
++							material.envMapInfo.updateFrom( environment );
++
++						} finally {
++
++							generator.dispose();
++							if ( environment ) environment.dispose();
++
++						}
+ 
+ 					} else {
+ 
+@@ -8915,6 +9030,8 @@ bool bvhIntersectFogVolumeHit(
+ 
+ 		renderSample() {
+ 
++			if ( this._disposed ) return;
++
+ 			const lowResPathTracer = this._lowResPathTracer;
+ 			const pathTracer = this._pathTracer;
+ 			const renderer = this._renderer;
+@@ -9025,9 +9142,16 @@ bool bvhIntersectFogVolumeHit(
+ 
+ 		dispose() {
+ 
++			if ( this._disposed ) return;
++			this._disposed = true;
++
+ 			this._quad.dispose();
+ 			this._quad.material.dispose();
+ 			this._pathTracer.dispose();
++			this._lowResPathTracer.dispose();
++			this._generator.dispose();
++			if ( this._internalBackground ) this._internalBackground.dispose();
++			if ( this._colorBackground ) this._colorBackground.dispose();
+ 
+ 		}
+ 
+diff --git a/src/core/PathTracingRenderer.js b/src/core/PathTracingRenderer.js
+index 375be3fda69c591258900dc67f59e1e8955e8b27..c71ed42c4256107c0128dd5db36053abfc2860cb 100644
+--- a/src/core/PathTracingRenderer.js
++++ b/src/core/PathTracingRenderer.js
+@@ -218,10 +218,14 @@ export class PathTracingRenderer {
+ 		this._renderer = renderer;
+ 		this._alpha = false;
+ 		this._fsQuad = new FullScreenQuad( new PhysicalPathTracingMaterial() );
++		// The low-res renderer can borrow another renderer's material.
++		this._ownedMaterial = this.material;
+ 		this._blendQuad = new FullScreenQuad( new BlendMaterial() );
+ 		this._task = null;
+ 		this._currentTile = 0;
+ 		this._compilePromise = null;
++		this._compileError = null;
++		this._disposed = false;
+ 
+ 		this._sobolTarget = new SobolNumberMapGenerator().generate( renderer );
+ 
+@@ -250,7 +254,10 @@ export class PathTracingRenderer {
+ 		// before starting to render
+ 		this._compileFunction = () => {
+ 
+-			const promise = this.compileMaterial( this._fsQuad._mesh );
++			if ( this._disposed ) return;
++			this._compileError = null;
++			const promise = this.compileMaterial();
++			this._compilePromise = promise;
+ 			promise.then( () => {
+ 
+ 				if ( this._compilePromise === promise ) {
+@@ -259,9 +266,16 @@ export class PathTracingRenderer {
+ 
+ 				}
+ 
+-			} );
++			}, error => {
+ 
+-			this._compilePromise = promise;
++				if ( this._compilePromise === promise ) {
++
++					this._compilePromise = null;
++					this._compileError = error || new Error( 'PathTracingRenderer: Shader compilation failed.' );
++
++				}
++
++			} );
+ 
+ 		};
+ 
+@@ -269,8 +283,9 @@ export class PathTracingRenderer {
+ 
+ 	}
+ 
+-	compileMaterial() {
++	async compileMaterial() {
+ 
++		if ( this._disposed ) throw new DOMException( 'PathTracingRenderer: Renderer disposed.', 'AbortError' );
+ 		return this._renderer.compileAsync( this._fsQuad._mesh );
+ 
+ 	}
+@@ -334,11 +349,19 @@ export class PathTracingRenderer {
+ 
+ 	dispose() {
+ 
++		if ( this._disposed ) return;
++		this._disposed = true;
++		this._compilePromise = null;
++		this._compileError = null;
++
+ 		this._primaryTarget.dispose();
+ 		this._blendTargets[ 0 ].dispose();
+ 		this._blendTargets[ 1 ].dispose();
+ 		this._sobolTarget.dispose();
+ 
++		this.material.removeEventListener( 'recompilation', this._compileFunction );
++		this._ownedMaterial.dispose();
++		this._blendQuad.material.dispose();
+ 		this._fsQuad.dispose();
+ 		this._blendQuad.dispose();
+ 		this._task = null;
+@@ -356,13 +379,15 @@ export class PathTracingRenderer {
+ 		_renderer.setClearColor( 0, 0 );
+ 		_renderer.clearColor();
+ 
+-		_renderer.setRenderTarget( _blendTargets[ 0 ] );
+-		_renderer.setClearColor( 0, 0 );
+-		_renderer.clearColor();
++		if ( this.alpha ) {
+ 
+-		_renderer.setRenderTarget( _blendTargets[ 1 ] );
+-		_renderer.setClearColor( 0, 0 );
+-		_renderer.clearColor();
++			_renderer.setRenderTarget( _blendTargets[ 0 ] );
++			_renderer.clearColor();
++
++			_renderer.setRenderTarget( _blendTargets[ 1 ] );
++			_renderer.clearColor();
++
++		}
+ 
+ 		_renderer.setClearColor( ogClearColor, ogClearAlpha );
+ 		_renderer.setRenderTarget( ogRenderTarget );
+@@ -382,6 +407,9 @@ export class PathTracingRenderer {
+ 
+ 	update() {
+ 
++		if ( this._disposed ) return;
++		if ( this._compileError ) throw this._compileError;
++
+ 		// ensure we've updated our defines before rendering so we can ensure we
+ 		// can wait for compilation to finish
+ 		this.material.onBeforeRender();
+diff --git a/src/core/PathTracingSceneGenerator.js b/src/core/PathTracingSceneGenerator.js
+index 29b158764cfce90e51fa5e5500aacf327a2a5c26..5418f476c156e9fd22750b3d2d0a6dc1762d1ee0 100644
+--- a/src/core/PathTracingSceneGenerator.js
++++ b/src/core/PathTracingSceneGenerator.js
+@@ -125,14 +125,18 @@ export class PathTracingSceneGenerator {
+ 			// and build another with the latest data while sharing the results.
+ 			if ( ! this._pendingGenerate ) {
+ 
+-				this._pendingGenerate = new Promise( async () => {
++				this._pendingGenerate = this.bvh.then( () => {
+ 
+-					await this.bvh;
+ 					this._pendingGenerate = null;
+ 
+ 					// TODO: support multiple callbacks queued?
+ 					return this.generateAsync( onProgress );
+ 
++				}, error => {
++
++					this._pendingGenerate = null;
++					throw error;
++
+ 				} );
+ 
+ 			}
+@@ -142,9 +146,19 @@ export class PathTracingSceneGenerator {
+ 		} else {
+ 
+ 			this._buildAsync = true;
+-			const result = this.generate( onProgress );
+-			this._buildAsync = false;
++			let result;
++			try {
++
++				result = this.generate( onProgress );
++
++			} finally {
++
++				this._buildAsync = false;
+ 
++			}
++
++			// Keep failed BVH promises rejected: transferred buffers may be detached.
++			// Recovery requires a new generator and worker, not just clearing this.bvh.
+ 			result.bvh = this.bvh = await result.bvh;
+ 			return result;
+ 
+@@ -177,7 +191,7 @@ export class PathTracingSceneGenerator {
+ 		// generate the geometry
+ 		const result = staticGeometryGenerator.generate( geometry );
+ 		const materials = result.materials;
+-		let needsMaterialIndexUpdate = result.changeType !== NO_CHANGE || this._materialUuids === null || this._materialUuids.length !== length;
++		let needsMaterialIndexUpdate = result.changeType !== NO_CHANGE || this._materialUuids === null || this._materialUuids.length !== materials.length;
+ 		if ( ! needsMaterialIndexUpdate ) {
+ 
+ 			for ( let i = 0, length = materials.length; i < length; i ++ ) {
+@@ -254,6 +268,13 @@ export class PathTracingSceneGenerator {
+ 
+ 	}
+ 
++	dispose() {
++
++		this.geometry.dispose();
++		this.staticGeometryGenerator.dispose();
++
++	}
++
+ }
+ 
+ export class DynamicPathTracingSceneGenerator extends PathTracingSceneGenerator {
+diff --git a/src/core/WebGLPathTracer.js b/src/core/WebGLPathTracer.js
+index 2cb74081f27338f8534df183a1c2165964d48c15..edbdc62730f5a078d20cd8b7cb516ae5dc4fe4eb 100644
+--- a/src/core/WebGLPathTracer.js
++++ b/src/core/WebGLPathTracer.js
+@@ -109,6 +109,7 @@ export class WebGLPathTracer {
+ 		this._queueReset = false;
+ 		this._clock = new Clock();
+ 		this._compilePromise = null;
++		this._disposed = false;
+ 
+ 		this._lowResPathTracer = new PathTracingRenderer( renderer );
+ 		this._lowResPathTracer.tiles.set( 1, 1 );
+@@ -192,10 +193,15 @@ export class WebGLPathTracer {
+ 	setSceneAsync( ...args ) {
+ 
+ 		this._buildAsync = true;
+-		const result = this.setScene( ...args );
+-		this._buildAsync = false;
++		try {
+ 
+-		return result;
++			return this.setScene( ...args );
++
++		} finally {
++
++			this._buildAsync = false;
++
++		}
+ 
+ 	}
+ 
+@@ -253,7 +259,7 @@ export class WebGLPathTracer {
+ 		const scene = this.scene;
+ 		const material = this._pathTracer.material;
+ 
+-		if ( this._internalBackground ) {
++		if ( this._internalBackground && scene.background !== this._previousBackground ) {
+ 
+ 			this._internalBackground.dispose();
+ 			this._internalBackground = null;
+@@ -291,7 +297,17 @@ export class WebGLPathTracer {
+ 
+ 			if ( scene.background !== this._previousBackground ) {
+ 
+-				const background = new CubeToEquirectGenerator( this._renderer ).generate( scene.background );
++				const generator = new CubeToEquirectGenerator( this._renderer );
++				let background;
++				try {
++
++					background = generator.generate( scene.background );
++
++				} finally {
++
++					generator.dispose();
++
++				}
+ 				this._internalBackground = background;
+ 				material.backgroundMap = background;
+ 				material.backgroundAlpha = 1;
+@@ -314,8 +330,19 @@ export class WebGLPathTracer {
+ 
+ 				if ( scene.environment.isCubeTexture ) {
+ 
+-					const environment = new CubeToEquirectGenerator( this._renderer ).generate( scene.environment );
+-					material.envMapInfo.updateFrom( environment );
++					const generator = new CubeToEquirectGenerator( this._renderer );
++					let environment;
++					try {
++
++						environment = generator.generate( scene.environment );
++						material.envMapInfo.updateFrom( environment );
++
++					} finally {
++
++						generator.dispose();
++						if ( environment ) environment.dispose();
++
++					}
+ 
+ 				} else {
+ 
+@@ -385,6 +412,8 @@ export class WebGLPathTracer {
+ 
+ 	renderSample() {
+ 
++		if ( this._disposed ) return;
++
+ 		const lowResPathTracer = this._lowResPathTracer;
+ 		const pathTracer = this._pathTracer;
+ 		const renderer = this._renderer;
+@@ -495,9 +524,16 @@ export class WebGLPathTracer {
+ 
+ 	dispose() {
+ 
++		if ( this._disposed ) return;
++		this._disposed = true;
++
+ 		this._quad.dispose();
+ 		this._quad.material.dispose();
+ 		this._pathTracer.dispose();
++		this._lowResPathTracer.dispose();
++		this._generator.dispose();
++		if ( this._internalBackground ) this._internalBackground.dispose();
++		if ( this._colorBackground ) this._colorBackground.dispose();
+ 
+ 	}
+ 
+diff --git a/src/core/utils/StaticGeometryGenerator.js b/src/core/utils/StaticGeometryGenerator.js
+index 5ddf4eedae03a99048a8a76b445fda834f98a472..99734dcb5ff33efa1e89ec2aac76a84a65064b6b 100644
+--- a/src/core/utils/StaticGeometryGenerator.js
++++ b/src/core/utils/StaticGeometryGenerator.js
+@@ -205,6 +205,7 @@ export class StaticGeometryGenerator {
+ 
+ 		unusedMeshKeys.forEach( key => {
+ 
++			_intermediateGeometry.get( key ).dispose();
+ 			_intermediateGeometry.delete( key );
+ 
+ 		} );
+@@ -225,6 +226,22 @@ export class StaticGeometryGenerator {
+ 
+ 	}
+ 
++	dispose() {
++
++		this._intermediateGeometry.forEach( geometry => geometry.dispose() );
++		this._intermediateGeometry.clear();
++		this._geometryMergeSets = new WeakMap();
++		this.objects = [];
++		if ( this._dummyMesh ) {
++
++			this._dummyMesh.geometry.dispose();
++			this._dummyMesh.material.dispose();
++			this._dummyMesh = null;
++
++		}
++
++	}
++
+ 	generate( targetGeometry = new BufferGeometry() ) {
+ 
+ 		// track which attributes have been updated and which to skip to avoid unnecessary attribute copies
+diff --git a/src/core/utils/mergeGeometries.js b/src/core/utils/mergeGeometries.js
+index ffeed27e14e4553984117d5dbf01b2fc2542c841..e5baf009ee44f31acaed6d010ed388b0dd956a1d 100644
+--- a/src/core/utils/mergeGeometries.js
++++ b/src/core/utils/mergeGeometries.js
+@@ -114,6 +114,7 @@ export function mergeGeometries( geometries, options = {}, targetGeometry = new
+ 	trimMismatchedAttributes( targetGeometry, totalIndexCount, totalAttributeCount );
+ 
+ 	// set up groups
++	targetGeometry.clearGroups();
+ 	if ( useGroups ) {
+ 
+ 		let offset = 0;
+diff --git a/src/index.d.ts b/src/index.d.ts
+index 81230070666694c7d7dc3ad006e1f45408b5f8ab..8cf2a63361d0af46ce61a78bf88f83457dee4576 100644
+--- a/src/index.d.ts
++++ b/src/index.d.ts
+@@ -92,6 +92,7 @@ export class PathTracingSceneGenerator {
+ 
+ 	generateAsync( onProgress?: ( progress: number ) => void ): Promise<PathTracingSceneGeneratorResult>;
+ 	generate( onProgress?: ( progress: number ) => void ): PathTracingSceneGeneratorResult;
++	dispose(): void;
+ 
+ }
+ 
+diff --git a/src/materials/pathtracing/PhysicalPathTracingMaterial.js b/src/materials/pathtracing/PhysicalPathTracingMaterial.js
+index 1794015eeb804de9e8b813500a27c1fac4d8caea..0c830d2d112d4e3a1f1626bb0495b8280a39a340 100644
+--- a/src/materials/pathtracing/PhysicalPathTracingMaterial.js
++++ b/src/materials/pathtracing/PhysicalPathTracingMaterial.js
+@@ -28,6 +28,23 @@ import * as RenderGLSL from './glsl/index.js';
+ 
+ export class PhysicalPathTracingMaterial extends MaterialBase {
+ 
++	dispose() {
++
++		// Only generated GPU data is owned here, never backgroundMap or input maps.
++		this.bvh.dispose();
++		this.attributesArray.dispose();
++		this.materialIndexAttribute.dispose();
++		this.materials.dispose();
++		this.textures.renderTarget.dispose();
++		this.iesProfiles.renderTarget.dispose();
++		this.lights.tex.dispose();
++		this.envMapInfo.dispose();
++		this.stratifiedTexture.dispose();
++		this.stratifiedOffsetTexture.dispose();
++		super.dispose();
++
++	}
++
+ 	onBeforeRender() {
+ 
+ 		this.setDefine( 'FEATURE_DOF', this.physicalCamera.bokehSize === 0 ? 0 : 1 );
+diff --git a/src/uniforms/RenderTarget2DArray.js b/src/uniforms/RenderTarget2DArray.js
+index 7bb324764fc5e11c212ff5aec7a02c014003c834..f62903219f20c8be0948ba773edf0c32f2472c49 100644
+--- a/src/uniforms/RenderTarget2DArray.js
++++ b/src/uniforms/RenderTarget2DArray.js
+@@ -47,6 +47,7 @@ export class RenderTarget2DArray extends WebGLArrayRenderTarget {
+ 		};
+ 
+ 		super( width, height, 1, textureOptions );
++		this.texture.renderTarget = this;
+ 
+ 		// manually assign the options because passing options into the
+ 		// constructor does not work
+@@ -130,6 +131,7 @@ export class RenderTarget2DArray extends WebGLArrayRenderTarget {
+ 	dispose() {
+ 
+ 		super.dispose();
++		this.fsQuad.material.dispose();
+ 		this.fsQuad.dispose();
+ 
+ 	}
+diff --git a/src/utils/CubeToEquirectGenerator.js b/src/utils/CubeToEquirectGenerator.js
+index 010d386a4feb208169266b3204f76f965584e21b..48c64c1d2801e18daab6f8ed89544a3282937f7e 100644
+--- a/src/utils/CubeToEquirectGenerator.js
++++ b/src/utils/CubeToEquirectGenerator.js
+@@ -152,6 +152,7 @@ export class CubeToEquirectGenerator {
+ 
+ 	dispose() {
+ 
++		this._quad.material.dispose();
+ 		this._quad.dispose();
+ 
+ 	}
+diff --git a/src/utils/SobolNumberMapGenerator.js b/src/utils/SobolNumberMapGenerator.js
+index 5ef89665931418e94474280f97396f23d4108a39..c03a9218ae8178c1ce94dac4082732e8b19642a6 100644
+--- a/src/utils/SobolNumberMapGenerator.js
++++ b/src/utils/SobolNumberMapGenerator.js
+@@ -71,6 +71,7 @@ export class SobolNumberMapGenerator {
+ 		quad.render( renderer );
+ 
+ 		renderer.setRenderTarget( ogTarget );
++		quad.material.dispose();
+ 		quad.dispose();
+ 
+ 		return target;

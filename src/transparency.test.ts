@@ -33,17 +33,17 @@ function traceMaterials(document: VoxelDocument, origin: Vector3, direction: Vec
   const bvh = new MeshBVH(geometry, { indirect: true })
   const ray = new Ray(origin.clone().sub(center), direction.clone().normalize())
   try {
-    // Check all hits before stepping so BVH tie order cannot hide coincident opposing faces.
-    const hits = bvh.raycast(ray, DoubleSide)
-    expect(hits.some((hit, i) => hits.slice(i + 1).some(other =>
-      Math.abs(hit.distance - other.distance) < 1e-6 && hit.face!.normal.dot(other.face!.normal) < -0.99,
-    )), 'opposing coplanar faces along the ray').toBe(false)
-
     const materials: number[] = []
     // Straight transmitted paths: reproduce FirstHit, FrontSide rejection and stepRayOrigin,
     // not BSDF sampling. Four ordinary plus ten transmissive traversals match the renderer.
     for (let traversal = 0; traversal < 14; traversal++) {
-      const hit = bvh.raycastFirst(ray, DoubleSide)
+      // Emulate the GLSL first-hit tie rule, not the CPU BVH's traversal order:
+      // equal-distance opposing faces select the medium being entered.
+      const hit = bvh.raycast(ray, DoubleSide).sort((a, b) =>
+        a.distance - b.distance
+        || Number(b.face!.normal.dot(ray.direction) < 0) - Number(a.face!.normal.dot(ray.direction) < 0)
+        || a.faceIndex! - b.faceIndex!,
+      )[0]
       if (!hit) return materials
       const face = hit.face!
       const frontFace = face.normal.dot(ray.direction) < 0
@@ -101,9 +101,20 @@ test.each([[8, 8, 8], [15, 15, 15], [15, 254, 15]])('solid-surrounded water at (
   }
 })
 
-test('an oblique ray at an inset interface does not hit the same water twice', () => {
+test('an oblique ray at a transparent interface does not hit the same water twice', () => {
   const document = new VoxelDocument()
   document.setVoxel(0, 0, 0, water)
   document.setVoxel(1, 0, 0, glass)
   expect(traceMaterials(document, new Vector3(1.185, 2, 0.43), new Vector3(-0.2, -1, 0))).toEqual([water])
+})
+
+test.each([1, -1].flatMap(sign => [[4, 4], [5, 3], [3, 5]].map(([height, width]) => [sign, height, width])))('oblique direction %i across %ix%i merged faces enters each medium once', (sign, height, width) => {
+  const document = new VoxelDocument()
+  for (let y = 5; y < 5 + height; y++) for (let z = 5; z < 5 + width; z++) document.setVoxel(6, y, z, glass)
+  for (let y = 6; y < 8; y++) for (let z = 6; z < 8; z++) {
+    document.setVoxel(7, y, z, water)
+    document.setVoxel(sign > 0 ? 8 : 5, y, z, solid)
+  }
+  const origin = new Vector3(sign > 0 ? 5.5 : 8.5, 6.43, 6.61)
+  expect(traceMaterials(document, origin, new Vector3(sign, 0.07, 0.11))).toEqual(sign > 0 ? [glass, water, solid] : [water, glass, solid])
 })

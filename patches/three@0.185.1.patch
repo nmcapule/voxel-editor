@@ -1,0 +1,424 @@
+diff --git a/build/three.cjs b/build/three.cjs
+index 8939a67dd76325ccd25ee8806fc4d22b1caea88a..42f4fe4115256d24b7ac893097c129ef612a16fb 100644
+--- a/build/three.cjs
++++ b/build/three.cjs
+@@ -77446,6 +77446,7 @@ class WebGLRenderer {
+ 
+ 		/**
+ 		 * Asynchronous version of {@link WebGLRenderer#compile}.
++		 * Rejects with AbortError on material disposal or context loss, and with Error on link failure.
+ 		 *
+ 		 * This method makes use of the `KHR_parallel_shader_compile` WebGL extension. Hence,
+ 		 * it is recommended to use this version of `compile()` whenever possible.
+@@ -77458,44 +77459,97 @@ class WebGLRenderer {
+ 		 */
+ 		this.compileAsync = function ( scene, camera, targetScene = null ) {
+ 
+-			const materials = this.compile( scene, camera, targetScene );
++			if ( _isContextLost || _gl.isContextLost() ) {
+ 
+-			// Wait for all the materials in the new object to indicate that they're
+-			// ready to be used before resolving the promise.
++				return Promise.reject( new DOMException( 'WebGLRenderer: Shader compilation cancelled.', 'AbortError' ) );
+ 
+-			return new Promise( ( resolve ) => {
++			}
++
++			return new Promise( ( resolve, reject ) => {
++
++				const materials = this.compile( scene, camera, targetScene );
++				const pending = new Set( materials );
++				let timer = null;
++				let settled = false;
++
++				function finish( error ) {
++
++					if ( settled ) return;
++					settled = true;
++					clearTimeout( timer );
++					canvas.removeEventListener( 'webglcontextlost', cancel );
++					materials.forEach( material => material.removeEventListener( 'dispose', cancel ) );
++					if ( error ) reject( error );
++					else resolve( scene );
++
++				}
++
++				function cancel() {
++
++					finish( new DOMException( 'WebGLRenderer: Shader compilation cancelled.', 'AbortError' ) );
++
++				}
+ 
+ 				function checkMaterialsReady() {
+ 
+-					materials.forEach( function ( material ) {
++					if ( settled ) return;
++					try {
++
++						if ( _isContextLost || _gl.isContextLost() ) {
++
++							cancel();
++							return;
++
++						}
++
++						for ( const material of pending ) {
+ 
+-						const materialProperties = properties.get( material );
+-						const program = materialProperties.currentProgram;
++							// Disposal removes properties; do not recreate them or poll deleted programs.
++							const program = properties.has( material ) && properties.get( material ).currentProgram;
++							if ( ! program || ! program.program ) {
+ 
+-						if ( program.isReady() ) {
++								cancel();
++								return;
+ 
+-							// remove any programs that report they're ready to use from the list
+-							materials.delete( material );
++							}
++
++							const ready = program.isReady();
++							if ( settled ) return;
++							if ( ready ) {
++
++								// Read LINK_STATUS only after KHR readiness, even when debug logging is disabled.
++								if ( _gl.getProgramParameter( program.program, _gl.LINK_STATUS ) !== true ) {
++
++									throw new Error( `WebGLRenderer: Shader compilation failed (${ material.name || material.type }): ${ _gl.getProgramInfoLog( program.program ) || 'Program link failed.' }` );
++
++								}
++								pending.delete( material );
++
++							}
+ 
+ 						}
+ 
+-					} );
++						if ( pending.size === 0 ) {
+ 
+-					// once the list of compiling materials is empty, call the callback
++							finish();
+ 
+-					if ( materials.size === 0 ) {
++						} else {
+ 
+-						resolve( scene );
+-						return;
++							timer = setTimeout( checkMaterialsReady, 10 );
+ 
+-					}
++						}
++
++					} catch ( error ) {
+ 
+-					// if some materials are still not ready, wait a bit and check again
++						finish( error );
+ 
+-					setTimeout( checkMaterialsReady, 10 );
++					}
+ 
+ 				}
+ 
++				materials.forEach( material => material.addEventListener( 'dispose', cancel ) );
++				canvas.addEventListener( 'webglcontextlost', cancel );
++
+ 				if ( extensions.get( 'KHR_parallel_shader_compile' ) !== null ) {
+ 
+ 					// If we can check the compilation status of the materials without
+@@ -77508,7 +77562,7 @@ class WebGLRenderer {
+ 					// Otherwise start by waiting a bit to give the materials we just
+ 					// initialized a chance to finish.
+ 
+-					setTimeout( checkMaterialsReady, 10 );
++					timer = setTimeout( checkMaterialsReady, 10 );
+ 
+ 				}
+ 
+diff --git a/build/three.module.js b/build/three.module.js
+index ad13abf7d128bee607a7672646ca543327e258d3..7d073f83ae7caff63da8f38832fe77c8c3e0c399 100644
+--- a/build/three.module.js
++++ b/build/three.module.js
+@@ -17468,6 +17468,7 @@ class WebGLRenderer {
+ 
+ 		/**
+ 		 * Asynchronous version of {@link WebGLRenderer#compile}.
++		 * Rejects with AbortError on material disposal or context loss, and with Error on link failure.
+ 		 *
+ 		 * This method makes use of the `KHR_parallel_shader_compile` WebGL extension. Hence,
+ 		 * it is recommended to use this version of `compile()` whenever possible.
+@@ -17480,44 +17481,97 @@ class WebGLRenderer {
+ 		 */
+ 		this.compileAsync = function ( scene, camera, targetScene = null ) {
+ 
+-			const materials = this.compile( scene, camera, targetScene );
++			if ( _isContextLost || _gl.isContextLost() ) {
+ 
+-			// Wait for all the materials in the new object to indicate that they're
+-			// ready to be used before resolving the promise.
++				return Promise.reject( new DOMException( 'WebGLRenderer: Shader compilation cancelled.', 'AbortError' ) );
+ 
+-			return new Promise( ( resolve ) => {
++			}
++
++			return new Promise( ( resolve, reject ) => {
++
++				const materials = this.compile( scene, camera, targetScene );
++				const pending = new Set( materials );
++				let timer = null;
++				let settled = false;
++
++				function finish( error ) {
++
++					if ( settled ) return;
++					settled = true;
++					clearTimeout( timer );
++					canvas.removeEventListener( 'webglcontextlost', cancel );
++					materials.forEach( material => material.removeEventListener( 'dispose', cancel ) );
++					if ( error ) reject( error );
++					else resolve( scene );
++
++				}
++
++				function cancel() {
++
++					finish( new DOMException( 'WebGLRenderer: Shader compilation cancelled.', 'AbortError' ) );
++
++				}
+ 
+ 				function checkMaterialsReady() {
+ 
+-					materials.forEach( function ( material ) {
++					if ( settled ) return;
++					try {
++
++						if ( _isContextLost || _gl.isContextLost() ) {
++
++							cancel();
++							return;
++
++						}
++
++						for ( const material of pending ) {
+ 
+-						const materialProperties = properties.get( material );
+-						const program = materialProperties.currentProgram;
++							// Disposal removes properties; do not recreate them or poll deleted programs.
++							const program = properties.has( material ) && properties.get( material ).currentProgram;
++							if ( ! program || ! program.program ) {
+ 
+-						if ( program.isReady() ) {
++								cancel();
++								return;
+ 
+-							// remove any programs that report they're ready to use from the list
+-							materials.delete( material );
++							}
++
++							const ready = program.isReady();
++							if ( settled ) return;
++							if ( ready ) {
++
++								// Read LINK_STATUS only after KHR readiness, even when debug logging is disabled.
++								if ( _gl.getProgramParameter( program.program, _gl.LINK_STATUS ) !== true ) {
++
++									throw new Error( `WebGLRenderer: Shader compilation failed (${ material.name || material.type }): ${ _gl.getProgramInfoLog( program.program ) || 'Program link failed.' }` );
++
++								}
++								pending.delete( material );
++
++							}
+ 
+ 						}
+ 
+-					} );
++						if ( pending.size === 0 ) {
+ 
+-					// once the list of compiling materials is empty, call the callback
++							finish();
+ 
+-					if ( materials.size === 0 ) {
++						} else {
+ 
+-						resolve( scene );
+-						return;
++							timer = setTimeout( checkMaterialsReady, 10 );
+ 
+-					}
++						}
++
++					} catch ( error ) {
+ 
+-					// if some materials are still not ready, wait a bit and check again
++						finish( error );
+ 
+-					setTimeout( checkMaterialsReady, 10 );
++					}
+ 
+ 				}
+ 
++				materials.forEach( material => material.addEventListener( 'dispose', cancel ) );
++				canvas.addEventListener( 'webglcontextlost', cancel );
++
+ 				if ( extensions.get( 'KHR_parallel_shader_compile' ) !== null ) {
+ 
+ 					// If we can check the compilation status of the materials without
+@@ -17530,7 +17584,7 @@ class WebGLRenderer {
+ 					// Otherwise start by waiting a bit to give the materials we just
+ 					// initialized a chance to finish.
+ 
+-					setTimeout( checkMaterialsReady, 10 );
++					timer = setTimeout( checkMaterialsReady, 10 );
+ 
+ 				}
+ 
+diff --git a/examples/jsm/postprocessing/GTAOPass.js b/examples/jsm/postprocessing/GTAOPass.js
+index d1e2f661735644e7b95446e5cbd5ec43231dbf41..1e4f20112d1db1e551f2a339a0b87d058027b2be 100644
+--- a/examples/jsm/postprocessing/GTAOPass.js
++++ b/examples/jsm/postprocessing/GTAOPass.js
+@@ -274,6 +274,8 @@ class GTAOPass extends Pass {
+ 		this.gtaoRenderTarget.dispose();
+ 		this.pdRenderTarget.dispose();
+ 		this.normalMaterial.dispose();
++		this.gtaoMaterial.dispose();
++		this.blendMaterial.dispose();
+ 		this.pdMaterial.dispose();
+ 		this.copyMaterial.dispose();
+ 		this.depthRenderMaterial.dispose();
+diff --git a/src/renderers/WebGLRenderer.js b/src/renderers/WebGLRenderer.js
+index cc2f156939863f3ce3d524ea92bf206a740a6cdb..3cb62a8b0d5cc39609a1fdd18610eb8052e4797f 100644
+--- a/src/renderers/WebGLRenderer.js
++++ b/src/renderers/WebGLRenderer.js
+@@ -1474,6 +1474,7 @@ class WebGLRenderer {
+ 
+ 		/**
+ 		 * Asynchronous version of {@link WebGLRenderer#compile}.
++		 * Rejects with AbortError on material disposal or context loss, and with Error on link failure.
+ 		 *
+ 		 * This method makes use of the `KHR_parallel_shader_compile` WebGL extension. Hence,
+ 		 * it is recommended to use this version of `compile()` whenever possible.
+@@ -1486,44 +1487,97 @@ class WebGLRenderer {
+ 		 */
+ 		this.compileAsync = function ( scene, camera, targetScene = null ) {
+ 
+-			const materials = this.compile( scene, camera, targetScene );
++			if ( _isContextLost || _gl.isContextLost() ) {
+ 
+-			// Wait for all the materials in the new object to indicate that they're
+-			// ready to be used before resolving the promise.
++				return Promise.reject( new DOMException( 'WebGLRenderer: Shader compilation cancelled.', 'AbortError' ) );
+ 
+-			return new Promise( ( resolve ) => {
++			}
++
++			return new Promise( ( resolve, reject ) => {
++
++				const materials = this.compile( scene, camera, targetScene );
++				const pending = new Set( materials );
++				let timer = null;
++				let settled = false;
++
++				function finish( error ) {
++
++					if ( settled ) return;
++					settled = true;
++					clearTimeout( timer );
++					canvas.removeEventListener( 'webglcontextlost', cancel );
++					materials.forEach( material => material.removeEventListener( 'dispose', cancel ) );
++					if ( error ) reject( error );
++					else resolve( scene );
++
++				}
++
++				function cancel() {
++
++					finish( new DOMException( 'WebGLRenderer: Shader compilation cancelled.', 'AbortError' ) );
++
++				}
+ 
+ 				function checkMaterialsReady() {
+ 
+-					materials.forEach( function ( material ) {
++					if ( settled ) return;
++					try {
++
++						if ( _isContextLost || _gl.isContextLost() ) {
++
++							cancel();
++							return;
++
++						}
++
++						for ( const material of pending ) {
++
++							// Disposal removes properties; do not recreate them or poll deleted programs.
++							const program = properties.has( material ) && properties.get( material ).currentProgram;
++							if ( ! program || ! program.program ) {
++
++								cancel();
++								return;
++
++							}
++
++							const ready = program.isReady();
++							if ( settled ) return;
++							if ( ready ) {
+ 
+-						const materialProperties = properties.get( material );
+-						const program = materialProperties.currentProgram;
++								// Read LINK_STATUS only after KHR readiness, even when debug logging is disabled.
++								if ( _gl.getProgramParameter( program.program, _gl.LINK_STATUS ) !== true ) {
+ 
+-						if ( program.isReady() ) {
++									throw new Error( `WebGLRenderer: Shader compilation failed (${ material.name || material.type }): ${ _gl.getProgramInfoLog( program.program ) || 'Program link failed.' }` );
+ 
+-							// remove any programs that report they're ready to use from the list
+-							materials.delete( material );
++								}
++								pending.delete( material );
++
++							}
+ 
+ 						}
+ 
+-					} );
++						if ( pending.size === 0 ) {
+ 
+-					// once the list of compiling materials is empty, call the callback
++							finish();
+ 
+-					if ( materials.size === 0 ) {
++						} else {
+ 
+-						resolve( scene );
+-						return;
++							timer = setTimeout( checkMaterialsReady, 10 );
+ 
+-					}
++						}
+ 
+-					// if some materials are still not ready, wait a bit and check again
++					} catch ( error ) {
+ 
+-					setTimeout( checkMaterialsReady, 10 );
++						finish( error );
++
++					}
+ 
+ 				}
+ 
++				materials.forEach( material => material.addEventListener( 'dispose', cancel ) );
++				canvas.addEventListener( 'webglcontextlost', cancel );
++
+ 				if ( extensions.get( 'KHR_parallel_shader_compile' ) !== null ) {
+ 
+ 					// If we can check the compilation status of the materials without
+@@ -1536,7 +1590,7 @@ class WebGLRenderer {
+ 					// Otherwise start by waiting a bit to give the materials we just
+ 					// initialized a chance to finish.
+ 
+-					setTimeout( checkMaterialsReady, 10 );
++					timer = setTimeout( checkMaterialsReady, 10 );
+ 
+ 				}
+ 

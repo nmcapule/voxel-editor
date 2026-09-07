@@ -148,7 +148,7 @@ export class Studio {
     this.document = document
     this.settings = { ...settings }
     this.selectionMode = preferences.selectionMode ?? 'point'
-    const fallbackColor = document.palette[5] ? 5 : Math.max(1, document.palette.findIndex((color, index) => index > 0 && Boolean(color)))
+    const fallbackColor = document.hasPaletteColor(5) ? 5 : this.firstColor()
     this.activeColor = this.validColor(preferences.activeColor) ? preferences.activeColor : fallbackColor
     this.recentColors = [...new Set([this.activeColor, ...(preferences.recentColors ?? [5, 6, 12, 14, 3, 2]).filter(color => this.validColor(color))])].slice(0, 6)
   }
@@ -245,8 +245,9 @@ export class Studio {
       case 'palette.setColor': {
         this.requireColorIndex(command.index)
         const color = command.color & 0xffffff
-        if (this.document.palette[command.index] === color) return this.unchanged()
+        if (this.document.hasPaletteColor(command.index) && this.document.palette[command.index] === color) return this.unchanged()
         this.document.palette[command.index] = color
+        this.document.paletteOccupied[command.index] = 1
         return this.changed({ paletteChanged: true, save: true }, { index: command.index, color })
       }
       case 'material.update':
@@ -319,6 +320,17 @@ export class Studio {
     return this.changed(effects, result)
   }
 
+  async loadPbrMap(index: number, map: PbrMap, name: string, load: () => Promise<void>) {
+    this.requireColorIndex(index)
+    await load()
+    const paletteChanged = !this.document.hasPaletteColor(index)
+    this.document.paletteOccupied[index] = 1
+    const maps = this.loadedPbrMaps.get(index) ?? new Map<PbrMap, string>()
+    maps.set(map, name)
+    this.loadedPbrMaps.set(index, maps)
+    return this.changed({ mutation: true, paletteChanged, save: paletteChanged, announcement: `${name} loaded for color ${index}` }, { index, map })
+  }
+
   stateSnapshot() {
     const layerCounts = new Map<number, number>()
     let visibleVoxelCount = 0
@@ -354,7 +366,7 @@ export class Studio {
         renderMode: this.renderMode,
       },
       settings: { ...this.settings },
-      palette: Array.from({ length: 255 }, (_, offset) => offset + 1).filter(index => this.document.palette[index]).map(index => ({
+      palette: Array.from({ length: 255 }, (_, offset) => offset + 1).filter(index => this.document.hasPaletteColor(index)).map(index => ({
         index,
         color: this.document.palette[index],
         material: { ...this.document.materials[index] },
@@ -400,11 +412,11 @@ export class Studio {
   }
 
   private validColor(index: unknown): index is number {
-    return Number.isInteger(index) && Number(index) > 0 && Number(index) < 256 && Boolean(this.document.palette[Number(index)])
+    return this.document.hasPaletteColor(index)
   }
 
   private firstColor() {
-    return Math.max(1, this.document.palette.findIndex((color, index) => index > 0 && Boolean(color)))
+    return Math.max(1, this.document.palette.findIndex((_color, index) => this.document.hasPaletteColor(index)))
   }
 
   private requireColorIndex(index: number) {
@@ -477,6 +489,7 @@ export class Studio {
   private setCells(cells: Vec3[], color: number, layerId = this.document.activeLayerId, verb = 'Updated', selectionAfter?: Vec3[]) {
     if (!cells.length) throw new StudioCommandError('invalid_state', `Select voxels before ${verb.toLowerCase()}.`)
     this.editableLayer(layerId)
+    const paletteChanged = color !== 0 && !this.document.hasPaletteColor(color)
     const activeLayerId = this.document.activeLayerId
     const before = copyCells(this.selection.cells)
     const session = new EditSession(this.document, layerId)
@@ -488,30 +501,36 @@ export class Studio {
     this.history.push(edit, before, next, activeLayerId, activeLayerId)
     if (selectionChanged) this.selection = this.selectionState(next)
     const count = cells.length
-    return this.changed({ dirtyChunks: [...dirtyChunks(this.document, edit.changes.map(change => change.id))], factsChanged: true, selectionChanged, selectionFocus: selectionChanged, toolsChanged: selectionChanged, save: true, announcement: `${verb} ${count} ${count === 1 ? 'voxel' : 'voxels'}` }, { voxelCount: count })
+    return this.changed({ dirtyChunks: [...dirtyChunks(this.document, edit.changes.map(change => change.id))], paletteChanged, factsChanged: true, selectionChanged, selectionFocus: selectionChanged, toolsChanged: selectionChanged, save: true, announcement: `${verb} ${count} ${count === 1 ? 'voxel' : 'voxels'}` }, { voxelCount: count })
   }
 
   private setVoxels(voxels: ClipboardVoxel[], layerId = this.document.activeLayerId) {
     if (!voxels.length) return this.unchanged({ voxelCount: 0 })
     this.editableLayer(layerId)
+    let paletteChanged = false
     const session = new EditSession(this.document, layerId)
     let count = 0
-    for (const voxel of voxels) if (session.set(voxel.x, voxel.y, voxel.z, voxel.color)) count++
+    for (const voxel of voxels) {
+      const newColor = voxel.color !== 0 && !this.document.hasPaletteColor(voxel.color)
+      if (session.set(voxel.x, voxel.y, voxel.z, voxel.color)) { count++; paletteChanged ||= newColor }
+    }
     const edit = session.commit()
     if (!edit) return this.unchanged({ voxelCount: 0 })
     this.history.push(edit, this.selection.cells, this.selection.cells, this.document.activeLayerId, this.document.activeLayerId)
-    return this.changed({ dirtyChunks: [...dirtyChunks(this.document, edit.changes.map(change => change.id))], factsChanged: true, save: true, announcement: `Updated ${count} ${count === 1 ? 'voxel' : 'voxels'}` }, { voxelCount: count })
+    return this.changed({ dirtyChunks: [...dirtyChunks(this.document, edit.changes.map(change => change.id))], paletteChanged, factsChanged: true, save: true, announcement: `Updated ${count} ${count === 1 ? 'voxel' : 'voxels'}` }, { voxelCount: count })
   }
 
   private fill(command: Extract<StudioCommand, { type: 'edit.fill' }>) {
     const layerId = command.layerId ?? this.document.activeLayerId
     this.editableLayer(layerId)
+    const color = command.color ?? this.activeColor
+    const paletteChanged = color !== 0 && !this.document.hasPaletteColor(color)
     const session = new EditSession(this.document, layerId)
-    session.fillShape(command.min, command.max, command.color ?? this.activeColor, command.shape, command.axis)
+    session.fillShape(command.min, command.max, color, command.shape, command.axis)
     const edit = session.commit()
     if (!edit) return this.unchanged({ voxelCount: 0 })
     this.history.push(edit, this.selection.cells, this.selection.cells, this.document.activeLayerId, this.document.activeLayerId)
-    return this.changed({ dirtyChunks: [...dirtyChunks(this.document, edit.changes.map(change => change.id))], factsChanged: true, save: true, announcement: `${command.shape} volume filled` }, { changedChunks: edit.changes.length })
+    return this.changed({ dirtyChunks: [...dirtyChunks(this.document, edit.changes.map(change => change.id))], paletteChanged, factsChanged: true, save: true, announcement: `${command.shape} volume filled` }, { changedChunks: edit.changes.length })
   }
 
   private transform(cells: Vec3[], normal: Vec3, distance: number, move: boolean, layerId = this.document.activeLayerId) {
@@ -644,9 +663,10 @@ export class Studio {
 
   private duplicateColor(source: number, name?: string) {
     if (!this.validColor(source)) throw new StudioCommandError('not_found', `Color ${source} is not in the palette.`)
-    const free = Array.from({ length: 255 }, (_, index) => index + 1).find(index => !this.document.palette[index])
+    const free = Array.from({ length: 255 }, (_, index) => index + 1).find(index => !this.document.hasPaletteColor(index))
     if (!free) throw new StudioCommandError('limit_exceeded', 'The 255-color palette is full.')
     this.document.palette[free] = this.document.palette[source]
+    this.document.paletteOccupied[free] = 1
     this.document.materials[free] = { ...this.document.materials[source], name: (name?.trim() || `${this.document.materials[source].name} copy`).slice(0, 40) }
     this.activeColor = free
     this.recentColors = [free, ...this.recentColors].slice(0, 6)
@@ -664,9 +684,11 @@ export class Studio {
       const [min, max] = ranges[property]
       if (!Number.isFinite(value) || value < min || value > max) throw new StudioCommandError('invalid_argument', `${property} must be between ${min} and ${max}.`)
     }
-    if (JSON.stringify(next) === JSON.stringify(material)) return this.unchanged()
+    const paletteChanged = !this.document.hasPaletteColor(index)
+    if (!paletteChanged && JSON.stringify(next) === JSON.stringify(material)) return this.unchanged()
     this.document.materials[index] = next
-    return this.changed({ materialChanged: [index], save: true }, { index, material: { ...next } })
+    this.document.paletteOccupied[index] = 1
+    return this.changed({ materialChanged: [index], paletteChanged, save: true }, { index, material: { ...next } })
   }
 
   private setTool(tool: Tool) {

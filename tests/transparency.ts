@@ -6,6 +6,7 @@ import { faceViews, projectFaces } from '../src/projections'
 import { inspectionViews, type InspectionView } from '../src/inspection'
 import { VoxelRenderer, type RendererCallbacks } from '../src/renderer'
 import type { ViewSettings } from '../src/storage'
+import { runRenderingChecks, runRendererStateChecks, runPathTracingChecks } from './rendering'
 
 const host = document.createElement('div')
 host.style.cssText = 'width:100vw;height:100vh'
@@ -229,6 +230,9 @@ async function runInspectionChecks() {
 
 Object.assign(window, { transparencyTest: {
   renderer, scene, pixel, errors, settings, runRasterChecks, runInspectionChecks,
+  runRenderingChecks: () => runRenderingChecks(renderer, settings, errors),
+  runRendererStateChecks: () => runRendererStateChecks(renderer),
+  runPathTracingChecks: (samples = 16) => runPathTracingChecks(renderer, settings, errors, samples),
   get status() { return status },
 } })
 await scene('pool')

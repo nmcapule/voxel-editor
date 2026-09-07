@@ -205,9 +205,8 @@ describe('surface meshing and picking', () => {
     expect(mesh.quads).toBe(5)
     expect(mesh.indices.length).toBe(30)
     expect(mesh.uvs.length).toBe(mesh.positions.length / 3 * 2)
-    expect(mesh.colors.length).toBe(mesh.positions.length / 3 * 4)
-    expect(mesh.colors.filter((_, index) => index % 4 === 3).every(alpha => alpha === 1)).toBe(true)
-    expect(mesh.groups).toEqual([{ start: 0, count: 30, materialIndex: 5 }])
+    expect('colors' in mesh).toBe(false)
+    expect(mesh.groups).toEqual([{ start: 0, count: 30, materialIndex: 5, vertexStart: 0, vertexCount: 20, bounds: [0, 0, 0, 16, 16, 16] }])
     expect(document.materials[5]).toEqual({ name: 'Gold', roughness: 0.2, metalness: 1, emissiveIntensity: 0, opacity: 1, transmission: 0, ior: 1.5 })
 
     const mixed = new VoxelDocument()

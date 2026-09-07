@@ -1,11 +1,9 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
-import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js'
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import type { WebGLPathTracer } from 'three-gpu-pathtracer'
+import { RasterPipeline } from './raster-pipeline'
+import type { MeshData } from './mesher'
 import { CHUNK_SIZE, chunkCoords, connectedBodyVoxels, connectedSurfaceVoxels, fillShapeVoxels, moveRange, occupiedVoxels, pushPullRange, surfaceVoxels, type FillShape, type PaletteMaterial, type Vec3, type VoxelDocument } from './editor'
 import type { AuxiliaryTool, PaintMode, PbrMap, SculptMode, SelectionMode, SelectionState, Tool } from './studio'
 import type { ViewSettings } from './storage'
@@ -48,18 +46,12 @@ export function realtimeEnvironmentIntensity(metalness: number) {
   return 0.2 + metalness * 0.5
 }
 
-interface MeshResult {
+interface MeshResult extends MeshData {
   id: number
   version: number
-  positions: Float32Array
-  normals: Float32Array
-  colors: Float32Array
-  uvs: Float32Array
-  indices: Uint16Array | Uint32Array
-  faceLines: Float32Array
-  groups: { start: number; count: number; materialIndex: number }[]
-  quads: number
 }
+
+interface GridResult { id: number; version: number; faceLines: Float32Array }
 
 export interface RendererCallbacks {
   onSelectionChange: (selection: SelectionState) => void
@@ -113,10 +105,13 @@ function rayBounds(origin: Vec3, direction: Vec3, dimensions: Vec3) {
   return { enter, exit, enterNormal, exitNormal }
 }
 
-export function traceGridRay(document: VoxelDocument, origin: Vec3, direction: Vec3): ToolTarget | undefined {
+export function traceGridRay(document: VoxelDocument, origin: Vec3, direction: Vec3, maxDistance = Infinity): ToolTarget | undefined {
+  if (!axisNames.every(axis => Number.isFinite(origin[axis]) && Number.isFinite(direction[axis]))
+    || !axisNames.some(axis => direction[axis] !== 0)) return undefined
   const bounds = rayBounds(origin, direction, document.dimensions)
   if (!bounds || bounds.exit < 0) return undefined
   const start = Math.max(0, bounds.enter) + 1e-7
+  if (start > Math.min(bounds.exit, maxDistance)) return undefined
   const point = {
     x: origin.x + direction.x * start,
     y: origin.y + direction.y * start,
@@ -142,22 +137,26 @@ export function traceGridRay(document: VoxelDocument, origin: Vec3, direction: V
     y: direction.y ? ((step.y > 0 ? cell.y + 1 : cell.y) - origin.y) / direction.y : Infinity,
     z: direction.z ? ((step.z > 0 ? cell.z + 1 : cell.z) - origin.z) / direction.z : Infinity,
   }
-  let normal = bounds.enter > 0 ? bounds.enterNormal : { x: 0, y: 0, z: 0 }
+  let normal = bounds.enter >= 0 ? bounds.enterNormal : { x: 0, y: 0, z: 0 }
+  let previous = bounds.enter < 0 ? document.getVisibleVoxel(cell.x, cell.y, cell.z) : 0
 
   while (document.contains(cell.x, cell.y, cell.z)) {
     const color = document.getVisibleVoxel(cell.x, cell.y, cell.z)
-    if (color) return { cell: { ...cell }, normal, occupied: true, color }
+    // A ray inside a solid must leave it before hitting a front-facing surface.
+    const exposed = !previous || previous !== color && (document.materials[previous].opacity < 1 || document.materials[previous].transmission > 0)
+    if (color && exposed && axisNames.some(axis => normal[axis])) return { cell: { ...cell }, normal, occupied: true, color }
+    previous = color
 
     let axis: keyof Vec3 = 'x'
     if (next.y < next.x) axis = 'y'
     if (next.z < next[axis]) axis = 'z'
-    if (next[axis] > bounds.exit) break
+    if (next[axis] > Math.min(bounds.exit, maxDistance)) break
     cell[axis] += step[axis]
     normal = { x: 0, y: 0, z: 0 }
     normal[axis] = -step[axis]
     next[axis] += delta[axis]
   }
-  if (bounds.exitNormal.y > 0) return undefined
+  if (bounds.exitNormal.y > 0 || bounds.exit > maxDistance) return undefined
   const end = bounds.exit - 1e-7
   const exitPoint = {
     x: origin.x + direction.x * end,
@@ -268,24 +267,20 @@ interface MarqueeDrag {
 }
 
 export class VoxelRenderer {
-  private renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true, powerPreference: 'high-performance' })
+  private renderer = new THREE.WebGLRenderer({ preserveDrawingBuffer: true, powerPreference: 'high-performance' })
   private scene = new THREE.Scene()
   private camera: THREE.OrthographicCamera | THREE.PerspectiveCamera
   private controls: OrbitControls
-  private composer: EffectComposer
-  private renderPass: RenderPass
-  private ambientOcclusionPass: GTAOPass
+  private raster: RasterPipeline
+  private rasterFrame?: number
+  private contextLost = false
+  private rasterError?: string
+  private presentationDirty = true
   private raycaster = new THREE.Raycaster()
   private pointer = new THREE.Vector2()
-  private environmentMap: THREE.Texture
+  private environmentTarget: THREE.WebGLRenderTarget
+  private ambientEnvironment: THREE.DataTexture
   private materials: THREE.MeshPhysicalMaterial[]
-  private transmissionBuffer = new THREE.WebGLRenderTarget(1, 1, {
-    type: THREE.HalfFloatType, minFilter: THREE.LinearMipmapLinearFilter,
-    generateMipmaps: true, depthBuffer: false,
-  })
-  private transmissionSize = new THREE.Vector2(1, 1)
-  private transmissionDepths = new Map<THREE.Material, number>()
-  private lastTransmissionMaterial?: THREE.Material
   private faceGridMaterial = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.46, depthWrite: false, toneMapped: false })
   private model = new THREE.Group()
   private chunkMeshes = new Map<number, THREE.Group>()
@@ -311,6 +306,7 @@ export class VoxelRenderer {
   }
   private worker = new Worker(new URL('./mesher.worker.ts', import.meta.url), { type: 'module' })
   private queued = new Set<number>()
+  private queuedGrids = new Set<number>()
   private versions = new Map<number, number>()
   private nextVersion = 0
   private inFlight = 0
@@ -334,13 +330,15 @@ export class VoxelRenderer {
   private selection = new Map<number, Vec3>()
   private floatingSelection = false
   private selectionMode: SelectionMode = 'point'
-  private selectionPreview?: THREE.Mesh | THREE.InstancedMesh
+  private selectionPreview?: THREE.InstancedMesh
   private marqueeDrag?: MarqueeDrag
   private pushPullDrag?: PushPullDrag
   private fillPreview?: THREE.InstancedMesh
   private pushPullPreview?: THREE.InstancedMesh
   private focusAnimation?: number
   private pathTracer?: WebGLPathTracer
+  private pathTracingWorker?: { dispose: () => void }
+  private pathTracingRevision = 0
   private pathTracingFrame?: number
   private pathTracingBuildRunning = false
   private pathTracingBuildRequested = false
@@ -365,24 +363,16 @@ export class VoxelRenderer {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping
     this.renderer.toneMappingExposure = 1.08
-    this.renderer.setTransparentSort((a, b) => a.groupOrder - b.groupOrder || a.renderOrder - b.renderOrder
-      || (this.transmissionDepths.get(b.material) ?? b.z) - (this.transmissionDepths.get(a.material) ?? a.z)
-      || a.material.id - b.material.id || b.z - a.z || a.id - b.id)
-    const room = new RoomEnvironment()
-    const pmrem = new THREE.PMREMGenerator(this.renderer)
-    this.environmentMap = pmrem.fromScene(room, 0.04, 0.1, 100, { size: 64 }).texture
-    room.dispose()
-    pmrem.dispose()
+    this.environmentTarget = this.createEnvironment()
+    this.ambientEnvironment = this.createAmbientEnvironment()
+    this.scene.environment = this.ambientEnvironment
     this.materials = this.createMaterials()
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
-    this.composer = new EffectComposer(this.renderer)
-    this.renderPass = new RenderPass(this.scene, this.camera)
-    this.ambientOcclusionPass = this.createAmbientOcclusionPass()
-    this.composer.addPass(this.renderPass)
-    this.composer.addPass(this.ambientOcclusionPass)
-    this.composer.addPass(new OutputPass())
+    this.raster = new RasterPipeline(this.renderer, this.scene, { ambientOcclusion: settings.ambientOcclusion })
     this.renderer.shadowMap.enabled = true
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
+    this.renderer.shadowMap.type = THREE.PCFShadowMap
+    this.renderer.shadowMap.autoUpdate = false
+    this.renderer.shadowMap.needsUpdate = true
     this.renderer.domElement.tabIndex = 0
     this.renderer.domElement.setAttribute('aria-label', 'Voxel editing viewport. Arrow keys move the keyboard cursor, Page Up and Page Down change height, Space applies the active tool, and Shift Space reverses Push Pull or Move.')
     this.host.append(this.renderer.domElement)
@@ -393,31 +383,71 @@ export class VoxelRenderer {
     this.sunlight.shadow.mapSize.set(2048, 2048)
     this.hover.visible = false
     this.marqueePreview.visible = false
+    this.hover.userData.editorOverlay = this.marqueePreview.userData.editorOverlay = true
+    this.model.matrixAutoUpdate = false
+    this.bindWorker()
+    this.renderer.domElement.addEventListener('webglcontextlost', event => {
+      event.preventDefault()
+      this.contextLost = true
+      this.pathTracingRevision++
+      this.pathTracingReady = false
+      this.stopPathTracingSamples()
+      if (this.rasterFrame !== undefined) cancelAnimationFrame(this.rasterFrame)
+      this.rasterFrame = undefined
+      this.disposePathTracer()
+      this.callbacks.onPathTracingStatus('Graphics context lost')
+    })
+    this.renderer.domElement.addEventListener('webglcontextrestored', () => {
+      this.contextLost = false
+      this.environmentTarget.dispose()
+      this.environmentTarget = this.createEnvironment()
+      for (const material of this.materials) { material.envMap = this.environmentTarget.texture; material.needsUpdate = true }
+      if (this.ground) (this.ground.material as THREE.MeshStandardMaterial).envMap = this.environmentTarget.texture
+      this.renderer.shadowMap.needsUpdate = true
+      this.pathTracingFailed = false
+      this.requestPathTraceRebuild()
+      this.render()
+    })
+    this.resizeObserver = new ResizeObserver(() => this.resize())
+    this.resizeObserver.observe(host)
+    this.bindPointerEvents()
+    this.rebuildStage()
+    this.updatePalette()
+    this.markDirty(this.document.chunks.keys())
+    this.frameModel()
+    this.resize()
+  }
+
+  private bindWorker() {
+    const worker = this.worker
     this.worker.onmessage = event => {
-      const message = event.data as { type: 'ready' } | { type: 'meshed'; results: MeshResult[] }
+      if (worker !== this.worker) return
+      const message = event.data as { type: 'ready' } | { type: 'meshed'; results: MeshResult[] } | { type: 'gridded'; results: GridResult[] }
       if (message.type === 'ready') {
         this.workerReady = true
         this.updateWorkerPalette()
         this.pump()
         return
       }
-      this.receiveMeshes(message)
+      if (message.type === 'meshed') this.receiveMeshes(message)
+      else {
+        this.inFlight = 0
+        for (const result of message.results) if (this.versions.get(result.id) === result.version) this.receiveGrid(result)
+        this.pump()
+        if (this.pathTracingBuildRequested && !this.inFlight && !this.queued.size) void this.buildPathTrace()
+        this.render()
+      }
     }
     this.worker.onerror = () => {
+      if (worker !== this.worker) return
       this.inFlight = 0
       this.queued.clear()
+      this.queuedGrids.clear()
       this.meshFailed = true
       for (const waiter of this.meshWaiters.splice(0)) waiter.reject(new Error('The voxel surface worker stopped.'))
       this.callbacks.onMeshStats(0, 0)
       this.callbacks.onError('The voxel surface worker stopped. Reload to continue editing.')
     }
-    this.resizeObserver = new ResizeObserver(() => this.resize())
-    this.resizeObserver.observe(host)
-    this.bindPointerEvents()
-    this.rebuildStage()
-    this.updatePalette()
-    this.frameModel()
-    this.resize()
   }
 
   private createCamera(projection: ViewSettings['projection']) {
@@ -425,12 +455,25 @@ export class VoxelRenderer {
     return new THREE.OrthographicCamera(-20, 20, 20, -20, -1000, 2000)
   }
 
-  private createAmbientOcclusionPass(camera = this.camera) {
-    const pass = new GTAOPass(this.scene, camera, 1, 1)
-    pass.updateGtaoMaterial({ radius: 0.8, thickness: 1.1, distanceFallOff: 1, samples: 16 })
-    pass.blendIntensity = 0.65
-    pass.enabled = this.settings.ambientOcclusion
-    return pass
+  private createEnvironment() {
+    const room = new RoomEnvironment()
+    const pmrem = new THREE.PMREMGenerator(this.renderer)
+    try { return pmrem.fromScene(room, 0.04, 0.1, 100, { size: 64 }) }
+    finally { room.dispose(); pmrem.dispose() }
+  }
+
+  private createAmbientEnvironment() {
+    const width = 64, height = 32
+    const pixels = new Float32Array(width * height * 4)
+    const color = new THREE.Color()
+    for (let y = 0; y < height; y++) {
+      color.copy(this.hemisphere.groundColor).lerp(this.hemisphere.color, (1 - Math.cos((y + 0.5) / height * Math.PI)) / 2)
+      for (let x = 0; x < width; x++) pixels.set([color.r, color.g, color.b, 1], (y * width + x) * 4)
+    }
+    const texture = new THREE.DataTexture(pixels, width, height, THREE.RGBAFormat, THREE.FloatType)
+    texture.mapping = THREE.EquirectangularReflectionMapping
+    texture.needsUpdate = true
+    return texture
   }
 
   private createControls(camera: THREE.Camera) {
@@ -813,6 +856,7 @@ export class VoxelRenderer {
     if (selected.length) {
       const material = new THREE.MeshBasicMaterial({ color: 0x2f66db, transparent: true, opacity: floating ? 0.4 : 0.3, depthTest: !floating, depthWrite: false })
       const preview = new THREE.InstancedMesh(new THREE.BoxGeometry(1.06, 1.06, 1.06), material, selected.length)
+      preview.userData.editorOverlay = true
       preview.renderOrder = 3
       const matrix = new THREE.Matrix4()
       selected.forEach((cell, index) => {
@@ -831,6 +875,7 @@ export class VoxelRenderer {
   private clearSelectionPreview() {
     if (this.selectionPreview) {
       this.scene.remove(this.selectionPreview)
+      this.selectionPreview.dispose()
       this.selectionPreview.geometry.dispose()
       ;(this.selectionPreview.material as THREE.Material).dispose()
     }
@@ -954,8 +999,7 @@ export class VoxelRenderer {
       screenY,
     }
 
-    const layers = move ? 1 : Math.max(1, range.pull, range.push)
-    this.pushPullPreview = this.createGhostPreview(cells.length * layers, 0x2864dc)
+    this.pushPullPreview = this.createGhostPreview(cells.length, 0x2864dc)
     this.updatePushPullPreview()
     if (this.selectionPreview) this.selectionPreview.visible = false
     this.scene.add(this.pushPullPreview)
@@ -994,12 +1038,23 @@ export class VoxelRenderer {
   private updatePushPullPreview() {
     if (!this.pushPullDrag || !this.pushPullPreview) return
     const ghosts = pushPullGhostVoxels(this.pushPullDrag.cells, this.pushPullDrag.normal, this.pushPullDrag.distance, this.pushPullDrag.move)
+    if (this.pushPullPreview.instanceMatrix.count < ghosts.length) {
+      const old = this.pushPullPreview
+      this.pushPullPreview = this.createGhostPreview(Math.max(ghosts.length, old.instanceMatrix.count * 2), (old.material as THREE.MeshBasicMaterial).color.getHex())
+      this.scene.remove(old)
+      old.dispose()
+      old.geometry.dispose()
+      ;(old.material as THREE.Material).dispose()
+      this.scene.add(this.pushPullPreview)
+    }
     this.updateGhostPreview(this.pushPullPreview, ghosts)
   }
 
   private createGhostPreview(capacity: number, color: number) {
     const material = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.24, depthTest: false, depthWrite: false })
     const preview = new THREE.InstancedMesh(new THREE.BoxGeometry(0.94, 0.94, 0.94), material, capacity)
+    preview.userData.editorOverlay = true
+    preview.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
     preview.renderOrder = 4
     return preview
   }
@@ -1015,6 +1070,8 @@ export class VoxelRenderer {
       )
       preview.setMatrixAt(index, matrix)
     })
+    preview.instanceMatrix.clearUpdateRanges()
+    if (cells.length) preview.instanceMatrix.addUpdateRange(0, cells.length * 16)
     preview.instanceMatrix.needsUpdate = true
     preview.computeBoundingSphere()
   }
@@ -1033,6 +1090,7 @@ export class VoxelRenderer {
   private clearFillPreview() {
     if (!this.fillPreview) return
     this.scene.remove(this.fillPreview)
+    this.fillPreview.dispose()
     this.fillPreview.geometry.dispose()
     ;(this.fillPreview.material as THREE.Material).dispose()
     this.fillPreview = undefined
@@ -1041,6 +1099,7 @@ export class VoxelRenderer {
   private cancelPushPull() {
     if (this.pushPullPreview) {
       this.scene.remove(this.pushPullPreview)
+      this.pushPullPreview.dispose()
       this.pushPullPreview.geometry.dispose()
       ;(this.pushPullPreview.material as THREE.Material).dispose()
     }
@@ -1056,6 +1115,10 @@ export class VoxelRenderer {
     const rect = this.renderer.domElement.getBoundingClientRect()
     this.pointer.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1)
     this.raycaster.setFromCamera(this.pointer, this.camera)
+    // Match the rendered clip volume, including negative orthographic near planes.
+    this.raycaster.ray.origin.set(this.pointer.x, this.pointer.y, -1).unproject(this.camera)
+    this.raycaster.near = 0
+    this.raycaster.far = new THREE.Vector3(this.pointer.x, this.pointer.y, 1).unproject(this.camera).distanceTo(this.raycaster.ray.origin)
     return {
       origin: {
         x: this.raycaster.ray.origin.x + this.document.dimensions.x / 2,
@@ -1078,7 +1141,7 @@ export class VoxelRenderer {
         color: 0,
       }
     }
-    return traceGridRay(this.document, ray.origin, ray.direction)
+    return traceGridRay(this.document, ray.origin, ray.direction, this.raycaster.far)
   }
 
   private planeTargetAt(event: PointerEvent, cell: Vec3, normal: Vec3): ToolTarget | undefined {
@@ -1091,22 +1154,26 @@ export class VoxelRenderer {
     const cell = this.tool === 'paint' && this.paintMode === 'fill' && !this.auxiliary ? this.fillStartCell(target)
       : target?.occupied ? target.cell : undefined
     if (!cell || this.renderMode) {
+      if (!this.hover.visible) return
       this.hover.visible = false
       this.callbacks.onHover()
       this.render()
       return
     }
-    this.showCell(cell)
-    this.callbacks.onHover(cell)
+    if (this.showCell(cell)) this.callbacks.onHover(cell)
   }
 
   private showCell(cell: Vec3) {
-    this.hover.visible = !this.renderMode
-    this.hover.position.set(cell.x - this.document.dimensions.x / 2 + 0.5, cell.y + 0.5, cell.z - this.document.dimensions.z / 2 + 0.5)
     const material = this.hover.material as THREE.MeshBasicMaterial
-    material.color.setHex(this.tool === 'paint' ? this.document.palette[this.activeColor] || 0x2864dc
-      : this.tool === 'sculpt' && this.sculptMode === 'erase' ? 0xd94a4a : 0x2864dc)
+    const color = this.tool === 'paint' ? this.document.palette[this.activeColor] ?? 0x2864dc
+      : this.tool === 'sculpt' && this.sculptMode === 'erase' ? 0xd94a4a : 0x2864dc
+    const x = cell.x - this.document.dimensions.x / 2 + 0.5, y = cell.y + 0.5, z = cell.z - this.document.dimensions.z / 2 + 0.5
+    if (this.hover.visible === !this.renderMode && this.hover.position.x === x && this.hover.position.y === y && this.hover.position.z === z && material.color.getHex() === color) return false
+    this.hover.visible = !this.renderMode
+    this.hover.position.set(x, y, z)
+    material.color.setHex(color)
     this.render()
+    return true
   }
 
   private receiveMeshes(message: { type: 'meshed'; results: MeshResult[] }) {
@@ -1116,60 +1183,60 @@ export class VoxelRenderer {
       if (this.versions.get(result.id) !== result.version || !this.document.chunks.has(result.id)) continue
       this.removeChunk(result.id)
       if (!result.positions.length) continue
-      const position = new THREE.BufferAttribute(result.positions, 3)
-      const normal = new THREE.BufferAttribute(result.normals, 3)
-      const color = new THREE.BufferAttribute(result.colors, 4)
-      const uv = new THREE.BufferAttribute(result.uvs, 2)
       const chunkMesh = new THREE.Group()
       for (const group of result.groups) {
         const geometry = new THREE.BufferGeometry()
-        geometry.setAttribute('position', position)
-        geometry.setAttribute('normal', normal)
-        geometry.setAttribute('color', color)
-        geometry.setAttribute('uv', uv)
-        geometry.setIndex(new THREE.BufferAttribute(result.indices.slice(group.start, group.start + group.count), 1))
-        const bounds = new THREE.Box3()
-        const vertex = new THREE.Vector3()
-        for (let index = group.start; index < group.start + group.count; index++) bounds.expandByPoint(vertex.fromBufferAttribute(position, result.indices[index]))
+        const start = group.vertexStart, end = start + group.vertexCount
+        geometry.setAttribute('position', new THREE.BufferAttribute(result.positions.subarray(start * 3, end * 3), 3))
+        geometry.setAttribute('normal', new THREE.BufferAttribute(result.normals.subarray(start * 3, end * 3), 3))
+        geometry.setAttribute('uv', new THREE.BufferAttribute(result.uvs.subarray(start * 2, end * 2), 2))
+        const indices = result.indices.subarray(group.start, group.start + group.count)
+        for (let index = 0; index < indices.length; index++) indices[index] -= start
+        geometry.setIndex(new THREE.BufferAttribute(indices, 1))
+        const bounds = new THREE.Box3(new THREE.Vector3(...group.bounds.slice(0, 3)), new THREE.Vector3(...group.bounds.slice(3)))
         geometry.boundingBox = bounds
         geometry.boundingSphere = bounds.getBoundingSphere(new THREE.Sphere())
         const mesh = new THREE.Mesh(geometry, this.materials[group.materialIndex])
-        mesh.onBeforeRender = (renderer, scene, _camera, _geometry, material) => {
-          if (scene.overrideMaterial || !(material instanceof THREE.MeshPhysicalMaterial) || material.transmission === 0) return
-          const target = renderer.getRenderTarget()
-          if (!target || target.samples || this.lastTransmissionMaterial === material) return
-          // All chunks of one medium sample the same background: never tint water through itself.
-          this.transmissionBuffer.setSize(target.width, target.height)
-          this.transmissionSize.set(target.width, target.height)
-          renderer.initRenderTarget(this.transmissionBuffer)
-          renderer.copyTextureToTexture(target.texture, this.transmissionBuffer.texture)
-          renderer.setRenderTarget(target)
-          this.lastTransmissionMaterial = material
-        }
+        mesh.matrixAutoUpdate = false
         mesh.castShadow = castsRealtimeShadow(this.document.materials[group.materialIndex])
         mesh.receiveShadow = true
         chunkMesh.add(mesh)
       }
-      if (result.faceLines.length) {
-        const geometry = new THREE.BufferGeometry()
-        geometry.setAttribute('position', new THREE.BufferAttribute(result.faceLines, 3))
-        geometry.computeBoundingSphere()
-        const lines = new THREE.LineSegments(geometry, this.faceGridMaterial)
-        lines.userData.faceGrid = true
-        lines.visible = this.settings.faceGrid && !this.renderMode
-        lines.renderOrder = 1
-        chunkMesh.add(lines)
-      }
       const chunk = chunkCoords(result.id)
       chunkMesh.position.set(chunk.x * CHUNK_SIZE - this.document.dimensions.x / 2, chunk.y * CHUNK_SIZE, chunk.z * CHUNK_SIZE - this.document.dimensions.z / 2)
+      chunkMesh.updateMatrix()
+      chunkMesh.matrixAutoUpdate = false
       this.chunkMeshes.set(result.id, chunkMesh)
       this.chunkQuads.set(result.id, result.quads)
       this.model.add(chunkMesh)
+      chunkMesh.updateWorldMatrix(true, true)
+      if (result.faceLines.length) this.receiveGrid(result)
+      else if (this.settings.faceGrid) this.queuedGrids.add(result.id)
     }
-    this.reportMeshStats()
-    this.render()
+    this.renderer.shadowMap.needsUpdate = true
     this.pump()
     this.requestPathTraceRebuild()
+    this.render()
+  }
+
+  private receiveGrid(result: GridResult) {
+    const chunk = this.chunkMeshes.get(result.id)
+    if (!chunk) return
+    for (const child of [...chunk.children]) if (child.userData.faceGrid) {
+      (child as THREE.LineSegments).geometry.dispose()
+      chunk.remove(child)
+    }
+    chunk.userData.faceGridReady = true
+    if (!result.faceLines.length) return
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.BufferAttribute(result.faceLines, 3))
+    geometry.computeBoundingSphere()
+    const lines = new THREE.LineSegments(geometry, this.faceGridMaterial)
+    lines.userData.faceGrid = true
+    lines.visible = this.settings.faceGrid && !this.renderMode
+    lines.renderOrder = 1
+    chunk.add(lines)
+    lines.updateWorldMatrix(true, false)
   }
 
   private removeChunk(id: number) {
@@ -1178,6 +1245,7 @@ export class VoxelRenderer {
       chunk.traverse(child => { if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) child.geometry.dispose() })
       this.model.remove(chunk)
       this.chunkMeshes.delete(id)
+      this.renderer.shadowMap.needsUpdate = true
     }
     this.chunkQuads.delete(id)
   }
@@ -1185,55 +1253,57 @@ export class VoxelRenderer {
   private reportMeshStats() {
     let quads = 0
     for (const count of this.chunkQuads.values()) quads += count
-    const pending = this.queued.size + this.inFlight
+    const pending = this.queued.size + this.queuedGrids.size + this.inFlight
     this.callbacks.onMeshStats(pending, quads)
     if (!pending) for (const waiter of this.meshWaiters.splice(0)) waiter.resolve()
   }
 
   private pump() {
-    if (!this.workerReady) { this.reportMeshStats(); return }
-    if (this.inFlight || !this.queued.size) { this.reportMeshStats(); return }
-    const jobs: { id: number; version: number; voxels: ArrayBuffer }[] = []
-    for (const id of this.queued) {
-      this.queued.delete(id)
+    if (!this.workerReady || this.meshFailed || this.inFlight) { this.reportMeshStats(); return }
+    while (this.queued.size || this.queuedGrids.size) {
+      const grid = !this.queued.size
+      const queue = grid ? this.queuedGrids : this.queued
+      const id = queue.values().next().value!
+      queue.delete(id)
       if (!this.document.chunks.has(id)) { this.removeChunk(id); continue }
+      if (grid && this.chunkMeshes.get(id)?.userData.faceGridReady) continue
       const voxels = this.document.paddedChunk(id, true).buffer
-      jobs.push({ id, version: this.versions.get(id)!, voxels })
-      if (jobs.length === 24) break
+      this.inFlight = 1
+      this.worker.postMessage({ type: grid ? 'grid' : 'mesh', jobs: [{ id, version: this.versions.get(id)!, voxels }], faceGrid: this.settings.faceGrid }, [voxels])
+      break
     }
-    if (!jobs.length) { this.reportMeshStats(); this.pump(); return }
-    this.inFlight = jobs.length
-    this.worker.postMessage({ type: 'mesh', jobs, faceGrid: this.settings.faceGrid }, jobs.map(job => job.voxels))
     this.reportMeshStats()
+    if (!this.inFlight && !this.queued.size && this.pathTracingBuildRequested && this.pathTracingEnabled()) void this.buildPathTrace()
   }
 
   markDirty(ids: Iterable<number>) {
     for (const id of ids) {
       this.versions.set(id, ++this.nextVersion)
       this.queued.add(id)
+      this.queuedGrids.delete(id)
       if (!this.document.chunks.has(id)) this.removeChunk(id)
     }
-    this.pump()
     this.requestPathTraceRebuild()
+    this.pump()
     this.render()
   }
 
   whenMeshIdle() {
     if (this.meshFailed) return Promise.reject(new Error('The voxel surface worker stopped.'))
-    if (!this.queued.size && !this.inFlight) return Promise.resolve()
+    if (!this.queued.size && !this.queuedGrids.size && !this.inFlight) return Promise.resolve()
     return new Promise<void>((resolve, reject) => this.meshWaiters.push({ resolve, reject }))
   }
 
   meshState() {
-    return { pending: this.queued.size + this.inFlight, failed: this.meshFailed }
+    return { pending: this.queued.size + this.queuedGrids.size + this.inFlight, failed: this.meshFailed }
   }
 
   private createMaterials() {
     return this.document.materials.map(({ name, roughness, metalness, emissiveIntensity, opacity, transmission, ior }, index) => {
       const material = new THREE.MeshPhysicalMaterial({
         name,
-        vertexColors: true,
-        envMap: this.environmentMap,
+        color: this.document.palette[index],
+        envMap: this.environmentTarget.texture,
         envMapIntensity: realtimeEnvironmentIntensity(metalness),
         roughness,
         metalness,
@@ -1245,12 +1315,7 @@ export class VoxelRenderer {
         transparent: opacity < 1,
         depthWrite: opacity >= 1,
       })
-      material.onBeforeCompile = shader => {
-        shader.uniforms.layeredTransmissionMap = { value: this.transmissionBuffer.texture }
-        shader.uniforms.layeredTransmissionSize = { value: this.transmissionSize }
-        shader.fragmentShader = shader.fragmentShader.replace('#include <transmission_pars_fragment>',
-          THREE.ShaderChunk.transmission_pars_fragment.replaceAll('transmissionSamplerMap', 'layeredTransmissionMap').replaceAll('transmissionSamplerSize', 'layeredTransmissionSize'))
-      }
+      Object.assign(material, { castShadow: this.settings.shadows })
       return material
     })
   }
@@ -1263,16 +1328,19 @@ export class VoxelRenderer {
   }
 
   updatePalette() {
-    this.materials.forEach((material, index) => material.emissive.setHex(this.document.palette[index]))
-    this.updateWorkerPalette()
-    this.markDirty(this.document.chunks.keys())
+    this.materials.forEach((material, index) => {
+      material.color.setHex(this.document.palette[index])
+      material.emissive.copy(material.color)
+      material.needsUpdate = true
+    })
+    this.updatePathTracing('materials')
+    this.render()
   }
 
   private updateWorkerPalette() {
     if (!this.workerReady) return
-    const palette = this.document.palette.slice().buffer
     const transparent = Uint8Array.from(this.document.materials, material => Number(material.opacity < 1 || material.transmission > 0)).buffer
-    this.worker.postMessage({ type: 'palette', palette, transparent }, [palette, transparent])
+    this.worker.postMessage({ type: 'palette', transparent }, [transparent])
   }
 
   updatePaletteMaterial(index: number) {
@@ -1291,8 +1359,10 @@ export class VoxelRenderer {
     material.transparent = preset.opacity < 1
     material.depthWrite = preset.opacity >= 1
     material.needsUpdate = true
-    if (wasTransparent !== (preset.opacity < 1 || preset.transmission > 0)) this.updatePalette()
-    this.requestPathTraceRebuild()
+    if (wasTransparent !== (preset.opacity < 1 || preset.transmission > 0)) {
+      this.updateWorkerPalette()
+      this.markDirty(this.document.chunks.keys())
+    } else this.updatePathTracing('materials')
     this.render()
   }
 
@@ -1303,7 +1373,14 @@ export class VoxelRenderer {
     this.document = document
     this.applySelection({ cells: [], count: 0 }, false)
     this.queued.clear()
+    this.queuedGrids.clear()
     this.versions.clear()
+    this.worker.terminate()
+    this.worker = new Worker(new URL('./mesher.worker.ts', import.meta.url), { type: 'module' })
+    this.inFlight = 0
+    this.workerReady = false
+    this.meshFailed = false
+    this.bindWorker()
     for (const id of [...this.chunkMeshes.keys()]) this.removeChunk(id)
     if (!preserveMaterials) {
       this.disposeMaterials()
@@ -1312,6 +1389,7 @@ export class VoxelRenderer {
     this.keyboardCell = { x: 0, y: 0, z: 0 }
     this.rebuildStage()
     this.updatePalette()
+    this.markDirty(this.document.chunks.keys())
     this.frameModel()
   }
 
@@ -1371,7 +1449,7 @@ export class VoxelRenderer {
 
   setActiveColor(index: number) {
     this.activeColor = index
-    if (this.hover.visible) this.showCell(this.keyboardCell)
+    if (this.hover.visible) this.showCell({ x: this.hover.position.x + this.document.dimensions.x / 2 - 0.5, y: this.hover.position.y - 0.5, z: this.hover.position.z + this.document.dimensions.z / 2 - 0.5 })
   }
 
   async setPbrMap(index: number, map: PbrMap, file: Blob) {
@@ -1391,7 +1469,7 @@ export class VoxelRenderer {
     if (previous) previous.dispose()
     material[map] = texture
     material.needsUpdate = true
-    this.requestPathTraceRebuild()
+    this.updatePathTracing('materials')
     this.render()
   }
 
@@ -1403,12 +1481,12 @@ export class VoxelRenderer {
       material[map] = null
     }
     material.needsUpdate = true
-    this.requestPathTraceRebuild()
+    this.updatePathTracing('materials')
     this.render()
   }
 
   private pathTracingEnabled() {
-    return this.renderMode && this.settings.pathTracing && !this.pathTracingFailed
+    return this.renderMode && this.settings.pathTracing && !this.pathTracingFailed && !this.contextLost
   }
 
   private stopPathTracingSamples() {
@@ -1420,20 +1498,27 @@ export class VoxelRenderer {
     if (!this.pathTracer || !this.pathTracingEnabled() || !this.pathTracingReady) return
     this.stopPathTracingSamples()
     this.pathTracer.reset()
+    this.presentationDirty = true
     this.resetFps()
     let reportedSamples = -1
     const sample = () => {
+      this.pathTracingFrame = undefined
       if (!this.pathTracer || !this.pathTracingEnabled() || !this.pathTracingReady) return
-      const previousSamples = Math.floor(this.pathTracer.samples)
-      this.pathTracer.renderSample()
-      const samples = Math.floor(this.pathTracer.samples)
-      if (samples > previousSamples) this.recordFrame(samples - previousSamples)
-      if (samples !== reportedSamples) {
-        reportedSamples = samples
-        this.callbacks.onPathTracingStatus(`${samples} ${samples === 1 ? 'sample' : 'samples'}`)
+      try {
+        const previousSamples = Math.floor(this.pathTracer.samples)
+        this.pathTracer.renderSample()
+        const samples = Math.floor(this.pathTracer.samples)
+        if (this.pathTracer.samples > 0) this.presentationDirty = false
+        if (samples > previousSamples) this.recordFrame(samples - previousSamples)
+        if (samples !== reportedSamples) {
+          reportedSamples = samples
+          this.callbacks.onPathTracingStatus(`${samples} ${samples === 1 ? 'sample' : 'samples'}`)
+        }
+        if (samples < 128) this.pathTracingFrame = requestAnimationFrame(sample)
+        else this.resetFps()
+      } catch (error) {
+        this.failPathTracing(error)
       }
-      if (samples < 128) this.pathTracingFrame = requestAnimationFrame(sample)
-      else this.pathTracingFrame = undefined
     }
     this.pathTracingFrame = requestAnimationFrame(sample)
   }
@@ -1444,8 +1529,10 @@ export class VoxelRenderer {
       import('three-gpu-pathtracer'),
       import('three-mesh-bvh/worker'),
     ])
+    if (!this.pathTracingEnabled()) return undefined
     const tracer = new WebGLPathTracer(this.renderer)
     const worker = new GenerateMeshBVHWorker()
+    this.pathTracingWorker = worker
     tracer.setBVHWorker(worker)
     tracer.bounces = 4
     tracer.tiles.set(2, 2)
@@ -1460,11 +1547,12 @@ export class VoxelRenderer {
   }
 
   private requestPathTraceRebuild() {
-    if (!this.pathTracingEnabled()) return
+    this.pathTracingRevision++
     this.pathTracingBuildRequested = true
     this.pathTracingReady = false
     this.stopPathTracingSamples()
-    this.renderRaster()
+    this.render()
+    if (!this.pathTracingEnabled()) return
     if (this.inFlight || this.queued.size) {
       this.callbacks.onPathTracingStatus('Updating mesh')
       return
@@ -1475,15 +1563,23 @@ export class VoxelRenderer {
   private async buildPathTrace() {
     if (this.pathTracingBuildRunning) return
     this.pathTracingBuildRunning = true
+    let buildingTracer: WebGLPathTracer | undefined
     try {
       while (this.pathTracingEnabled() && this.pathTracingBuildRequested && !this.inFlight && !this.queued.size) {
+        const revision = this.pathTracingRevision
         this.pathTracingBuildRequested = false
         const tracer = await this.ensurePathTracer()
-        if (!this.pathTracingEnabled()) break
+        buildingTracer = tracer
+        if (!tracer || !this.pathTracingEnabled()) break
+        if (revision !== this.pathTracingRevision || this.inFlight || this.queued.size) {
+          this.pathTracingBuildRequested = true
+          continue
+        }
         let progressStep = -1
         this.callbacks.onPathTracingStatus('Preparing')
         await tracer.setSceneAsync(this.scene, this.camera, {
           onProgress: progress => {
+            if (!this.pathTracingEnabled() || revision !== this.pathTracingRevision) return
             const step = Math.floor(progress * 10)
             if (step !== progressStep) {
               progressStep = step
@@ -1491,32 +1587,71 @@ export class VoxelRenderer {
             }
           },
         })
-        this.pathTracingReady = true
+        this.pathTracingReady = this.pathTracingEnabled() && revision === this.pathTracingRevision
+          && !this.pathTracingBuildRequested && !this.inFlight && !this.queued.size
       }
-    } catch {
-      this.pathTracingFailed = true
-      this.pathTracingReady = false
-      this.callbacks.onPathTracingStatus('Raster fallback')
-      this.callbacks.onError('Progressive PBR is unavailable on this device. Using the realtime renderer instead.')
-      this.renderRaster()
+    } catch (error) {
+      if (!this.contextLost && (!buildingTracer || buildingTracer === this.pathTracer)) this.failPathTracing(error)
     } finally {
       this.pathTracingBuildRunning = false
     }
     if (this.pathTracingEnabled() && this.pathTracingBuildRequested && !this.inFlight && !this.queued.size) void this.buildPathTrace()
-    else if (this.pathTracingEnabled() && this.pathTracingReady) this.startPathTracingSamples()
+    else if (this.pathTracingEnabled() && this.pathTracingReady && !this.pathTracingBuildRequested && !this.inFlight && !this.queued.size) this.startPathTracingSamples()
+  }
+
+  private disposePathTracer() {
+    this.pathTracingWorker?.dispose()
+    this.pathTracingWorker = undefined
+    this.pathTracer?.dispose()
+    this.pathTracer = undefined
+  }
+
+  private failPathTracing(error: unknown) {
+    // GL reports loss before the DOM event is delivered. Let restoration own
+    // recovery rather than reporting a transient device loss as a tracer failure.
+    if (this.contextLost || this.renderer.getContext().isContextLost()) {
+      this.contextLost = true
+      this.pathTracingReady = false
+      this.stopPathTracingSamples()
+      return
+    }
+    this.pathTracingFailed = true
+    this.pathTracingReady = false
+    this.pathTracingBuildRequested = true
+    this.pathTracingRevision++
+    this.stopPathTracingSamples()
+    this.disposePathTracer()
+    this.resetFps()
+    this.callbacks.onPathTracingStatus('Raster fallback')
+    this.callbacks.onError(`Progressive PBR stopped. Using the realtime renderer. ${error instanceof Error ? error.message : ''}`.trim())
+    this.render()
+  }
+
+  private updatePathTracing(...changes: ('materials' | 'lights' | 'environment' | 'camera')[]) {
+    if (!this.pathTracingEnabled()) return
+    if (!this.pathTracer || !this.pathTracingReady || this.pathTracingBuildRunning || this.inFlight || this.queued.size) {
+      this.requestPathTraceRebuild()
+      return
+    }
+    try {
+      for (const change of changes) {
+        if (change === 'materials') this.pathTracer.updateMaterials()
+        else if (change === 'lights') this.pathTracer.updateLights()
+        else if (change === 'environment') this.pathTracer.updateEnvironment()
+        else this.pathTracer.setCamera(this.camera)
+      }
+      this.startPathTracingSamples()
+    } catch (error) { this.failPathTracing(error) }
   }
 
   private cameraChanged() {
     this.updateWorkspaceGridVisibility()
-    this.renderRaster()
-    if (!this.pathTracingEnabled()) return
-    if (this.pathTracer && this.pathTracingReady && !this.pathTracingBuildRunning) {
-      this.pathTracer.updateCamera()
-      this.startPathTracingSamples()
-    }
+    if (this.pathTracer && this.pathTracingReady && !this.pathTracingBuildRunning) this.updatePathTracing('camera')
+    this.render()
   }
 
   setRenderMode(enabled: boolean) {
+    if (this.renderMode === enabled) return
     this.cancelPaint()
     this.cancelPushPull()
     this.cancelMarquee()
@@ -1532,15 +1667,17 @@ export class VoxelRenderer {
       this.pathTracingFailed = false
       this.requestPathTraceRebuild()
     } else {
+      this.pathTracingRevision++
       this.resetFps()
       this.pathTracingReady = false
       this.stopPathTracingSamples()
       this.callbacks.onPathTracingStatus('Ready')
-      this.renderRaster()
+      this.render()
     }
   }
 
   setSettings(settings: ViewSettings) {
+    const previous = this.settings
     const projectionChanged = settings.projection !== this.settings.projection
     const pathTracingChanged = settings.pathTracing !== this.settings.pathTracing
     const faceGridChanged = settings.faceGrid !== this.settings.faceGrid
@@ -1550,8 +1687,9 @@ export class VoxelRenderer {
     const luminance = background.r * 0.2126 + background.g * 0.7152 + background.b * 0.0722
     this.faceGridMaterial.color.setHex(luminance > 0.35 ? 0x20262c : 0xf9faf8)
     this.hemisphere.intensity = settings.ambient
+    this.scene.environmentIntensity = settings.ambient / Math.PI
     this.sunlight.intensity = settings.light
-    this.ambientOcclusionPass.enabled = settings.ambientOcclusion
+    this.raster.ambientOcclusion.enabled = settings.ambientOcclusion
     this.renderer.shadowMap.enabled = settings.shadows
     this.updateWorkspaceGridVisibility()
     if (this.limits) this.limits.visible = settings.grid && !this.renderMode
@@ -1559,21 +1697,36 @@ export class VoxelRenderer {
     if (this.ground) {
       this.ground.visible = this.renderMode
       ;(this.ground.material as THREE.MeshStandardMaterial).color.set(settings.background).offsetHSL(0, -0.04, -0.035)
+      ;(this.ground.material as THREE.Material).needsUpdate = true
     }
     const radius = Math.max(this.document.dimensions.x, this.document.dimensions.y, this.document.dimensions.z)
     const radians = THREE.MathUtils.degToRad(settings.lightAzimuth)
     this.sunlight.position.set(Math.cos(radians) * radius, radius * 1.7, Math.sin(radians) * radius)
+    if (settings.shadows !== previous.shadows) for (const material of this.materials) Object.assign(material, { castShadow: settings.shadows })
+    if (settings.shadows !== previous.shadows || settings.lightAzimuth !== previous.lightAzimuth) this.renderer.shadowMap.needsUpdate = true
+    this.fitShadowCamera()
     if (projectionChanged) this.switchProjection(settings.projection)
-    if (faceGridChanged && settings.faceGrid) this.markDirty(this.document.chunks.keys())
+    if (faceGridChanged && settings.faceGrid) {
+      for (const [id, chunk] of this.chunkMeshes) if (!chunk.userData.faceGridReady && !this.queued.has(id)) this.queuedGrids.add(id)
+      this.pump()
+    }
     if (pathTracingChanged && settings.pathTracing) this.pathTracingFailed = false
     if (pathTracingChanged) this.resetFps()
-    if (this.pathTracingEnabled()) this.requestPathTraceRebuild()
-    else {
+    if (pathTracingChanged && this.pathTracingEnabled()) this.requestPathTraceRebuild()
+    else if (!this.pathTracingEnabled()) {
+      if (pathTracingChanged) this.pathTracingRevision++
       this.pathTracingReady = false
       this.stopPathTracingSamples()
       this.callbacks.onPathTracingStatus('Ready')
-      this.renderRaster()
+    } else {
+      const changes: ('materials' | 'lights' | 'environment' | 'camera')[] = []
+      if (settings.background !== previous.background || settings.shadows !== previous.shadows) changes.push('materials')
+      if (settings.background !== previous.background || settings.ambient !== previous.ambient) changes.push('environment')
+      if (settings.light !== previous.light || settings.lightAzimuth !== previous.lightAzimuth) changes.push('lights')
+      if (projectionChanged) changes.push('camera')
+      if (changes.length) this.updatePathTracing(...changes)
     }
+    this.render()
   }
 
   private updateFaceGridVisibility() {
@@ -1593,11 +1746,6 @@ export class VoxelRenderer {
     const position = this.camera.position.clone()
     this.controls.dispose()
     this.camera = this.createCamera(projection)
-    this.renderPass.camera = this.camera
-    this.composer.removePass(this.ambientOcclusionPass)
-    this.ambientOcclusionPass.dispose()
-    this.ambientOcclusionPass = this.createAmbientOcclusionPass()
-    this.composer.insertPass(this.ambientOcclusionPass, 1)
     this.camera.position.copy(position)
     this.controls = this.createControls(this.camera)
     this.controls.target.copy(this.focusCenter())
@@ -1619,7 +1767,7 @@ export class VoxelRenderer {
       this.limits.geometry.dispose()
       ;(this.limits.material as THREE.Material).dispose()
     }
-    if (this.ground) { this.scene.remove(this.ground); this.ground.geometry.dispose() }
+    if (this.ground) { this.scene.remove(this.ground); this.ground.geometry.dispose(); (this.ground.material as THREE.Material).dispose() }
     const size = Math.max(32, this.document.dimensions.x, this.document.dimensions.z)
     this.grid = new THREE.Group()
     const gridNormals: Vec3[] = [
@@ -1650,20 +1798,29 @@ export class VoxelRenderer {
     this.scene.add(this.grid, this.limits)
     this.ground = new THREE.Mesh(
       new THREE.PlaneGeometry(size * 2, size * 2),
-      new THREE.MeshStandardMaterial({ color: this.settings.background, roughness: 1 }),
+      new THREE.MeshStandardMaterial({ color: this.settings.background, roughness: 1, envMap: this.environmentTarget.texture, envMapIntensity: 0 }),
     )
     this.ground.rotation.x = -Math.PI / 2
-    this.ground.position.y = -0.01
+    this.ground.position.y = -0.03
     this.ground.receiveShadow = true
     this.ground.visible = this.renderMode
     this.scene.add(this.ground)
-    const shadowSize = Math.max(this.document.dimensions.x, this.document.dimensions.z) * 0.85
-    const shadowCamera = this.sunlight.shadow.camera as THREE.OrthographicCamera
-    shadowCamera.left = -shadowSize; shadowCamera.right = shadowSize; shadowCamera.top = shadowSize; shadowCamera.bottom = -shadowSize
-    shadowCamera.near = 0.1; shadowCamera.far = Math.max(600, this.document.dimensions.y * 5)
-    shadowCamera.updateProjectionMatrix()
     this.sunlightTarget.position.set(0, this.document.dimensions.y / 3, 0)
     this.setSettings(this.settings)
+  }
+
+  private fitShadowCamera() {
+    this.sunlight.updateMatrixWorld(true)
+    this.sunlightTarget.updateMatrixWorld(true)
+    this.sunlight.shadow.updateMatrices(this.sunlight)
+    const camera = this.sunlight.shadow.camera
+    const { x, y, z } = this.document.dimensions
+    const size = Math.max(32, x, z)
+    const bounds = new THREE.Box3(new THREE.Vector3(-size, -0.03, -size), new THREE.Vector3(size, y, size)).applyMatrix4(camera.matrixWorldInverse)
+    const values = [bounds.min.x - 1, bounds.max.x + 1, bounds.max.y + 1, bounds.min.y - 1, Math.max(0.1, -bounds.max.z - 1), -bounds.min.z + 1]
+    if (values.some((value, index) => value !== [camera.left, camera.right, camera.top, camera.bottom, camera.near, camera.far][index])) this.renderer.shadowMap.needsUpdate = true
+    ;[camera.left, camera.right, camera.top, camera.bottom, camera.near, camera.far] = values
+    camera.updateProjectionMatrix()
   }
 
   frameModel() {
@@ -1711,7 +1868,10 @@ export class VoxelRenderer {
     const width = Math.max(1, this.host.clientWidth)
     const height = Math.max(1, this.host.clientHeight)
     const aspect = width / height
-    this.renderer.setSize(width, height, false)
+    const pixelRatio = Math.min(devicePixelRatio, 2)
+    const size = this.renderer.getSize(new THREE.Vector2())
+    if (this.renderer.getPixelRatio() !== pixelRatio) this.renderer.setPixelRatio(pixelRatio)
+    if (size.x !== width || size.y !== height) this.renderer.setSize(width, height, false)
     if (this.camera instanceof THREE.PerspectiveCamera) this.camera.aspect = aspect
     else {
       this.camera.left = -this.orthographicSpan * aspect / 2
@@ -1720,9 +1880,8 @@ export class VoxelRenderer {
       this.camera.bottom = -this.orthographicSpan / 2
     }
     this.camera.updateProjectionMatrix()
-    this.composer.setSize(width, height)
-    const aoScale = this.renderer.getPixelRatio() * 0.5
-    this.ambientOcclusionPass.setSize(Math.max(1, Math.round(width * aoScale)), Math.max(1, Math.round(height * aoScale)))
+    this.renderer.getDrawingBufferSize(size)
+    this.raster.setSize(size.x, size.y)
     this.cameraChanged()
   }
 
@@ -1751,36 +1910,39 @@ export class VoxelRenderer {
     }, 750)
   }
 
-  private renderRaster(camera = this.camera, composer = this.composer) {
-    // ponytail: material-level depth order suits layered voxels; intersecting media need depth peeling.
-    this.model.updateMatrixWorld(true)
-    camera.updateMatrixWorld(true)
-    const bounds = new Map<THREE.Material, THREE.Box3>()
-    const box = new THREE.Box3()
-    const center = new THREE.Vector3()
-    const frustum = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse))
-    this.model.traverse(object => {
-      if (!(object instanceof THREE.Mesh) || !(object.material instanceof THREE.MeshPhysicalMaterial) || object.material.transmission === 0) return
-      box.copy(object.geometry.boundingBox!).applyMatrix4(object.matrixWorld)
-      if (!frustum.intersectsBox(box)) return
-      const materialBounds = bounds.get(object.material) ?? new THREE.Box3()
-      materialBounds.union(box)
-      bounds.set(object.material, materialBounds)
-    })
-    this.transmissionDepths.clear()
-    for (const [material, box] of bounds) this.transmissionDepths.set(material, box.getCenter(center).project(camera).z)
-    this.lastTransmissionMaterial = undefined
-    composer.render()
-    if (composer === this.composer) this.recordFrame()
+  private renderRaster(camera = this.camera, raster = this.raster) {
+    if (this.contextLost) return
+    raster.render(camera)
+    this.rasterError = undefined
+    if (raster === this.raster) {
+      this.presentationDirty = false
+      if (!this.pathTracingEnabled()) this.recordFrame()
+    }
   }
 
   render() {
-    if (!this.pathTracingEnabled() || !this.pathTracingReady) this.renderRaster()
+    if (this.contextLost || this.pathTracingEnabled() && this.pathTracingReady) return
+    this.presentationDirty = true
+    if (this.rasterFrame !== undefined) return
+    this.rasterFrame = requestAnimationFrame(() => {
+      this.rasterFrame = undefined
+      if (this.pathTracingEnabled() && this.pathTracingReady) return
+      try { this.renderRaster() }
+      catch (error) {
+        if (this.renderer.getContext().isContextLost()) return
+        const message = error instanceof Error ? error.message : 'Realtime rendering failed.'
+        if (message !== this.rasterError) this.callbacks.onError(message)
+        this.rasterError = message
+      }
+    })
   }
 
   async capture() {
     await this.whenMeshIdle()
-    this.render()
+    if (this.contextLost || this.renderer.getContext().isContextLost()) throw new Error('Cannot capture while the graphics context is lost.')
+    if (this.rasterFrame !== undefined) cancelAnimationFrame(this.rasterFrame)
+    this.rasterFrame = undefined
+    if (this.presentationDirty || !this.pathTracingEnabled() || !this.pathTracingReady) this.renderRaster()
     const view = this.getView()
     const blob = await new Promise<Blob>((resolve, reject) => this.renderer.domElement.toBlob(blob => blob ? resolve(blob) : reject(new Error('Could not capture the viewport.')), 'image/png'))
     return { blob, view }
@@ -1803,16 +1965,9 @@ export class VoxelRenderer {
       const center = box.getCenter(new THREE.Vector3())
       const distance = box.getSize(new THREE.Vector3()).length() + 1
       const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, distance * 3)
-      const composer = new EffectComposer(this.renderer, new THREE.WebGLRenderTarget(512, 512, { type: THREE.HalfFloatType }))
-      composer.setPixelRatio(1)
-      composer.setSize(512, 512)
-      composer.renderToScreen = false
-      const renderPass = new RenderPass(this.scene, camera)
-      const ao = this.createAmbientOcclusionPass(camera)
-      const output = new OutputPass()
-      composer.addPass(renderPass)
-      composer.addPass(ao)
-      composer.addPass(output)
+      const raster = new RasterPipeline(this.renderer, this.scene, { ambientOcclusion: this.settings.ambientOcclusion })
+      raster.setSize(512, 512)
+      raster.renderToScreen = false
       const visibility = new Map<THREE.Object3D, boolean>()
       const target = this.renderer.getRenderTarget()
       const viewport = this.renderer.getViewport(new THREE.Vector4())
@@ -1840,9 +1995,9 @@ export class VoxelRenderer {
           camera.left = camera.bottom = -extent
           camera.right = camera.top = extent
           camera.updateProjectionMatrix()
-          this.renderRaster(camera, composer)
+          this.renderRaster(camera, raster)
           const pixels = new Uint16Array(512 * 512 * 4)
-          this.renderer.readRenderTargetPixels(composer.readBuffer, 0, 0, 512, 512, pixels)
+          this.renderer.readRenderTargetPixels(raster.readBuffer, 0, 0, 512, 512, pixels)
           const rgba = new Uint8ClampedArray(pixels.length)
           for (let y = 0; y < 512; y++) for (let x = 0; x < 2048; x++) rgba[(511 - y) * 2048 + x] = Math.round(THREE.DataUtils.fromHalfFloat(pixels[y * 2048 + x]) * 255)
           const canvas = new OffscreenCanvas(512, 512)
@@ -1855,15 +2010,7 @@ export class VoxelRenderer {
         this.renderer.setViewport(viewport)
         this.renderer.setScissor(scissor)
         this.renderer.setScissorTest(scissorTest)
-        this.transmissionDepths.clear()
-        this.lastTransmissionMaterial = undefined
-        renderPass.dispose()
-        ao.dispose()
-        // GTAOPass.dispose in Three 0.185 omits these two owned materials.
-        ao.gtaoMaterial.dispose()
-        ao.blendMaterial.dispose()
-        output.dispose()
-        composer.dispose()
+        raster.dispose()
       }
     }
     return Promise.all(views.map(async name => {

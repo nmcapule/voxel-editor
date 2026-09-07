@@ -53,6 +53,7 @@ export interface ProjectSnapshot {
   name: string
   dimensions: Dimensions
   palette: number[]
+  paletteOccupied?: number[]
   materials: PaletteMaterial[]
   layers: VoxelLayer[]
   activeLayerId: number
@@ -314,6 +315,7 @@ export function encodeProjectSnapshot(document: VoxelDocument, settings: ViewSet
     name: document.name,
     dimensions: { ...document.dimensions },
     palette: [...document.palette],
+    paletteOccupied: Array.from(document.palette, (_color, index) => Number(document.hasPaletteColor(index))),
     materials: document.materials.map(material => ({ ...material })),
     layers: document.layers.map(layer => ({ ...layer })),
     activeLayerId: document.activeLayerId,
@@ -327,6 +329,12 @@ export function parseProjectSnapshot(value: unknown): ProjectSnapshot {
   if (input.schema !== 'voxel-studio/project' || input.version !== 1) throw new StudioCommandError('unsupported_version', 'Unsupported project snapshot.')
   const palette = Array.isArray(input.palette) ? input.palette.map((color, index) => integer(color, `snapshot.palette[${index}]`, 0, 0xffffff)) : []
   if (palette.length !== 256) throw invalid('snapshot.palette must contain 256 colors.')
+  const paletteOccupied = optional(input.paletteOccupied, value => {
+    if (!Array.isArray(value) || value.length !== 256) throw invalid('snapshot.paletteOccupied must contain 256 occupancy flags.')
+    const flags = Array.from(value, (flag, index) => integer(flag, `snapshot.paletteOccupied[${index}]`, 0, 1))
+    if (flags[0] !== 0) throw invalid('snapshot.paletteOccupied[0] must be 0 (empty).')
+    return flags
+  })
   if (!Array.isArray(input.materials) || input.materials.length !== 256) throw invalid('snapshot.materials must contain 256 materials.')
   const materials = input.materials.map((material, index) => {
     const parsed = materialPatch(material)
@@ -376,6 +384,7 @@ export function parseProjectSnapshot(value: unknown): ProjectSnapshot {
     name: stringValue(input.name, 'snapshot.name', 60, true),
     dimensions: parsedDimensions,
     palette,
+    paletteOccupied,
     materials,
     layers,
     activeLayerId,
@@ -394,7 +403,7 @@ function parseSettings(value: unknown): ViewSettings {
 
 export function decodeProjectSnapshot(value: unknown) {
   const snapshot = parseProjectSnapshot(value)
-  const document = new VoxelDocument(snapshot.dimensions, snapshot.name, snapshot.palette, snapshot.materials, snapshot.layers, snapshot.activeLayerId)
+  const document = new VoxelDocument(snapshot.dimensions, snapshot.name, snapshot.palette, snapshot.materials, snapshot.layers, snapshot.activeLayerId, snapshot.paletteOccupied)
   const chunks = new Map<number, { layerId: number; data: Uint8Array }[]>()
   for (const chunk of snapshot.chunks) {
     const layers = chunks.get(chunk.id) ?? []

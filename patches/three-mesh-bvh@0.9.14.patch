@@ -1,0 +1,78 @@
+diff --git a/build/index.umd.cjs b/build/index.umd.cjs
+index 5266fe6819ae991058d2672a41dc6a2e031e5fcb..a401ea137e2a0594b9ac9b6d5256e89497681374 100644
+--- a/build/index.umd.cjs
++++ b/build/index.umd.cjs
+@@ -11659,7 +11659,8 @@ bool intersectTriangles(
+ 
+ 		if (
+ 			intersectsTriangle( rayOrigin, rayDirection, a, b, c, localBarycoord, localNormal, localDist, localSide )
+-			&& localDist < minDistance
++			// Resolve coincident opposing faces independently of BVH traversal order.
++			&& ( localDist < minDistance || ( localDist == minDistance && localSide > side ) )
+ 		) {
+ 
+ 			found = true;
+diff --git a/src/webgl/glsl/bvh_ray_functions.glsl.js b/src/webgl/glsl/bvh_ray_functions.glsl.js
+index c529750c666ea8fc22c20962d1b7a11470d75854..5503036c787fcbb189859fe31e0e5a9aba18ecc3 100644
+--- a/src/webgl/glsl/bvh_ray_functions.glsl.js
++++ b/src/webgl/glsl/bvh_ray_functions.glsl.js
+@@ -104,7 +104,8 @@ bool intersectTriangles(
+ 
+ 		if (
+ 			intersectsTriangle( rayOrigin, rayDirection, a, b, c, localBarycoord, localNormal, localDist, localSide )
+-			&& localDist < minDistance
++			// Resolve coincident opposing faces independently of BVH traversal order.
++			&& ( localDist < minDistance || ( localDist == minDistance && localSide > side ) )
+ 		) {
+ 
+ 			found = true;
+diff --git a/src/workers/utils/WorkerBase.js b/src/workers/utils/WorkerBase.js
+index 676ec1eb4c208a60f2e6b2631c4524f415aabf1a..836a4be63d5c99489d32eb4faaa6d01c8e7654e5 100644
+--- a/src/workers/utils/WorkerBase.js
++++ b/src/workers/utils/WorkerBase.js
+@@ -4,6 +4,7 @@ export class WorkerBase {
+ 
+ 		this.name = 'WorkerBase';
+ 		this.running = false;
++		this._reject = null;
+ 		this.worker = worker;
+ 		this.worker.onerror = e => {
+ 
+@@ -39,20 +40,32 @@ export class WorkerBase {
+ 
+ 		this.running = true;
+ 
+-		const promise = this.runTask( this.worker, ...args );
+-		promise.finally( () => {
++		const worker = this.worker;
++		const promise = new Promise( ( resolve, reject ) => {
+ 
+-			this.running = false;
++			this._reject = reject;
++			this.runTask( worker, ...args ).then( resolve, reject );
+ 
+ 		} );
++		return promise.finally( () => {
++
++			this.running = false;
++			this._reject = null;
++			worker.onmessage = null;
++			worker.onerror = null;
+ 
+-		return promise;
++		} );
+ 
+ 	}
+ 
+ 	dispose() {
+ 
+-		this.worker.terminate();
++		if ( this._reject ) {
++
++			this._reject( new Error( `${ this.name }: Worker has been disposed.` ) );
++
++		}
++		if ( this.worker ) this.worker.terminate();
+ 		this.worker = null;
+ 
+ 	}

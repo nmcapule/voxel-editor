@@ -25,5 +25,10 @@
     "@types/three": "^0.185.4",
     "typescript": "~6.0.2",
     "vite": "^8.2.0"
+  },
+  "patchedDependencies": {
+    "three-gpu-pathtracer@0.0.24": "patches/three-gpu-pathtracer@0.0.24.patch",
+    "three-mesh-bvh@0.9.14": "patches/three-mesh-bvh@0.9.14.patch",
+    "three@0.185.1": "patches/three@0.185.1.patch"
   }
 }

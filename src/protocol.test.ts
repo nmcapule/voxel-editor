@@ -1,16 +1,49 @@
 import { describe, expect, test } from 'bun:test'
 import { VoxelDocument } from './editor'
 import { inspectionViews } from './inspection'
-import { PROTOCOL, SerialCommandQueue, decodeProjectSnapshot, encodeProjectSnapshot, parseRequest } from './protocol'
-import type { ViewSettings } from './storage'
+import { PROTOCOL, SerialCommandQueue, decodeProjectSnapshot, encodeProjectSnapshot, parseProjectSnapshot, parseRequest } from './protocol'
+import { restoreProjectSnapshot, snapshotProject, type ViewSettings } from './storage'
 
 const settings: ViewSettings = {
   background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42,
-  ambientOcclusion: true, shadows: true, grid: true, faceGrid: false,
+  ambientOcclusion: true, shadows: true, grid: true, faceGrid: false, meshVertices: false,
   projection: 'orthographic', pathTracing: true,
 }
 
 describe('scripting protocol', () => {
+  test('mesh vertices settings updates accept only booleans', () => {
+    const parse = (meshVertices: unknown) => parseRequest({ protocol: PROTOCOL, id: 'vertices', command: { type: 'settings.update', patch: { meshVertices } } }).command
+    for (const meshVertices of [false, true]) {
+      expect(parse(meshVertices)).toEqual({ type: 'settings.update', patch: { meshVertices } })
+    }
+    for (const value of [null, 0, 1, 'false', 'true', [], {}]) {
+      expect(() => parse(value)).toThrow('command.patch.meshVertices must be a boolean')
+    }
+  })
+
+  test('mesh vertices round-trip through snapshots and default to false in older projects', () => {
+    const document = new VoxelDocument()
+    const enabled = { ...settings, meshVertices: true }
+    const snapshot = encodeProjectSnapshot(document, enabled)
+    expect(parseProjectSnapshot(snapshot).settings).toEqual(enabled)
+    const decoded = decodeProjectSnapshot(JSON.parse(JSON.stringify(snapshot)))
+    expect(decoded.settings).toEqual(enabled)
+    expect(encodeProjectSnapshot(decoded.document, decoded.settings)).toEqual(snapshot)
+    const stored = snapshotProject(document, enabled)
+    expect(restoreProjectSnapshot(structuredClone(stored))!.settings).toEqual(enabled)
+
+    Reflect.deleteProperty(snapshot.settings, 'meshVertices')
+    expect(parseProjectSnapshot(snapshot).settings).toEqual(settings)
+    expect(decodeProjectSnapshot(snapshot).settings).toEqual(settings)
+    Reflect.deleteProperty(stored.settings, 'meshVertices')
+    for (const version of [1, 2, 3] as const) {
+      expect(restoreProjectSnapshot({ ...stored, version })!.settings).toEqual(settings)
+    }
+    for (const meshVertices of [null, 0, 1, 'false', 'true', [], {}]) {
+      expect(() => parseProjectSnapshot({ ...snapshot, settings: { ...snapshot.settings, meshVertices } })).toThrow('meshVertices')
+    }
+  })
+
   test('validates inspection views while leaving omitted defaults to the renderer', () => {
     const parse = (command: unknown) => parseRequest({ protocol: PROTOCOL, id: 'inspect', command }).command
     expect(parse({ type: 'view.inspect' })).toEqual({ type: 'view.inspect', views: undefined })

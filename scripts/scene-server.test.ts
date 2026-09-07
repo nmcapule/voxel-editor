@@ -20,7 +20,7 @@ model.materials[80] = { name: 'Glass', roughness: 0.12, metalness: 0.3, emissive
 model.replaceChunk(0, [{ layerId: 1, data: bytes }])
 const project = encodeProjectSnapshot(model, {
   background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42,
-  ambientOcclusion: true, shadows: true, grid: true, faceGrid: false,
+  ambientOcclusion: true, shadows: true, grid: true, faceGrid: false, meshVertices: false,
   projection: 'orthographic', pathTracing: true,
 })
 function fixture(): SceneManifest {

@@ -48,7 +48,7 @@ function settings(value: unknown): ViewSettings {
   for (const key of ['background', 'ambient', 'light', 'lightAzimuth', 'ambientOcclusion', 'shadows', 'grid', 'faceGrid', 'projection', 'pathTracing']) {
     if (parsed.patch[key as keyof ViewSettings] === undefined) invalid(`Missing scene setting: ${key}.`)
   }
-  return parsed.patch as ViewSettings
+  return { meshVertices: false, ...parsed.patch } as ViewSettings
 }
 function bounds(value: unknown, dimensions: Vec3): SceneBounds {
   const v = object(value, 'min max')

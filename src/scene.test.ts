@@ -9,7 +9,7 @@ import type { ViewSettings } from './storage'
 
 const settings: ViewSettings = {
   background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42,
-  ambientOcclusion: true, shadows: true, grid: true, faceGrid: false,
+  ambientOcclusion: true, shadows: true, grid: true, faceGrid: false, meshVertices: false,
   projection: 'orthographic', pathTracing: true,
 }
 const hash = 'a'.repeat(64)

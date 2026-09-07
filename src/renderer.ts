@@ -371,6 +371,7 @@ export class VoxelRenderer {
   private ambientEnvironment: THREE.DataTexture
   private materials: THREE.MeshPhysicalMaterial[]
   private faceGridMaterial = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.46, depthWrite: false, toneMapped: false })
+  private meshVerticesMaterial = new THREE.PointsMaterial({ size: 5, sizeAttenuation: false, depthWrite: false, toneMapped: false })
   private model = new THREE.Group()
   private chunkMeshes = new Map<number, THREE.Group>()
   private chunkQuads = new Map<number, number>()
@@ -1295,6 +1296,15 @@ export class VoxelRenderer {
       this.removeChunk(result.id)
       if (!result.positions.length) continue
       const chunkMesh = new THREE.Group()
+      // Draw the post-merge positions once each, without the surface's triangle indices.
+      const verticesGeometry = new THREE.BufferGeometry()
+      verticesGeometry.setAttribute('position', new THREE.BufferAttribute(result.positions, 3))
+      const vertices = new THREE.Points(verticesGeometry, this.meshVerticesMaterial)
+      vertices.userData.meshVertices = true
+      vertices.userData.editorOverlay = true
+      vertices.visible = this.settings.meshVertices && !this.renderMode
+      vertices.renderOrder = 2
+      chunkMesh.add(vertices)
       for (const group of result.groups) {
         const geometry = new THREE.BufferGeometry()
         const start = group.vertexStart, end = start + group.vertexCount
@@ -1353,7 +1363,7 @@ export class VoxelRenderer {
   private removeChunk(id: number) {
     const chunk = this.chunkMeshes.get(id)
     if (chunk) {
-      chunk.traverse(child => { if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) child.geometry.dispose() })
+      chunk.traverse(child => { if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments || child instanceof THREE.Points) child.geometry.dispose() })
       this.model.remove(chunk)
       this.chunkMeshes.delete(id)
       this.renderer.shadowMap.needsUpdate = true
@@ -1803,7 +1813,7 @@ export class VoxelRenderer {
     if (this.selectionPreview) this.selectionPreview.visible = !enabled && !this.sceneContent
     this.updateWorkspaceGridVisibility()
     if (this.limits) this.limits.visible = this.settings.grid && !enabled
-    this.updateFaceGridVisibility()
+    this.updateMeshOverlayVisibility()
     if (this.ground) this.ground.visible = enabled
     this.sceneContent?.onViewportChange()
     if (enabled && this.settings.pathTracing) {
@@ -1834,6 +1844,7 @@ export class VoxelRenderer {
     this.scene.background = background
     const luminance = background.r * 0.2126 + background.g * 0.7152 + background.b * 0.0722
     this.faceGridMaterial.color.setHex(luminance > 0.35 ? 0x20262c : 0xf9faf8)
+    this.meshVerticesMaterial.color.copy(this.faceGridMaterial.color)
     this.hemisphere.intensity = settings.ambient
     this.scene.environmentIntensity = settings.ambient / Math.PI
     this.sunlight.intensity = settings.light
@@ -1841,7 +1852,7 @@ export class VoxelRenderer {
     this.renderer.shadowMap.enabled = settings.shadows
     this.updateWorkspaceGridVisibility()
     if (this.limits) this.limits.visible = settings.grid && !this.renderMode
-    this.updateFaceGridVisibility()
+    this.updateMeshOverlayVisibility()
     if (this.ground) {
       this.ground.visible = this.renderMode
       ;(this.ground.material as THREE.MeshStandardMaterial).color.set(settings.background).offsetHSL(0, -0.04, -0.035)
@@ -1881,9 +1892,11 @@ export class VoxelRenderer {
     this.render()
   }
 
-  private updateFaceGridVisibility() {
-    const visible = this.settings.faceGrid && !this.renderMode
-    this.model.traverse(child => { if (child.userData.faceGrid) child.visible = visible })
+  private updateMeshOverlayVisibility() {
+    this.model.traverse(child => {
+      if (child.userData.faceGrid) child.visible = this.settings.faceGrid && !this.renderMode
+      if (child.userData.meshVertices) child.visible = this.settings.meshVertices && !this.renderMode
+    })
   }
 
   private updateWorkspaceGridVisibility() {
@@ -2373,7 +2386,7 @@ export class VoxelRenderer {
         for (const object of [this.grid, this.limits, this.ground, this.hover, this.marqueePreview, this.selectionPreview, this.fillPreview, this.pushPullPreview]) {
           if (object) visibility.set(object, object.visible)
         }
-        this.model.traverse(object => { if (object.userData.faceGrid) visibility.set(object, object.visible) })
+        this.model.traverse(object => { if (object.userData.faceGrid || object.userData.meshVertices) visibility.set(object, object.visible) })
         for (const object of visibility.keys()) object.visible = false
         for (const name of isometric) {
           const x = name.endsWith('right') ? 1 : -1

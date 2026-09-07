@@ -18,6 +18,7 @@ const DEFAULT_SETTINGS: ViewSettings = {
   shadows: true,
   grid: true,
   faceGrid: false,
+  meshVertices: false,
   projection: 'orthographic',
   pathTracing: true,
 }
@@ -321,6 +322,7 @@ app.innerHTML = `
         <label class="toggle-row"><span>Ground shadows</span><input id="shadows" type="checkbox"></label>
         <label class="toggle-row"><span>Editing grid</span><input id="grid" type="checkbox"></label>
         <label class="toggle-row"><span>Voxel face grid</span><input id="face-grid" type="checkbox"></label>
+        <label class="toggle-row" title="Show the merged mesh's vertices in edit mode"><span>Mesh vertices</span><input id="mesh-vertices" type="checkbox"></label>
         <button type="button" class="primary full" data-action="capture">${icon('camera')} Capture PNG</button>
       </section>
     </aside>
@@ -952,6 +954,7 @@ function renderSettings() {
   document.querySelector<HTMLInputElement>('#shadows')!.checked = settings.shadows
   document.querySelector<HTMLInputElement>('#grid')!.checked = settings.grid
   document.querySelector<HTMLInputElement>('#face-grid')!.checked = settings.faceGrid
+  document.querySelector<HTMLInputElement>('#mesh-vertices')!.checked = settings.meshVertices
   document.querySelector<HTMLInputElement>('#path-tracing')!.checked = settings.pathTracing
   document.querySelector('#ambient-output')!.textContent = settings.ambient.toFixed(1)
   document.querySelector('#light-output')!.textContent = settings.light.toFixed(1)
@@ -1488,6 +1491,7 @@ document.querySelector<HTMLElement>('[data-panel="render"]')!.addEventListener('
   if (target.id === 'shadows') patch.shadows = (target as HTMLInputElement).checked
   if (target.id === 'grid') patch.grid = (target as HTMLInputElement).checked
   if (target.id === 'face-grid') patch.faceGrid = (target as HTMLInputElement).checked
+  if (target.id === 'mesh-vertices') patch.meshVertices = (target as HTMLInputElement).checked
   if (target.id === 'path-tracing') patch.pathTracing = (target as HTMLInputElement).checked
   runStudioCommand({ type: 'settings.update', patch })
 })

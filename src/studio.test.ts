@@ -12,6 +12,7 @@ const settings: ViewSettings = {
   shadows: true,
   grid: true,
   faceGrid: false,
+  meshVertices: false,
   projection: 'orthographic',
   pathTracing: true,
 }

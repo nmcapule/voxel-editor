@@ -1,6 +1,6 @@
 // Browser checks, loaded by tests/transparency.ts. Run the suites sequentially.
 // Runtime imports are deferred so merely opening the harness does not start GPU checks.
-import type { Camera, DirectionalLight, InstancedMesh, Mesh, Object3D, WebGLRenderer, WebGLRenderTarget } from 'three'
+import type { Camera, DirectionalLight, InstancedMesh, Mesh, Object3D, Points, WebGLRenderer, WebGLRenderTarget } from 'three'
 import type { VoxelDocument } from '../src/editor'
 import type { VoxelRenderer } from '../src/renderer'
 import type { ViewSettings } from '../src/storage'
@@ -95,7 +95,7 @@ async function withViewport<T>(renderer: VoxelRenderer, size: number, run: () =>
 export async function runRenderingChecks(renderer: VoxelRenderer, settings: ViewSettings, errors: string[]) {
   const [{ VoxelDocument }, THREE] = await Promise.all([import('../src/editor'), import('three')])
   return withViewport(renderer, 512, async () => {
-    const baseline: ViewSettings = { ...settings, projection: 'orthographic', pathTracing: false, ambientOcclusion: false, shadows: false, grid: false, faceGrid: false }
+    const baseline: ViewSettings = { ...settings, projection: 'orthographic', pathTracing: false, ambientOcclusion: false, shadows: false, grid: false, faceGrid: false, meshVertices: false }
     const webgl = Reflect.get(renderer, 'renderer') as WebGLRenderer
     const errorStart = errors.length
     const counters = { raster: 0, webgl: 0, workerMessages: 0, meshJobs: 0, gridJobs: 0 }
@@ -442,6 +442,47 @@ export async function runRenderingChecks(renderer: VoxelRenderer, settings: View
         const maxX = bounds.max.x
         check(maxX === 7 - document.dimensions.x / 2, 'Regenerated grid must cover the newly added voxel, not cached old geometry')
         return { initial: jobs.slice(start, reusable), edit: jobs.slice(edit, regenerate), regenerate: jobs.slice(regenerate), maxX }
+      })
+
+      await run('mesh vertices show merged corners with occlusion and reuse geometry without worker jobs', async () => {
+        const document = fixture()
+        fill(document, 42, 6, 5, 18, 14, 13, 19)
+        document.setVoxel(9, 8, 14, 42) // Hidden behind the merged front face.
+        await load(document)
+        const model = Reflect.get(renderer, 'model') as Object3D
+        const markers = () => {
+          const points: Points[] = []
+          model.traverse(object => { if (object.userData.meshVertices) points.push(object as Points) })
+          return points
+        }
+        const geometries = markers().map(points => points.geometry)
+        check(geometries.length === 2 && geometries.every(geometry => geometry.index === null && geometry.attributes.position.count === 24), 'Each merged box needs 24 face-corner entries, not per-voxel corners or triangle indices')
+        const before = await image(renderer)
+        const start = jobs.length
+        renderer.setSettings({ ...baseline, meshVertices: true })
+        const after = await image(renderer)
+        const corner = difference(at(before, 6, 5, 19, 4), at(after, 6, 5, 19, 4))
+        const hidden = difference(at(before, 9, 8, 15, 4), at(after, 9, 8, 15, 4))
+        const interior = difference(at(before, 10, 9, 19, 4), at(after, 10, 9, 19, 4))
+        check(corner.max > 30, 'Merged surface corners must have visible point markers')
+        check(hidden.max <= 2 && interior.max <= 2, 'Occluded vertices and interior voxel corners must not produce markers')
+        renderer.setSettings(baseline)
+        check(markers().every(points => !points.visible), 'Disabling mesh vertices must hide all points')
+        check(difference(before.data, (await image(renderer)).data).max <= 2, 'Disabling vertices must restore original pixels')
+        renderer.setSettings({ ...baseline, meshVertices: true })
+        renderer.setRenderMode(true)
+        check(markers().every(points => !points.visible), 'Render mode must hide mesh vertices')
+        renderer.setRenderMode(false)
+        check(markers().every(points => points.visible && geometries.includes(points.geometry)), 'Returning to editing must restore cached markers')
+        check(jobs.length === start, 'Vertex toggles must not send mesh or grid jobs')
+        fill(document, 42, 14, 5, 18, 15, 13, 19)
+        renderer.markDirty(document.chunks.keys())
+        await renderer.whenMeshIdle()
+        check(markers().every(points => points.visible && !geometries.includes(points.geometry)), 'Edited chunks must replace their visible markers')
+        const bounds = new THREE.Box3()
+        for (const points of markers()) bounds.expandByObject(points)
+        check(bounds.max.x === 15 - document.dimensions.x / 2, 'Updated vertex bounds must include the extended merged face')
+        return { corner, hidden, interior }
       })
 
       await run('push preview capacity follows requested cells, not maximum range', async () => {

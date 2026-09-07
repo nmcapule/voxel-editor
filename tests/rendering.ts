@@ -1,9 +1,9 @@
 // Browser checks, loaded by tests/transparency.ts. Run the suites sequentially.
 // Runtime imports are deferred so merely opening the harness does not start GPU checks.
-import type { Camera, DirectionalLight, InstancedMesh, LineSegments, Mesh, Object3D, Points, WebGLRenderer, WebGLRenderTarget } from 'three'
-import type { VoxelDocument } from '../src/editor'
-import type { VoxelRenderer } from '../src/renderer'
-import type { ViewSettings } from '../src/storage'
+import type { DirectionalLight, InstancedMesh, LineSegments, Mesh, Object3D, Points, WebGLRenderTarget } from 'three'
+import type { VoxelDocument } from '../src/shared/voxel/document'
+import type { VoxelRenderer } from '../src/editors/model/renderer'
+import type { ViewSettings } from '../src/shared/rendering/settings'
 
 function check(condition: unknown, message: string) {
   if (!condition) throw new Error(message)
@@ -57,12 +57,13 @@ function fill(document: VoxelDocument, material: number, x0: number, y0: number,
 }
 
 async function withViewport<T>(renderer: VoxelRenderer, size: number, run: () => Promise<T>) {
-  const host = Reflect.get(renderer, 'host') as HTMLElement
-  const webgl = Reflect.get(renderer, 'renderer') as WebGLRenderer
+  const viewport = renderer.viewport
+  const host = Reflect.get(viewport, 'host') as HTMLElement
+  const webgl = viewport.renderer
   const saved = {
     document: Reflect.get(renderer, 'document') as VoxelDocument,
-    settings: { ...Reflect.get(renderer, 'settings') } as ViewSettings,
-    view: renderer.getView(), renderMode: Reflect.get(renderer, 'renderMode') as boolean,
+    settings: { ...viewport.settings },
+    view: renderer.getView(), renderMode: viewport.renderMode,
     width: host.style.width, height: host.style.height, ratio: webgl.getPixelRatio(),
     selection: [...(Reflect.get(renderer, 'selection') as Map<number, { x: number; y: number; z: number }>).values()],
     floating: Reflect.get(renderer, 'floatingSelection') as boolean,
@@ -93,10 +94,11 @@ async function withViewport<T>(renderer: VoxelRenderer, size: number, run: () =>
 }
 
 export async function runRenderingChecks(renderer: VoxelRenderer, settings: ViewSettings, errors: string[]) {
-  const [{ VoxelDocument }, THREE] = await Promise.all([import('../src/editor'), import('three')])
+  const viewport = renderer.viewport
+  const [{ VoxelDocument }, THREE] = await Promise.all([import('../src/shared/voxel/document'), import('three')])
   return withViewport(renderer, 512, async () => {
     const baseline: ViewSettings = { ...settings, projection: 'orthographic', pathTracing: false, ambientOcclusion: false, shadows: false, grid: false, faceGrid: false, meshVertices: false, meshTriangles: false }
-    const webgl = Reflect.get(renderer, 'renderer') as WebGLRenderer
+    const webgl = viewport.renderer
     const errorStart = errors.length
     const counters = { raster: 0, webgl: 0, workerMessages: 0, meshJobs: 0, gridJobs: 0 }
     const jobs: { type: string; count: number }[] = []
@@ -111,7 +113,7 @@ export async function runRenderingChecks(renderer: VoxelRenderer, settings: View
       })
       restores.push(() => descriptor ? Object.defineProperty(target, key, descriptor) : Reflect.deleteProperty(target, key))
     }
-    watch(renderer, 'renderRaster', () => counters.raster++)
+    watch(viewport, 'renderRaster', () => counters.raster++)
     watch(webgl, 'render', () => counters.webgl++)
     watch(Worker.prototype, 'postMessage', ([data]) => {
       counters.workerMessages++
@@ -150,7 +152,7 @@ export async function runRenderingChecks(renderer: VoxelRenderer, settings: View
     }
     const at = (pixels: ImageData, x: number, y: number, z: number, radius = 8) => {
       const document = Reflect.get(renderer, 'document') as VoxelDocument
-      const camera = Reflect.get(renderer, 'camera') as Camera
+      const camera = viewport.camera
       camera.updateMatrixWorld(true)
       const point = new THREE.Vector3(x - document.dimensions.x / 2, y, z - document.dimensions.z / 2).project(camera)
       return patch(pixels, (point.x + 1) * pixels.width / 2, (1 - point.y) * pixels.height / 2, radius)
@@ -270,13 +272,13 @@ export async function runRenderingChecks(renderer: VoxelRenderer, settings: View
             renderer.setView({ position: { x, y, z }, target: { x: 0, y: 6, z: 0 }, up: { x: 0, y: 1, z: 0 }, fov: 35, zoom: 1, orthographicSpan: 92 })
             await image(renderer)
             // Read before FXAA so even a single dropped pixel fails instead of being blurred away.
-            const beauty = Reflect.get(Reflect.get(renderer, 'raster'), 'beauty') as WebGLRenderTarget
+            const beauty = Reflect.get(Reflect.get(viewport, 'raster'), 'beauty') as WebGLRenderTarget
             const pixels = new Uint16Array(beauty.width * beauty.height * 4)
             webgl.readRenderTargetPixels(beauty, 0, 0, beauty.width, beauty.height, pixels)
             let probes = 0
             for (let py = 0; py < beauty.height; py++) for (let px = 0; px < beauty.width; px++) {
               ndc.set((px + 0.5) / beauty.width * 2 - 1, (py + 0.5) / beauty.height * 2 - 1)
-              ray.setFromCamera(ndc, Reflect.get(renderer, 'camera'))
+              ray.setFromCamera(ndc, viewport.camera)
               if (!ray.ray.intersectPlane(plane, point) || Math.abs(point.x) > 30 || Math.abs(point.z) > 30) continue
               const red = THREE.DataUtils.fromHalfFloat(pixels[(py * beauty.width + px) * 4])
               check(red > 0.5, `${projection}, opacity ${opacity}, camera (${x},${y},${z}): water hole at pixel (${px},${py}), red=${red}`)
@@ -290,7 +292,7 @@ export async function runRenderingChecks(renderer: VoxelRenderer, settings: View
       })
 
       await run('transparent layers one float depth step apart remain distinct', async () => {
-        const { RasterPipeline } = await import('../src/raster-pipeline')
+        const { RasterPipeline } = await import('../src/shared/rendering/raster-pipeline')
         const scene = new THREE.Scene()
         scene.background = new THREE.Color(0)
         const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
@@ -338,7 +340,7 @@ export async function runRenderingChecks(renderer: VoxelRenderer, settings: View
         await load(document, { ambientOcclusion: true })
         renderer.setView({ position: { x: 22, y: 21, z: 27 }, target: { x: 0, y: 2, z: 0 }, up: { x: 0, y: 1, z: 0 }, orthographicSpan: 26 })
         const readAO = () => {
-          const raster = Reflect.get(renderer, 'raster')
+          const raster = Reflect.get(viewport, 'raster')
           check(raster?.ambientOcclusion?.enabled, 'RasterPipeline AO must be enabled')
           const target = raster.ambientOcclusion.pdRenderTarget as WebGLRenderTarget
           const raw = new Uint16Array(target.width * target.height * 4)
@@ -376,7 +378,7 @@ export async function runRenderingChecks(renderer: VoxelRenderer, settings: View
         const document = fixture({ x: 16, y: 256, z: 16 })
         for (const [x, y, z] of [[0, 0, 0], [15, 0, 15], [0, 255, 15], [15, 255, 0]]) document.setVoxel(x, y, z, 42)
         await load(document, { shadows: true })
-        const sunlight = Reflect.get(renderer, 'sunlight') as DirectionalLight
+        const sunlight = Reflect.get(viewport, 'sunlight') as DirectionalLight
         const model = Reflect.get(renderer, 'model') as Object3D
         const bounds = new THREE.Box3().setFromObject(model)
         let corners = 0
@@ -501,7 +503,7 @@ export async function runRenderingChecks(renderer: VoxelRenderer, settings: View
         renderer.setSettings({ ...baseline, meshTriangles: true })
         const after = await image(renderer)
         const diagonal = difference(at(before, 10, 9, 19, 3), at(after, 10, 9, 19, 3))
-        check(!Reflect.get(renderer, 'raster').antialias, 'Triangle inspection must keep pixel-wide edges sharp')
+        check(!Reflect.get(viewport, 'raster').antialias, 'Triangle inspection must keep pixel-wide edges sharp')
         const hidden = difference(at(before, 9.5, 10.5, 15, 3), at(after, 9.5, 10.5, 15, 3))
         const interior = difference(at(before, 8, 9, 19, 3), at(after, 8, 9, 19, 3))
         check(diagonal.max > 30, 'A merged quad must show its triangle diagonal')
@@ -511,12 +513,12 @@ export async function runRenderingChecks(renderer: VoxelRenderer, settings: View
         renderer.setSettings(baseline)
         check(wires().every(lines => !lines.visible), 'Disabling triangles must hide the wireframe')
         check(difference(before.data, (await image(renderer)).data).max <= 2, 'Disabling triangles must restore original pixels')
-        check(Reflect.get(renderer, 'raster').antialias, 'Disabling triangles must restore antialiasing')
+        check(Reflect.get(viewport, 'raster').antialias, 'Disabling triangles must restore antialiasing')
         renderer.setSettings({ ...baseline, meshTriangles: true, meshVertices: true })
         renderer.setRenderMode(true)
         check(wires().every(lines => !lines.visible), 'Render mode must hide triangle overlays')
         await image(renderer)
-        check(Reflect.get(renderer, 'raster').antialias, 'Render mode must retain antialiasing')
+        check(Reflect.get(viewport, 'raster').antialias, 'Render mode must retain antialiasing')
         renderer.setRenderMode(false)
         check(wires().every(lines => lines.visible && geometries.includes(lines.geometry)), 'Triangle toggles must reuse cached geometry')
         check(jobs.length === start, 'Triangle toggles must not send mesher or grid jobs')
@@ -585,23 +587,25 @@ export async function runRenderingChecks(renderer: VoxelRenderer, settings: View
 
 // Controlled RAF and BVH completion: no GPU sampling or real BVH workers.
 export async function runRendererStateChecks(renderer: VoxelRenderer) {
+  const viewport = renderer.viewport
   const { Scene, PerspectiveCamera } = await import('three')
   const makeProbe = (tracer: object) => {
-    const probe = Object.create(Object.getPrototypeOf(renderer))
+    const probe = Object.create(Object.getPrototypeOf(viewport))
     // Carry primitive lifecycle epochs from the current integration, but never
     // borrow its workers, timers or GPU resources for failure/disposal checks.
-    for (const key of Reflect.ownKeys(renderer)) {
-      const value = Reflect.get(renderer, key)
+    for (const key of Reflect.ownKeys(viewport)) {
+      const value = Reflect.get(viewport, key)
       if (value === null || typeof value !== 'object' && typeof value !== 'function') Reflect.set(probe, key, value)
       else if (value instanceof Set) Reflect.set(probe, key, new Set())
       else if (value instanceof Map) Reflect.set(probe, key, new Map())
     }
     const log = { errors: [] as string[], statuses: [] as string[], raster: 0, started: 0 }
     Object.assign(probe, {
-      settings: { ...Reflect.get(renderer, 'settings'), pathTracing: true }, renderMode: true,
+      settings: { ...viewport.settings, pathTracing: true }, renderMode: true,
+      sceneContent: { stage: 'bounded', isReady: () => true },
       renderer: { getContext: () => ({ isContextLost: () => false }) }, scene: new Scene(), camera: new PerspectiveCamera(),
       pathTracer: tracer, pathTracingFrame: undefined, pathTracingReady: false, pathTracingFailed: false,
-      pathTracingBuildRunning: false, pathTracingBuildRequested: false, inFlight: 0, fpsIdleTimer: undefined, rasterFrame: undefined,
+      pathTracingBuildRunning: false, pathTracingBuildRequested: false, fpsIdleTimer: undefined, rasterFrame: undefined,
       callbacks: new Proxy({ onError: (message: string) => log.errors.push(message), onPathTracingStatus: (message: string) => log.statuses.push(message) }, { get: (target, key) => Reflect.get(target, key) ?? (() => {}) }),
       ensurePathTracer: async () => tracer, renderRaster: () => log.raster++, resetFps() {}, recordFrame() {},
     })
@@ -637,12 +641,12 @@ export async function runRendererStateChecks(renderer: VoxelRenderer) {
   const first = stale.probe.buildPathTrace() as Promise<void>
   try {
     await until(() => releases.length === 1, 'first stub scene build')
-    stale.probe.inFlight = 1
+    stale.probe.sceneContent.isReady = () => false
     stale.probe.requestPathTraceRebuild()
     releases[0]()
     await first
     check(!stale.probe.pathTracingReady && stale.log.started === 0, 'Obsolete async geometry must not become ready or start sampling while newer meshes are pending')
-    stale.probe.inFlight = 0
+    stale.probe.sceneContent.isReady = () => true
     stale.probe.requestPathTraceRebuild()
     await until(() => releases.length === 2, 'replacement stub scene build')
     releases[1]()
@@ -658,8 +662,9 @@ export async function runRendererStateChecks(renderer: VoxelRenderer) {
 }
 
 export async function runPathTracingChecks(renderer: VoxelRenderer, settings: ViewSettings, errors: string[], samples = 16) {
+  const viewport = renderer.viewport
   check(Number.isInteger(samples) && samples >= 4 && samples <= 128, 'Use 4-128 actual path-traced samples')
-  const [{ VoxelDocument }, THREE] = await Promise.all([import('../src/editor'), import('three')])
+  const [{ VoxelDocument }, THREE] = await Promise.all([import('../src/shared/voxel/document'), import('three')])
   return withViewport(renderer, 256, async () => {
     const document = new VoxelDocument()
     Object.assign(document.materials[3], { roughness: 1, metalness: 0, opacity: 1, transmission: 0, emissiveIntensity: 0 })
@@ -670,8 +675,8 @@ export async function runPathTracingChecks(renderer: VoxelRenderer, settings: Vi
     await renderer.whenMeshIdle()
     renderer.setView({ position: { x: 20, y: 22, z: 20 }, target: { x: 0, y: 4, z: 0 }, up: { x: 0, y: 1, z: 0 }, zoom: 1, orthographicSpan: 18 })
     renderer.setRenderMode(true)
-    await until(() => Boolean(Reflect.get(renderer, 'pathTracer')) || Reflect.get(renderer, 'pathTracingFailed'), 'tracer initialization', 60000)
-    const tracer = Reflect.get(renderer, 'pathTracer')
+    await until(() => Boolean(Reflect.get(viewport, 'pathTracer')) || Reflect.get(viewport, 'pathTracingFailed'), 'tracer initialization', 60000)
+    const tracer = Reflect.get(viewport, 'pathTracer')
     check(tracer, errors.join('\n') || 'Tracer initialization failed')
     const saved = { stableNoise: tracer.stableNoise, dynamicLowRes: tracer.dynamicLowRes, fadeDuration: tracer.fadeDuration, renderDelay: tracer.renderDelay, renderScale: tracer.renderScale, tiles: tracer.tiles.clone() }
     Object.assign(tracer, { stableNoise: true, dynamicLowRes: false, fadeDuration: 0, renderDelay: 0, renderScale: 1 })
@@ -681,16 +686,16 @@ export async function runPathTracingChecks(renderer: VoxelRenderer, settings: Vi
     try {
       for (const [name, ambient, light] of [['dark', 0, 0], ['ambient only', 1.2, 0], ['directional only', 0, 2.4]] as const) {
         renderer.setSettings({ ...options, ambient, light })
-        if (!Reflect.get(renderer, 'renderMode')) renderer.setRenderMode(true)
+        if (!viewport.renderMode) renderer.setRenderMode(true)
         // Keep the corner probe on the background rather than the lit stage floor.
-        ;(Reflect.get(renderer, 'ground') as Object3D).visible = false
-        Reflect.get(renderer, 'requestPathTraceRebuild').call(renderer)
+        ;(Reflect.get(viewport, 'ground') as Object3D).visible = false
+        viewport.requestPathTraceRebuild()
         await until(() => {
-          check(errors.length === errorStart && !Reflect.get(renderer, 'pathTracingFailed'), errors.slice(errorStart).join('\n') || 'Actual path tracing failed')
-          return Reflect.get(renderer, 'pathTracingReady') && tracer.samples >= samples
+          check(errors.length === errorStart && !Reflect.get(viewport, 'pathTracingFailed'), errors.slice(errorStart).join('\n') || 'Actual path tracing failed')
+          return Reflect.get(viewport, 'pathTracingReady') && tracer.samples >= samples
         }, `${name}: ${samples} real samples`, 180000)
         const pixels = await image(renderer)
-        const camera = Reflect.get(renderer, 'camera') as Camera
+        const camera = viewport.camera
         const point = new THREE.Vector3(0, 8, 0).project(camera)
         const rgb = patch(pixels, (point.x + 1) * pixels.width / 2, (1 - point.y) * pixels.height / 2, 6)
         const background = patch(pixels, 12, 12, 2)

@@ -3,13 +3,15 @@ import { Database } from 'bun:sqlite'
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
-import { chunkCoords, VoxelDocument } from '../src/editor'
-import { encodeProjectSnapshot } from '../src/protocol'
-import { parseSceneManifest } from '../src/scene'
-import type { SceneManifest } from '../src/scene-types'
-import * as storage from '../src/scene-storage'
+import { chunkCoords, VoxelDocument } from '../src/shared/voxel/document'
+import { encodeProjectSnapshot } from '../src/shared/voxel/snapshot'
+import { parseSceneManifest } from '../src/editors/scene/document'
+import type { SceneManifest } from '../src/editors/scene/types'
+import * as storage from '../src/editors/scene/storage'
+import * as chunks from '../src/editors/scene/chunks'
 import { createModelServer, PROJECT_ROOT } from './model-server'
-import { createSceneRoutes, type SceneSummary } from './scene-server'
+import { createSceneRoutes } from './scene-server'
+import { type SceneSummary } from '../src/shared/library/types'
 
 const bytes = new Uint8Array(4096).fill(80)
 const hash = new Bun.CryptoHasher('sha256').update(bytes).digest('hex')
@@ -289,7 +291,7 @@ test('scene routes share all host/origin defenses, strict metadata and JSON body
 })
 
 test('client saves deduplicated missing chunks, opens only manifests, and preserves CAS links', async () => {
-  const { saveLibraryScene, openLibraryScene, listSceneLibrary } = await import('../src/scene-library')
+  const { saveLibraryScene, openLibraryScene, listSceneLibrary } = await import('../src/editors/scene/library')
   const originalFetch = globalThis.fetch
   const paths: string[] = []
   const network = spyOn(globalThis, 'fetch').mockImplementation(Object.assign((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
@@ -317,7 +319,7 @@ test('client saves deduplicated missing chunks, opens only manifests, and preser
 })
 
 test('portable files stream deduplicated records, validate hashes and require complete self-contained data', async () => {
-  const { exportSceneFile, importSceneFile } = await import('../src/scene-library')
+  const { exportSceneFile, importSceneFile } = await import('../src/editors/scene/library')
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
   const lines: Uint8Array<ArrayBuffer>[] = []
   let closed = false, aborted = false
@@ -373,13 +375,13 @@ test('portable files stream deduplicated records, validate hashes and require co
 })
 
 test('native export validates every shared-blob descriptor exactly and aborts instead of closing corrupt files', async () => {
-  const { exportSceneFile, importSceneFile } = await import('../src/scene-library')
+  const { exportSceneFile, importSceneFile } = await import('../src/editors/scene/library')
   const sparse = new Uint8Array(4096)
   sparse[1 + 2 * 16 + 3 * 256] = 80
   sparse[14 + 12 * 16 + 10 * 256] = 81
   const sparseHash = new Bun.CryptoHasher('sha256').update(sparse).digest('hex')
   snapshot.assets.forEach((asset, index) => {
-    const chunk = storage.describeSceneChunk(index, 1, sparse, sparseHash)!
+    const chunk = chunks.describeSceneChunk(index, 1, sparse, sparseHash)!
     asset.model.dimensions.x = 32
     asset.chunks = [chunk]
     asset.bounds = structuredClone(chunk.bounds)
@@ -399,7 +401,7 @@ test('native export validates every shared-blob descriptor exactly and aborts in
     return sparse
   })
   const put = spyOn(storage, 'putSceneBlob').mockRejectedValue(new DOMException('Local disk quota exceeded', 'QuotaExceededError'))
-  const describe = spyOn(storage, 'describeSceneChunk')
+  const describe = spyOn(chunks, 'describeSceneChunk')
   try {
     await exportSceneFile(snapshot)
     expect(closed).toBe(true)
@@ -443,7 +445,7 @@ test('native export validates every shared-blob descriptor exactly and aborts in
 })
 
 test('cancelled native export rejects without a download or a success continuation', async () => {
-  const { exportSceneFile } = await import('../src/scene-library')
+  const { exportSceneFile } = await import('../src/editors/scene/library')
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
   const cancelled = new DOMException('The user cancelled the save dialog.', 'AbortError')
   Object.defineProperty(globalThis, 'window', { configurable: true, value: { showSaveFilePicker: async () => { throw cancelled } } })
@@ -463,7 +465,7 @@ test('cancelled native export rejects without a download or a success continuati
 })
 
 test('client chunks/check batches stay below 1000 hashes and metadata carries no voxel bytes', async () => {
-  const { saveLibraryScene } = await import('../src/scene-library')
+  const { saveLibraryScene } = await import('../src/editors/scene/library')
   const scene = largeFixture(1001), sizes: number[] = []
   const originalFetch = globalThis.fetch
   const network = spyOn(globalThis, 'fetch').mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
@@ -486,7 +488,7 @@ test('client chunks/check batches stay below 1000 hashes and metadata carries no
 })
 
 test('file fallback downloads small scenes and rejects more than 64 MiB before loading any chunks', async () => {
-  const { exportSceneFile, importSceneFile } = await import('../src/scene-library')
+  const { exportSceneFile, importSceneFile } = await import('../src/editors/scene/library')
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
   const previousDocument = Object.getOwnPropertyDescriptor(globalThis, 'document')
   let clicked = false, download: Blob | undefined

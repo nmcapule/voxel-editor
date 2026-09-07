@@ -2,11 +2,11 @@
 // Start without awaiting CDP: import('/tests/recovery.ts').then(m =>
 //   m.runRecoveryChecks(transparencyTest.renderer, transparencyTest.settings)).
 // Poll window.recoveryChecks (finite waits, incremental results).
-import type { Camera, DirectionalLight, MeshPhysicalMaterial, Object3D, WebGLRenderer, WebGLRenderTarget } from 'three'
+import type { DirectionalLight, MeshPhysicalMaterial, Object3D, WebGLRenderTarget } from 'three'
 import type { WebGLPathTracer } from 'three-gpu-pathtracer'
-import type { RasterPipeline } from '../src/raster-pipeline'
-import type { VoxelRenderer } from '../src/renderer'
-import type { ViewSettings } from '../src/storage'
+import type { RasterPipeline } from '../src/shared/rendering/raster-pipeline'
+import type { VoxelRenderer } from '../src/editors/model/renderer'
+import type { ViewSettings } from '../src/shared/rendering/settings'
 
 function check(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message)
@@ -41,20 +41,21 @@ function difference(a: ArrayLike<number>, b: ArrayLike<number>) {
 }
 
 export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewSettings) {
-  const [{ VoxelDocument }, THREE] = await Promise.all([import('../src/editor'), import('three')])
+  const viewport = renderer.viewport
+  const [{ VoxelDocument }, THREE] = await Promise.all([import('../src/shared/voxel/document'), import('three')])
   const report = {
     running: true, current: 'setup', ok: false,
     checks: [] as { name: string; ok: boolean; milliseconds: number; details?: unknown; error?: string }[],
     errors: [] as string[],
   }
   Object.assign(window, { recoveryChecks: report })
-  const webgl = Reflect.get(renderer, 'renderer') as WebGLRenderer
-  const host = Reflect.get(renderer, 'host') as HTMLElement
+  const webgl = viewport.renderer
+  const host = Reflect.get(viewport, 'host') as HTMLElement
   const canvas = webgl.domElement
   const saved = {
     document: Reflect.get(renderer, 'document') as InstanceType<typeof VoxelDocument>,
-    settings: { ...Reflect.get(renderer, 'settings') } as ViewSettings,
-    view: renderer.getView(), renderMode: Reflect.get(renderer, 'renderMode') as boolean,
+    settings: { ...viewport.settings },
+    view: renderer.getView(), renderMode: viewport.renderMode,
     width: host.style.width, height: host.style.height,
     selection: [...(Reflect.get(renderer, 'selection') as Map<number, { x: number; y: number; z: number }>).values()],
     floating: Reflect.get(renderer, 'floatingSelection') as boolean,
@@ -75,12 +76,12 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
   const onRejection = (event: PromiseRejectionEvent) => report.errors.push(`unhandled rejection: ${event.reason?.stack ?? event.reason}`)
   window.addEventListener('error', onError)
   window.addEventListener('unhandledrejection', onRejection)
-  watch(Reflect.get(renderer, 'callbacks'), 'onError', (original, args) => {
+  for (const callbacks of new Set([Reflect.get(renderer, 'callbacks'), Reflect.get(viewport, 'callbacks')])) watch(callbacks, 'onError', (original, args) => {
     report.errors.push(String(args[0]))
     return original(...args)
   })
-  watch(renderer, 'renderRaster', (original, args) => { const value = original(...args); counters.raster++; return value })
-  watch(renderer, 'createEnvironment', (original, args) => { const value = original(...args); counters.environments++; return value })
+  watch(viewport, 'renderRaster', (original, args) => { const value = original(...args); counters.raster++; return value })
+  watch(viewport, 'createEnvironment', (original, args) => { const value = original(...args); counters.environments++; return value })
   watch(Worker.prototype, 'postMessage', (original, args) => {
     const message = args[0] as { type?: string; jobs?: unknown[] }
     if (message.type === 'mesh') counters.meshJobs += message.jobs?.length ?? 0
@@ -89,13 +90,13 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
   })
   const healthy = () => {
     check(report.errors.length === errorStart, report.errors.slice(errorStart).join('\n'))
-    check(!Reflect.get(renderer, 'pathTracingFailed'), 'Renderer entered path-tracing fallback')
+    check(!Reflect.get(viewport, 'pathTracingFailed'), 'Renderer entered path-tracing fallback')
     check(!renderer.meshState().failed, 'Mesher failed')
   }
   const idle = (timeout = 15000) => until(() => {
     healthy()
-    return !Reflect.get(renderer, 'contextLost') && renderer.meshState().pending === 0
-      && Reflect.get(renderer, 'rasterFrame') === undefined && !Reflect.get(renderer, 'presentationDirty')
+    return !Reflect.get(viewport, 'contextLost') && renderer.meshState().pending === 0
+      && Reflect.get(viewport, 'rasterFrame') === undefined && !Reflect.get(viewport, 'presentationDirty')
   }, 'idle raster frame', timeout)
   // Reading the preserved canvas never calls capture()/render(): recovery must draw itself.
   const pixels = () => {
@@ -105,7 +106,7 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
     return context.getImageData(0, 0, copy.width, copy.height)
   }
   const roi = (image: ImageData, world: [number, number, number], radius = 3) => {
-    const camera = Reflect.get(renderer, 'camera') as Camera
+    const camera = viewport.camera
     const point = new THREE.Vector3(...world).project(camera)
     const x = Math.floor((point.x + 1) * image.width / 2), y = Math.floor((1 - point.y) * image.height / 2)
     check(x >= radius && y >= radius && x + radius < image.width && y + radius < image.height, 'ROI outside viewport')
@@ -149,7 +150,7 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
     return contextControl
   }
   const lostCapture = async () => {
-    await until(() => Reflect.get(renderer, 'contextLost') && webgl.getContext().isContextLost(), 'context loss event')
+    await until(() => Reflect.get(viewport, 'contextLost') && webgl.getContext().isContextLost(), 'context loss event')
     const error = await bounded(renderer.capture().then(() => '', error => String(error)), 'capture rejection while lost', 3000)
     check(/context.*lost/i.test(error), `Capture must reject while lost, got: ${error || 'resolved'}`)
     // Let outstanding compile/BVH cancellation timers run before restoration.
@@ -158,13 +159,13 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
   }
   const restoreContext = async () => {
     extension().restoreContext()
-    await until(() => !Reflect.get(renderer, 'contextLost') && !webgl.getContext().isContextLost(), 'context restoration')
+    await until(() => !Reflect.get(viewport, 'contextLost') && !webgl.getContext().isContextLost(), 'context restoration')
   }
   let sampleGoal = 1
   let loseDuringBuild = false, loseDuringCompile = false
   let loss: { tracer: WebGLPathTracer; worker: object; phase: string; compiling?: boolean } | undefined
   const configured = new Set<WebGLPathTracer>()
-  watch(renderer, 'ensurePathTracer', async (original, args) => {
+  watch(viewport, 'ensurePathTracer', async (original, args) => {
     const tracer = await original(...args) as WebGLPathTracer | undefined
     if (!tracer || configured.has(tracer)) return tracer
     configured.add(tracer)
@@ -186,7 +187,7 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
       const result = original(...args)
       if (loseDuringBuild) {
         loseDuringBuild = false
-        loss = { tracer, worker: Reflect.get(renderer, 'pathTracingWorker'), phase: 'BVH preparing' }
+        loss = { tracer, worker: Reflect.get(viewport, 'pathTracingWorker'), phase: 'BVH preparing' }
         extension().loseContext()
       }
       return result
@@ -195,12 +196,12 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
   })
   watch(webgl, 'compileAsync', (original, args) => {
     const result = original(...args)
-    const tracer = Reflect.get(renderer, 'pathTracer') as WebGLPathTracer | undefined
+    const tracer = Reflect.get(viewport, 'pathTracer') as WebGLPathTracer | undefined
     if (loseDuringCompile && tracer) {
       loseDuringCompile = false
       // Interrupt the pending compiler, not the synchronous renderSample call stack.
       queueMicrotask(() => {
-        loss = { tracer, worker: Reflect.get(renderer, 'pathTracingWorker'), phase: 'shader compilation', compiling: Reflect.get(tracer, 'isCompiling') }
+        loss = { tracer, worker: Reflect.get(viewport, 'pathTracingWorker'), phase: 'shader compilation', compiling: Reflect.get(tracer, 'isCompiling') }
         extension().loseContext()
       })
     }
@@ -209,20 +210,20 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
   const ready = async (samples = 1) => {
     await until(() => {
       healthy()
-      return Reflect.get(renderer, 'pathTracingReady') && !Reflect.get(renderer, 'pathTracingBuildRunning')
-        && (Reflect.get(renderer, 'pathTracer') as WebGLPathTracer | undefined)?.samples! >= samples
+      return Reflect.get(viewport, 'pathTracingReady') && !Reflect.get(viewport, 'pathTracingBuildRunning')
+        && (Reflect.get(viewport, 'pathTracer') as WebGLPathTracer | undefined)?.samples! >= samples
     }, `${samples} automatic path-traced samples`, 180000)
-    return Reflect.get(renderer, 'pathTracer') as WebGLPathTracer
+    return Reflect.get(viewport, 'pathTracer') as WebGLPathTracer
   }
   const tracedImage = async () => {
-    await until(() => { healthy(); return Reflect.get(renderer, 'pathTracingReady') && !Reflect.get(renderer, 'pathTracingBuildRunning') }, 'path tracer ready', 180000)
-    const tracer = Reflect.get(renderer, 'pathTracer') as WebGLPathTracer
+    await until(() => { healthy(); return Reflect.get(viewport, 'pathTracingReady') && !Reflect.get(viewport, 'pathTracingBuildRunning') }, 'path tracer ready', 180000)
+    const tracer = Reflect.get(viewport, 'pathTracer') as WebGLPathTracer
     sampleGoal = 8
     tracer.pausePathTracing = false
-    Reflect.get(renderer, 'startPathTracingSamples').call(renderer)
+    Reflect.get(viewport, 'startPathTracingSamples').call(viewport)
     await ready(8)
-    Reflect.get(renderer, 'stopPathTracingSamples').call(renderer)
-    check(tracer.samples === 8 && !Reflect.get(renderer, 'presentationDirty'), 'Must read exactly eight presented real samples, not raster fallback')
+    Reflect.get(viewport, 'stopPathTracingSamples').call(viewport)
+    check(tracer.samples === 8 && !Reflect.get(viewport, 'presentationDirty'), 'Must read exactly eight presented real samples, not raster fallback')
     check(tracer.target.width === 128 && tracer.target.height === 128, 'Path-traced target must be 128x128')
     check(Reflect.get(Reflect.get(tracer, '_pathTracer').material, 'seed') === 8, 'Stable noise must restart the sample seed at zero')
     return pixels()
@@ -245,7 +246,7 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
       renderer.setView({ position: { x: 18, y: 18, z: 26 }, target: { x: 0, y: 4, z: 0 }, up: { x: 0, y: 1, z: 0 }, orthographicSpan: 20 })
       await idle()
       const before = pixels(), counts = { ...counters }
-      const environment = Reflect.get(renderer, 'environmentTarget') as WebGLRenderTarget
+      const environment = Reflect.get(viewport, 'environmentTarget') as WebGLRenderTarget
       await new Promise(resolve => setTimeout(resolve, 120))
       check(counters.raster === counts.raster, 'Fixture must be truly idle before loss')
       const metal = roi(before, [-4, 7, -1], 1), glass = roi(before, [3, 7, -1], 1)
@@ -255,9 +256,9 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
       await restoreContext()
       await idle()
       const delta = difference(before.data, pixels().data)
-      check(counters.environments - counts.environments === 1 && Reflect.get(renderer, 'environmentTarget') !== environment, 'Restore must regenerate the PMREM environment')
+      check(counters.environments - counts.environments === 1 && Reflect.get(viewport, 'environmentTarget') !== environment, 'Restore must regenerate the PMREM environment')
       const materials = Reflect.get(renderer, 'materials') as MeshPhysicalMaterial[]
-      const texture = (Reflect.get(renderer, 'environmentTarget') as WebGLRenderTarget).texture
+      const texture = viewport.environment
       check(materials[40].envMap === texture && materials[41].envMap === texture, 'Metal and transmission must bind the regenerated environment')
       check(counters.raster > counts.raster, 'Restoration must schedule a raster draw without capture or input')
       check(delta.mean <= 0.5 && delta.max <= 2, `Restored raster pixels differ: ${JSON.stringify(delta)}`)
@@ -282,7 +283,7 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
       await idle()
       const camera = shadowDraws - baseline
       const rect = canvas.getBoundingClientRect()
-      const point = new THREE.Vector3(0, 8, 0).project(Reflect.get(renderer, 'camera') as Camera)
+      const point = new THREE.Vector3(0, 8, 0).project(viewport.camera)
       canvas.dispatchEvent(new PointerEvent('pointermove', { clientX: rect.left + (point.x + 1) * rect.width / 2, clientY: rect.top + (1 - point.y) * rect.height / 2, pointerType: 'mouse' }))
       await idle()
       check((Reflect.get(renderer, 'hover') as Object3D).visible, 'Hover positive control must show a real editor overlay')
@@ -323,12 +324,12 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
       const previous = loss
       await restoreContext()
       const tracer = await ready()
-      check(tracer !== previous.tracer && Reflect.get(renderer, 'pathTracingWorker') !== previous.worker, 'Restored tracing must create a different tracer and worker')
+      check(tracer !== previous.tracer && Reflect.get(viewport, 'pathTracingWorker') !== previous.worker, 'Restored tracing must create a different tracer and worker')
       return { phase: previous.phase, replacedTracer: true, replacedWorker: true, samples: tracer.samples, captureError }
     })
 
     await run('active trace loss and pending shader compilation recover automatically', async () => {
-      const previous = await ready(), previousWorker = Reflect.get(renderer, 'pathTracingWorker')
+      const previous = await ready(), previousWorker = Reflect.get(viewport, 'pathTracingWorker')
       extension().loseContext()
       const activeCaptureError = await lostCapture()
       loseDuringCompile = true
@@ -341,7 +342,7 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
       check(compiling.tracer !== previous && compiling.worker !== previousWorker, 'Active loss must replace both resources before compilation')
       await restoreContext()
       const tracer = await ready()
-      check(tracer !== compiling.tracer && Reflect.get(renderer, 'pathTracingWorker') !== compiling.worker, 'Compilation loss must replace tracer and worker again')
+      check(tracer !== compiling.tracer && Reflect.get(viewport, 'pathTracingWorker') !== compiling.worker, 'Compilation loss must replace tracer and worker again')
       await new Promise(resolve => setTimeout(resolve, 250))
       healthy()
       return { activeSamples: previous.samples, restoredSamples: tracer.samples, interruptedCompilation: compiling.compiling, activeCaptureError, compilationCaptureError, uncaughtErrors: report.errors.length - errorStart }
@@ -349,8 +350,8 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
 
     await run('progressive preparation and compilation previews neither draw nor sample shadow maps', async () => {
       const tracer = await ready()
-      const raster = Reflect.get(renderer, 'raster') as RasterPipeline
-      const sunlight = Reflect.get(renderer, 'sunlight') as DirectionalLight
+      const raster = Reflect.get(viewport, 'raster') as RasterPipeline
+      const sunlight = Reflect.get(viewport, 'sunlight') as DirectionalLight
       const previous = { dynamicLowRes: tracer.dynamicLowRes, pausePathTracing: tracer.pausePathTracing }
       const restoreStart = restores.length
       let releasePreparation!: () => void, releaseCompilation!: () => void
@@ -382,8 +383,8 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
           return Promise.all([original(...args), preparation]).then(([result]) => result)
         })
         watch(raster, 'render', (original, args) => {
-          const phase = !Reflect.get(renderer, 'pathTracingReady') && Reflect.get(renderer, 'pathTracingBuildRunning') ? 'preparing'
-            : Reflect.get(renderer, 'pathTracingReady') && !Reflect.get(renderer, 'pathTracingBuildRunning')
+          const phase = !Reflect.get(viewport, 'pathTracingReady') && Reflect.get(viewport, 'pathTracingBuildRunning') ? 'preparing'
+            : Reflect.get(viewport, 'pathTracingReady') && !Reflect.get(viewport, 'pathTracingBuildRunning')
               && tracer.dynamicLowRes && Reflect.get(tracer, 'isCompiling') ? 'compiling' : undefined
           if (!observing || !phase) return original(...args)
           const start = shadowDraws
@@ -433,13 +434,13 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
         tracer.pausePathTracing = false
         renderer.setSettings({ ...options, pathTracing: true })
         await ready()
-        Reflect.get(renderer, 'stopPathTracingSamples').call(renderer)
+        Reflect.get(viewport, 'stopPathTracingSamples').call(viewport)
         const beforeInspection = shadowDraws
         webgl.shadowMap.needsUpdate = true
         const images = await bounded(renderer.inspect(['iso-front-right']), 'shadowed inspection while tracing')
         const inspectionDraws = shadowDraws - beforeInspection
         check(inspectionDraws > 0 && images[0]?.blob.size > 0, 'Explicit isometric inspection must draw real shadows in PT mode')
-        check(Reflect.get(renderer, 'pathTracingEnabled').call(renderer) && webgl.shadowMap.enabled && sunlight.castShadow, 'Inspection must preserve PT mode and shadow flags')
+        check(Reflect.get(viewport, 'pathTracingEnabled').call(viewport) && webgl.shadowMap.enabled && sunlight.castShadow, 'Inspection must preserve PT mode and shadow flags')
         return { warmDraws, effect, builds, compiles, compilationCallbacks, previews, restoredDraws, repeat, inspectionDraws }
       } finally {
         observing = false
@@ -456,7 +457,7 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
 
     await run('shadows control changes fixed-seed actual traced ground samples', async () => {
       renderer.setSettings({ ...options, pathTracing: true })
-      if (!Reflect.get(renderer, 'renderMode')) renderer.setRenderMode(true)
+      if (!viewport.renderMode) renderer.setRenderMode(true)
       const tracer = await ready()
       const start = { ...counters }
       const measurements = []

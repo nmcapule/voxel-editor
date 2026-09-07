@@ -1,21 +1,9 @@
+import type { SceneSummary } from '../src/shared/library/types'
 import type { Database } from 'bun:sqlite'
-import { chunkCoords } from '../src/editor'
-import { parseSceneManifest } from '../src/scene'
-import { describeSceneChunk } from '../src/scene-storage'
-import type { SceneAsset, SceneChunk, SceneInstance, SceneManifest } from '../src/scene-types'
-import { HttpError, MAX_REQUEST_BYTES, parseTags, readBody, responseHeaders } from './model-server'
-
-export interface SceneSummary {
-  id: string
-  name: string
-  tags: string[]
-  version: number
-  createdAt: string
-  updatedAt: string
-  instanceCount: number
-  assetCount: number
-  voxelCount: number
-}
+import { parseSceneManifest } from '../src/editors/scene/document'
+import { describeSceneChunk, validateSceneChunkDescriptor } from '../src/editors/scene/chunks'
+import type { SceneAsset, SceneChunk, SceneInstance, SceneManifest } from '../src/editors/scene/types'
+import { HttpError, MAX_REQUEST_BYTES, parseTags, readBody, responseHeaders } from './http'
 
 type SceneRow = Omit<SceneSummary, 'tags'> & { tags: string }
 type RecordRow = { id: string; data: string }
@@ -119,15 +107,8 @@ export function createSceneRoutes(db: Database, options: { maxRequestBytes?: num
           if (!descriptor) throw new HttpError(400, 'Scene manifests cannot reference empty chunks.')
           info.set(chunk.blob, descriptor)
         }
-        if (chunk.count !== descriptor.count || JSON.stringify([...chunk.colors].sort((a, b) => a - b)) !== JSON.stringify(descriptor.colors)
-          || chunk.lod.some((color, index) => descriptor.lod[index] !== color)) {
-          throw new HttpError(400, `Scene chunk ${chunk.blob} has incorrect count, colors or LOD metadata.`)
-        }
-        const origin = chunkCoords(chunk.id)
-        if (['x', 'y', 'z'].some(key => {
-          const axis = key as keyof typeof origin
-          return chunk.bounds.min[axis] !== origin[axis] * 16 + descriptor.bounds.min[axis] || chunk.bounds.max[axis] !== origin[axis] * 16 + descriptor.bounds.max[axis]
-        })) throw new HttpError(400, `Scene chunk ${chunk.blob} has incorrect bounds.`)
+        try { validateSceneChunkDescriptor(chunk, descriptor) }
+        catch { throw new HttpError(400, `Scene chunk ${chunk.blob} metadata does not match its immutable blob.`) }
         if (asset.model.paletteOccupied && chunk.colors.some(color => !asset.model.paletteOccupied![color])) throw new HttpError(400, 'Scene chunks reference an unoccupied palette slot.')
       }
     }

@@ -1,7 +1,7 @@
 import type { ServerWebSocket } from 'bun'
 import type { OpencodeClient, Part } from '@opencode-ai/sdk/v2/client'
-import { SerialCommandQueue, type RemoteCommand } from '../../src/protocol'
-import { StudioCommandError } from '../../src/studio'
+import { SerialCommandQueue, type RemoteCommand } from '../../src/editors/model/protocol'
+import { StudioCommandError } from '../../src/shared/errors'
 import { tokensMatch } from '../../scripts/relay'
 import { parseCanvasCommand, type AssistantModel, type BatchResponse, type ServerMessage, type ToolResponse } from './shared'
 

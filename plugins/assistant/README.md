@@ -183,7 +183,7 @@ lost connections; pending canvas calls time out rather than replaying.
 styles are loaded into the ordinary build, and no assistant service is started.
 The feature has two integration points:
 
-- The gated `mountAssistant` call in `src/main.ts` supplies DOM roots, execution,
+- The gated `mountAssistant` call in `src/app/integrations.ts` supplies DOM roots, execution,
   and a command subscription. Its disposer removes owned UI, styles, and listeners.
 - The `VOXEL_ASSISTANT_PORT` define and exact WebSocket proxy in `vite.config.ts`.
 
@@ -201,7 +201,7 @@ bun test
 bun test plugins/assistant/opencode.test.ts
 bun test plugins/assistant/server.test.ts scripts/relay.test.ts
 bun run build
-bunx impeccable detect plugins/assistant/client.ts plugins/assistant/style.css src/main.ts
+bunx impeccable detect plugins/assistant/client.ts plugins/assistant/style.css src/app/integrations.ts
 ```
 
 The main app uses Vite's experimental bundled-dev mode, so run the browser

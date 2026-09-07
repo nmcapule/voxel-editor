@@ -1,5 +1,5 @@
-import { CHUNK_SIZE, PADDED_SIZE } from '../src/editor'
-import { meshChunk, meshFaceGrid } from '../src/mesher'
+import { CHUNK_SIZE, PADDED_SIZE } from '../src/shared/voxel/document'
+import { meshChunk, meshFaceGrid } from '../src/shared/voxel/mesher'
 
 // Run with: bun scripts/mesher-benchmark.ts
 // Measures meshing only: padding, transport, GPU upload and BVH build are excluded.

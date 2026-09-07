@@ -1,5 +1,5 @@
-import { parseCommand, type RemoteCommand } from '../../src/protocol'
-import { StudioCommandError } from '../../src/studio'
+import { parseCommand, type RemoteCommand } from '../../src/editors/model/protocol'
+import { StudioCommandError } from '../../src/shared/errors'
 
 export type CommandResult = { revision: number; changed?: boolean; result: unknown }
 export type ToolResponse = { ok: true } & CommandResult | { ok: false; error: { code: string; message: string } }

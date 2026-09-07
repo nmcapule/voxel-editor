@@ -1,5 +1,5 @@
 import css from './style.css?inline'
-import { StudioCommandError } from '../../src/studio'
+import { StudioCommandError } from '../../src/shared/errors'
 import { isInspection, needsApproval, parseCanvasCommand, type AssistantHost, type AssistantModel, type ClientMessage, type ServerMessage, type ToolResponse } from './shared'
 
 export function mountAssistant(host: AssistantHost): () => void {

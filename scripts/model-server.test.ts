@@ -4,9 +4,11 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs
 import { createConnection } from 'node:net'
 import { tmpdir } from 'node:os'
 import { relative, resolve } from 'node:path'
-import { chunkId, VoxelDocument } from '../src/editor'
-import { decodeProjectSnapshot, encodeProjectSnapshot } from '../src/protocol'
-import { createModelServer, MAX_REQUEST_BYTES, PROJECT_ROOT, type ModelSummary } from './model-server'
+import { chunkId, VoxelDocument } from '../src/shared/voxel/document'
+import { decodeProjectSnapshot, encodeProjectSnapshot } from '../src/shared/voxel/snapshot'
+import { createModelServer, PROJECT_ROOT } from './model-server'
+import { MAX_REQUEST_BYTES } from './http'
+import { type ModelSummary } from '../src/shared/library/types'
 import { renderModelThumbnail } from './model-thumbnail'
 
 const document = new VoxelDocument({ x: 32, y: 16, z: 16 }, 'Layered black model')
@@ -505,7 +507,7 @@ test('serves only existing dist files with safe GET/HEAD, not traversal or symli
   expect(head.status).toBe(200)
   expect(Number(head.headers.get('content-length'))).toBeGreaterThan(0)
   expect(await head.text()).toBe('')
-  for (const path of ['/missing.js', '/missing-route', '/src/protocol.ts', '/scripts/model-server.ts', '/package.json', '/data/models.sqlite', '/.env', '/leak.txt', '/outside/secret.txt', '/%2e%2e%2fsecret.txt', '/%252e%252e%252fsecret.txt', '/%5c..%5csecret.txt', '//secret.txt']) await expectError(await fetch(`${library.server.url.origin}${path}`), 404)
+  for (const path of ['/missing.js', '/missing-route', '/src/editors/model/protocol.ts', '/scripts/model-server.ts', '/package.json', '/data/models.sqlite', '/.env', '/leak.txt', '/outside/secret.txt', '/%2e%2e%2fsecret.txt', '/%252e%252e%252fsecret.txt', '/%5c..%5csecret.txt', '//secret.txt']) await expectError(await fetch(`${library.server.url.origin}${path}`), 404)
   await expectError(await fetch(library.server.url, { method: 'POST' }), 404)
   await expectError(await fetch(new URL('/bad%zz', library.server.url)), 400)
   expect(await (await request()).json()).toEqual({ models: [], tags: [], total: 0 })

@@ -9,7 +9,7 @@ One server has shared model and scene libraries. There are no accounts, ownershi
 - `bun run build`, then `bun run preview` starts Vite preview with the same API and storage.
 - `bun run build`, then `bun run start` serves only built files in `dist` plus the API, without Vite. Missing files return 404, not the app HTML. `HOST` defaults to `127.0.0.1`; `PORT` defaults to `4173`.
 - `bun test scripts/model-thumbnail.test.ts scripts/model-server.test.ts vite.config.test.ts` runs the renderer, integration, and existing gzip checks; `bun run typecheck` includes the server, renderer, and launcher.
-- `bun test src/scene.test.ts src/scene-mesher.test.ts src/scene-workspace.test.ts scripts/scene-server.test.ts` covers scene metadata/recovery, streaming/render budgets, workspace transitions, server CAS, and portable files. Existing model-library/thumbnail coverage remains applicable.
+- `bun test src/editors/scene/document.test.ts src/editors/scene/renderer.test.ts src/app/scene-model-bridge.test.ts scripts/scene-server.test.ts` covers scene metadata/recovery, streaming/render budgets, workspace transitions, server CAS, and portable files. Existing model-library/thumbnail coverage remains applicable.
 
 Startup errors exit nonzero. SIGINT/SIGTERM stop the listener, close SQLite, and stop the Vite child when present.
 The API and launcher use Bun. Vite runs on Node because its config-change restart
@@ -64,7 +64,7 @@ Optional `source: { id, version }` is provenance only, not a live link. Instance
 share that asset until Make unique creates another asset identity; immutable chunk
 blobs can remain deduplicated. Child edits never PUT the original library model.
 
-`src/scene-storage.ts` uses separate IndexedDB `voxel-studio-scenes` stores for
+`src/editors/scene/storage.ts` uses separate IndexedDB `voxel-studio-scenes` stores for
 scene headers, assets, instances, blobs, and the active recovery marker. Autosave
 writes changed asset/instance records plus the header/context in one transaction;
 a save-token compare-and-swap (CAS) blocks stale-tab overwrites, including equal
@@ -77,11 +77,12 @@ may remain uncached; missing chunks load from the same-origin server and are ver
 before caching. Reopening/editing, full-detail rendering, or export may require being
 online. A successful `.vscene` export is self-contained for voxel data, not images.
 
-Texture image bytes are session-only: `src/main.ts` retains map-set payloads in
-`sessionMaps` and `assetMaps`, keyed for child reuse by `${sceneId}:${assetId}` in
-the current runtime. Rehydrating that same key can restore maps after child-history
-eviction; refresh, a reopened scene's new runtime ID, or Make unique's new asset ID
-does not transfer them. Recovery, scene-library saves, and `.vscene` omit images.
+Texture image bytes are session-only. `src/editors/model/editor.ts` retains map-set
+payloads per model session; `src/app/scene-model-bridge.ts` retains child maps by
+asset ID within the current scene. Rehydrating that asset can restore maps after
+child-history eviction. Opening another scene clears this cache; refresh, reopening
+a scene, and Make unique do not transfer images. Recovery, scene-library saves,
+and `.vscene` omit images.
 The scene renderer currently uses palette/scalar materials, not these child-editor
 image maps. Keep original image files separately. Child/standalone session retention
 is described in [PRODUCT.md](PRODUCT.md#capabilities-and-constraints); hydration and
@@ -121,7 +122,7 @@ records in the CAS transaction, although the HTTP write sends the complete manif
 
 ## Scene Files
 
-`SceneManifest` in `src/scene-types.ts` has schema `voxel-studio/scene`, version 1,
+`SceneManifest` in `src/editors/scene/types.ts` has schema `voxel-studio/scene`, version 1,
 identity/revision, extent, settings, scene layers/active layer, assets, and instances.
 Each asset carries a project header without byte chunks, pivot/bounds/count,
 optional provenance, and chunk descriptors (`id`, `layerId`, `blob`, `count`,
@@ -130,7 +131,7 @@ TRS. Parsing validates references, finite transforms, counts, and the combined
 [metadata limits](RENDERING.md#scene-resources), without hydrating all voxel bytes.
 
 `.vscene` is UTF-8 newline-delimited JSON (`application/x-ndjson`), not VOX or one
-giant JSON array. `src/scene-library.ts` writes records with these TypeScript shapes:
+giant JSON array. `src/editors/scene/library.ts` writes records with these TypeScript shapes:
 
 ```ts
 { schema: 'voxel-studio/scene-file', version: 1, snapshot: SceneManifest }

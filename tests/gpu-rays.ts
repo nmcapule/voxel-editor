@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { BVHShaderGLSL, MeshBVH, MeshBVHUniformStruct, UIntVertexAttributeTexture } from 'three-mesh-bvh'
-import { CHUNK_SIZE, VoxelDocument, chunkCoords } from '../src/editor'
-import { meshChunk } from '../src/mesher'
+import { CHUNK_SIZE, VoxelDocument, chunkCoords } from '../src/shared/voxel/document'
+import { meshChunk } from '../src/shared/voxel/mesher'
 // @ts-expect-error The dependency ships this GLSL module without declarations.
 import { util_functions } from 'three-gpu-pathtracer/src/shader/common/util_functions.glsl.js'
 

@@ -3,9 +3,9 @@
 // Open the app, then run:
 // import('/tests/model-library.ts').then(m => m.runLibraryChecks())
 // Poll window.libraryChecks; this exercises the real editor and API, not a UI mock.
-import { bytesToBase64 } from '../src/protocol'
-import { loadProject } from '../src/storage'
-import type { ModelSummary } from '../scripts/model-server'
+import { bytesToBase64 } from '../src/shared/voxel/snapshot'
+import { loadProject } from '../src/editors/model/storage'
+import type { ModelSummary } from '../src/shared/library/types'
 
 export async function runLibraryChecks() {
   const report = { running: true, passed: [] as string[], error: '' }

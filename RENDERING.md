@@ -9,35 +9,35 @@ changes. No dependency versions were upgraded. Scene sections describe the curre
 | Finding | Resolution | Regression coverage |
 | --- | --- | --- |
 | Eager maximum-range Push/Pull allocation | Allocate the displayed preview, grow on demand, update only live matrix ranges | `tests/rendering.ts` |
-| Zero-normal Move hang | Validate shared operation normals; skip starting-solid backfaces in picking | `src/palette-vox.test.ts`, `src/renderer-state.test.ts` |
+| Zero-normal Move hang | Validate shared operation normals; skip starting-solid backfaces in picking | `src/editors/model/storage-vox.test.ts`, `src/editors/model/renderer.test.ts` |
 | Stale asynchronous trace readiness | Revision checks across import, preparation and publication; gate progress and sampling | `tests/rendering.ts` |
-| Transparent interface gaps and L/T junctions | Exact integer surface geometry; GPU BVH ties prefer the front-facing interface | `src/transparency.test.ts`, `src/mesher-layout.test.ts`, `tests/gpu-rays.ts` |
-| Alpha behind transmission; disconnected/reversed stacks | Per-pixel far-to-near peeling instead of palette-wide sorting | `src/raster-pipeline.test.ts`, `tests/rendering.ts` |
+| Transparent interface gaps and L/T junctions | Exact integer surface geometry; GPU BVH ties prefer the front-facing interface | `src/shared/rendering/transparency.test.ts`, `src/shared/voxel/mesher.test.ts`, `tests/gpu-rays.ts` |
+| Alpha behind transmission; disconnected/reversed stacks | Per-pixel far-to-near peeling instead of palette-wide sorting | `src/shared/rendering/raster-pipeline.test.ts`, `tests/rendering.ts` |
 | Transparent/helper AO contamination | Reconstruct AO from opaque beauty depth; composite transparency and helpers afterward | `tests/rendering.ts` |
-| Ambient/shadow settings ineffective in traced output | Supported hemisphere environment with matching orientation; uploaded material shadow flags | `src/renderer-state.test.ts`, `tests/rendering.ts`, `tests/recovery.ts` |
-| Orthographic picking versus negative near plane | Pick from the rendered near plane, bounded by the far plane | `src/renderer-state.test.ts` |
+| Ambient/shadow settings ineffective in traced output | Supported hemisphere environment with matching orientation; uploaded material shadow flags | `src/editors/model/renderer.test.ts`, `tests/rendering.ts`, `tests/recovery.ts` |
+| Orthographic picking versus negative near plane | Pick from the rendered near plane, bounded by the far plane | `src/editors/model/renderer.test.ts` |
 | Tall shadow-frustum clipping | Fit caster/ground bounds in light-camera coordinates | `tests/rendering.ts` |
 | Rays skipping the ground | Ground clearance exceeds the supported ray-origin offset | `tests/gpu-rays.ts` |
-| Poisoned BVH retries; sampling failures | Dispose/recreate tracer and worker; route preparation, compilation and sampling errors to fallback | `src/render-dependencies.test.ts`, `tests/rendering.ts`, `tests/recovery.ts` |
-| Growing generated groups and repeated material-index uploads | Version-keyed dependency patches clear groups and compare actual material counts | `src/render-dependencies.test.ts` |
-| Instance, ground, GTAO and tracer resource omissions | Explicit ownership cleanup, including low-resolution tracer resources and pending compilation | `src/render-dependencies.test.ts`, `tests/recovery.ts` |
+| Poisoned BVH retries; sampling failures | Dispose/recreate tracer and worker; route preparation, compilation and sampling errors to fallback | `src/shared/rendering/dependencies.test.ts`, `tests/rendering.ts`, `tests/recovery.ts` |
+| Growing generated groups and repeated material-index uploads | Version-keyed dependency patches clear groups and compare actual material counts | `src/shared/rendering/dependencies.test.ts` |
+| Instance, ground, GTAO and tracer resource omissions | Explicit ownership cleanup, including low-resolution tracer resources and pending compilation | `src/shared/rendering/dependencies.test.ts`, `tests/recovery.ts` |
 | Context restoration loses environment/idle frame | Regenerate the environment, invalidate shadows and redraw/rebuild automatically | `tests/recovery.ts` |
-| Missing geometry AA | Linear-light FXAA with perceptual edge detection, before output conversion | `src/raster-pipeline.ts`, browser inspection |
-| UV and face-grid mismatch | Integer-coordinate UVs and coplanar, deduplicated unit-cell grid edges | `src/mesher-layout.test.ts` |
-| Misleading FPS | Count completed traced samples only; reset on completion; raster requests coalesce | `src/renderer.ts`, `tests/rendering.ts` |
-| Material-count vertex amplification | Contiguous material-local attribute views and rebased indices | `src/renderer-state.test.ts`, `src/mesher-layout.test.ts` |
-| Palette RGB baked into every vertex | Material color replaces the redundant color attribute | `src/mesher-layout.test.ts`, `tests/rendering.ts` |
+| Missing geometry AA | Linear-light FXAA with perceptual edge detection, before output conversion | `src/shared/rendering/raster-pipeline.ts`, browser inspection |
+| UV and face-grid mismatch | Integer-coordinate UVs and coplanar, deduplicated unit-cell grid edges | `src/shared/voxel/mesher.test.ts` |
+| Misleading FPS | Count completed traced samples only; reset on completion; raster requests coalesce | `src/shared/rendering/viewport.ts`, `tests/rendering.ts` |
+| Material-count vertex amplification | Contiguous material-local attribute views and rebased indices | `src/editors/model/renderer.test.ts`, `src/shared/voxel/mesher.test.ts` |
+| Palette RGB baked into every vertex | Material color replaces the redundant color attribute | `src/shared/voxel/mesher.test.ts`, `tests/rendering.ts` |
 | Unnecessary full trace preparation | Incremental material, light, environment and camera updates | `tests/recovery.ts` |
 | Repeated raster/shadow passes | One scheduled raster frame; explicit shadow invalidation; no AO normal scene pass or built-in transmission prepass | `tests/rendering.ts`, `tests/recovery.ts` |
-| Unused float blending targets | Allocate/clear blend targets only when alpha/manual blending requires them | `src/render-dependencies.test.ts` |
-| AO full/half-resolution resize churn | Single half-resolution size policy; unchanged-size early return | `src/raster-pipeline.test.ts` |
-| Oversized/noncancelable mesh batches | One transferable job per message; restart the worker on document replacement | `src/mesher-layout.test.ts`, `tests/rendering.ts` |
-| Main-thread padding and bounds work | Resolve chunk/layer references outside voxel loops; emit tight group bounds in worker | `src/palette-vox.test.ts`, `src/mesher-layout.test.ts` |
+| Unused float blending targets | Allocate/clear blend targets only when alpha/manual blending requires them | `src/shared/rendering/dependencies.test.ts` |
+| AO full/half-resolution resize churn | Single half-resolution size policy; unchanged-size early return | `src/shared/rendering/raster-pipeline.test.ts` |
+| Oversized/noncancelable mesh batches | One transferable job per message; restart the worker on document replacement | `src/shared/voxel/mesher.test.ts`, `tests/rendering.ts` |
+| Main-thread padding and bounds work | Resolve chunk/layer references outside voxel loops; emit tight group bounds in worker | `src/editors/model/storage-vox.test.ts`, `src/shared/voxel/mesher.test.ts` |
 | Mesher temporary arrays/index copies | Scalar mask traversal, compact quad staging and direct typed-buffer emission | `scripts/mesher-benchmark.ts` |
 | Face-grid remeshing on every re-enable | Reuse valid grids; generate missing/stale grids independently | `tests/rendering.ts` |
-| Black palette entries overwritten | Explicit occupancy through editing, copies, storage and snapshots, including map-only authoring | `src/palette-vox.test.ts` |
-| Discarded Three scene during VOX import | Data-only parser with size, count, coordinate, duplicate and chunk-boundary validation | `src/palette-vox.test.ts` |
-| Imported optical properties inferred from RGB | Explicit neutral fallback and lossy material/texture warnings | `src/palette-vox.test.ts` |
+| Black palette entries overwritten | Explicit occupancy through editing, copies, storage and snapshots, including map-only authoring | `src/editors/model/storage-vox.test.ts` |
+| Discarded Three scene during VOX import | Data-only parser with size, count, coordinate, duplicate and chunk-boundary validation | `src/editors/model/storage-vox.test.ts` |
+| Imported optical properties inferred from RGB | Explicit neutral fallback and lossy material/texture warnings | `src/editors/model/storage-vox.test.ts` |
 
 Follow-up review also fixed deletion-only queues failing to restart tracing, immediate
 captures returning old pixels with new metadata, and disposal racing shader-compilation
@@ -98,18 +98,18 @@ LOD 1 without bypassing resource limits. Coarse surfaces remain while detail loa
 | Model undo | Existing 64 MiB chunk-history target (`HISTORY_LIMIT`), separate from hydration and scene history; the newest edit is retained even if oversized |
 | Streaming work | One mesh worker/job at a time, at most 64 queued demands, 8 MiB frame upload allowance; adaptive grouping stops at 16,384 groups and reports omitted contributors |
 
-Constants live in `src/scene-types.ts`, `src/scene.ts`, `src/scene-storage.ts`,
-`src/scene-renderer.ts`, `src/protocol.ts`, and `src/editor.ts`. These are resource
+Constants live in `src/editors/scene/types.ts`, `src/editors/scene/document.ts`, `src/editors/scene/storage.ts`,
+`src/editors/scene/renderer.ts`, `src/editors/model/protocol.ts`, and `src/shared/voxel/document.ts`. These are resource
 budgets, not a combined browser-memory cap or voxel-performance claim. Retained
 standalone/child editing state and session texture payloads are additional. In particular,
-`src/scene.test.ts` covers 100M-plus repeated and unique-source voxel metadata without
+`src/editors/scene/document.test.ts` covers 100M-plus repeated and unique-source voxel metadata without
 fetching/scanning voxel arrays; it does not demonstrate rendering all those voxels.
 The viewport's represented count describes source voxels for drawn instance/chunks,
 not unique occupied world cells or the number of full-detail cells resident in RAM.
 
 ## Scene Dependencies
 
-`sceneChunkFingerprint` in `src/scene-mesher.ts` keys a mesh by its chunk and six
+`sceneChunkFingerprint` in `src/editors/scene/mesher.ts` keys a mesh by its chunk and six
 face neighbors, ordered visible model-layer ownership, immutable blob descriptors,
 and transparency classes of materials used in that neighborhood. Editing a chunk
 invalidates only dependent surfaces; RGB/scalar PBR changes reuse meshes unless
@@ -132,7 +132,7 @@ into ordinary world-space meshes grouped by material before BVH preparation; it
 never hands adaptive instancing to the tracer as a supposedly complete scene.
 Both tracing and full-scene capture require at most **1,000,000 expanded triangles**
 (including two stage triangles) and a **96 MiB conservative estimated peak**.
-`sceneDetailBudget` and `expandSceneDetail` in `src/scene-renderer.ts` are authoritative:
+`sceneDetailBudget` and `expandSceneDetail` in `src/editors/scene/renderer.ts` are authoritative:
 
 ```text
 peakBytes = sourceBytes + 16 MiB + triangles * 2048
@@ -146,9 +146,9 @@ The material-entry guard is 65,534, with the stage included in preflight. The me
 ceiling rejects far below the triangle ceiling; 1M is not an admitted workload
 promise. Staging must also fit the 128 MiB geometry budget alongside live adaptive
 resources. Existing host raster targets and the raw cache are separate, so 96 MiB
-is not total page/GPU memory. `VoxelRenderer.prepareSceneContent` rechecks the adapter.
+is not total page/GPU memory. `Viewport.prepareSceneContent` rechecks the adapter.
 
-`VoxelRenderer.ensurePathTracer` uses four bounces, 2x2 tiles, and scene render scale
+`Viewport.ensurePathTracer` uses four bounces, 2x2 tiles, and scene render scale
 `0.75 * min(1, sqrt(1_000_000 / viewportPixels))`; sampling stops at 128 completed
 samples. Budget, dependency, or tracing failures report realtime **Raster fallback**.
 Adaptive raster may reduce detail under pressure. Its shadow working set uses a
@@ -166,8 +166,9 @@ claiming exact shadows/reflections.
   scene/camera reject rather than silently returning a partial or lower-detail PNG.
   Scene editing overlays are excluded; the live viewport is restored afterward.
 
-Labels come from `src/scene-ui.ts`; capture behavior is in `src/renderer.ts`.
-`src/scene-mesher.test.ts` covers localized invalidation, bounded preparation, ordinary
+Labels come from `src/editors/scene/ui.ts`; capture behavior is in
+`src/shared/rendering/viewport.ts`.
+`src/editors/scene/renderer.test.ts` covers localized invalidation, bounded preparation, ordinary
 trace meshes, fallback, stale results, and exact-capture rejection/restoration.
 
 ## Measurements
@@ -218,7 +219,7 @@ await transparencyTest.runRendererStateChecks();
 await transparencyTest.runRenderingChecks();
 await transparencyTest.runPathTracingChecks(8);
 const rays = await import('/tests/gpu-rays.ts');
-await rays.runGpuRayChecks(transparencyTest.renderer.renderer);
+await rays.runGpuRayChecks(transparencyTest.renderer.viewport.renderer);
 const recovery = await import('/tests/recovery.ts');
 const result = await recovery.runRecoveryChecks(
   transparencyTest.renderer, transparencyTest.settings,

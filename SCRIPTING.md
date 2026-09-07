@@ -140,4 +140,4 @@ io.vox.import                io.vox.export
 save.flush
 ```
 
-The runtime validator in `src/protocol.ts` is the authoritative argument schema. Destructive resize, layer deletion, project replacement, and VOX replacement require their corresponding explicit approval flag.
+The runtime validator in `src/editors/model/protocol.ts` is the authoritative argument schema. Destructive resize, layer deletion, project replacement, and VOX replacement require their corresponding explicit approval flag.

@@ -1,11 +1,11 @@
 // Run with `bunx vite --config tests/vite.config.ts`, then open /tests/transparency.html.
-import { VoxelDocument } from '../src/editor'
-import type { Vec3 } from '../src/editor'
-import type { Object3D, WebGLRenderer } from 'three'
-import { faceViews, projectFaces } from '../src/projections'
-import { inspectionViews, type InspectionView } from '../src/inspection'
-import { VoxelRenderer, type RendererCallbacks } from '../src/renderer'
-import type { ViewSettings } from '../src/storage'
+import { VoxelDocument } from '../src/shared/voxel/document'
+import type { Vec3 } from '../src/shared/voxel/document'
+import type { Object3D } from 'three'
+import { faceViews, projectFaces } from '../src/shared/voxel/projections'
+import { inspectionViews, type InspectionView } from '../src/editors/model/inspection'
+import { VoxelRenderer, type RendererCallbacks } from '../src/editors/model/renderer'
+import type { ViewSettings } from '../src/shared/rendering/settings'
 import { runRenderingChecks, runRendererStateChecks, runPathTracingChecks } from './rendering'
 
 const host = document.createElement('div')
@@ -23,6 +23,7 @@ const settings: ViewSettings = {
   projection: 'perspective', pathTracing: true,
 }
 const renderer = new VoxelRenderer(host, new VoxelDocument(), settings, callbacks)
+const viewport = renderer.viewport
 
 async function scene(kind: 'pool' | 'stack' | 'water', water = true, reverse = false, chunked = true) {
   renderer.setRenderMode(false)
@@ -108,14 +109,14 @@ async function runInspectionChecks() {
   await renderer.whenMeshIdle()
   renderer.applySelection({ cells: [{ x: 0, y: 0, z: 0 }, { x: 18, y: 22, z: 28 }], count: 2 }, false)
   renderer.setView({ position: { x: 41, y: 33, z: -27 }, target: { x: 2, y: 7, z: -3 }, fov: 47 })
-  const sceneObject = Reflect.get(renderer, 'scene') as Object3D
+  const sceneObject = viewport.scene
   const snapshot = () => {
     const visibility: [string, boolean][] = []
     sceneObject.traverse(object => visibility.push([object.uuid, object.visible]))
     return JSON.stringify({
-      view: renderer.getView(), settings: Reflect.get(renderer, 'settings'),
+      view: renderer.getView(), settings: viewport.settings,
       selection: [...Reflect.get(renderer, 'selection') as Map<number, Vec3>],
-      floating: Reflect.get(renderer, 'floatingSelection'), renderMode: Reflect.get(renderer, 'renderMode'), visibility,
+      floating: Reflect.get(renderer, 'floatingSelection'), renderMode: viewport.renderMode, visibility,
     })
   }
   const inspect = async (views?: readonly InspectionView[]) => {
@@ -152,8 +153,11 @@ async function runInspectionChecks() {
   check((await inspect([])).length === 0, 'An empty view request must return no images')
 
   const overlays = new Map<Object3D, boolean>()
-  for (const key of ['grid', 'limits', 'ground', 'hover', 'marqueePreview', 'selectionPreview', 'fillPreview', 'pushPullPreview']) {
-    const object = Reflect.get(renderer, key) as Object3D | undefined
+  for (const [owner, keys] of [
+    [viewport, ['grid', 'limits', 'ground']],
+    [renderer, ['hover', 'marqueePreview', 'selectionPreview', 'fillPreview', 'pushPullPreview']],
+  ] as const) for (const key of keys) {
+    const object = Reflect.get(owner, key) as Object3D | undefined
     if (object) overlays.set(object, object.visible)
   }
   let faceGrids = 0
@@ -179,7 +183,7 @@ async function runInspectionChecks() {
     let index = 0
     for (const object of overlays.keys()) object.visible = index++ % 2 === 0
     const before = snapshot()
-    const webgl = Reflect.get(renderer, 'renderer') as WebGLRenderer
+    const webgl = viewport.renderer
     const original = webgl.readRenderTargetPixels
     const failure = new Error('Inspection readback failure')
     let called = false

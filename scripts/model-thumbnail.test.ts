@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { crc32, inflateSync } from 'node:zlib'
-import { VoxelDocument } from '../src/editor'
+import { VoxelDocument } from '../src/shared/voxel/document'
 import { renderModelThumbnail, THUMBNAIL_SIZE } from './model-thumbnail'
 
 // Independent, deliberately slow CRC oracle: catches the wrong polynomial or byte order.

@@ -1,5 +1,5 @@
 import { crc32, deflateSync } from 'node:zlib'
-import type { VoxelDocument } from '../src/editor'
+import type { VoxelDocument } from '../src/shared/voxel/document'
 
 export const THUMBNAIL_SIZE = 256
 

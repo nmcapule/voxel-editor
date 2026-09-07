@@ -1,7 +1,8 @@
 # Rendering Maintenance
 
-Implemented against `b533f88`, retaining the assistant, revision-conflict, face-projection,
-and offscreen isometric-inspection changes. No dependency versions were upgraded.
+The historical model-renderer audit below was implemented against `b533f88`, retaining
+the assistant, revision-conflict, face-projection, and offscreen isometric-inspection
+changes. No dependency versions were upgraded. Scene sections describe the current source.
 
 ## Audit Resolution
 
@@ -50,21 +51,121 @@ composited linear background, preserving material maps, transmission and roughne
 Source materials and scene visibility are restored before returning, including failures.
 Inspection uses its own offscreen pipeline without changing the live camera or canvas.
 
-Geometry/visibility/material-assignment changes request scene preparation after meshing.
+In the model editor, geometry/visibility/material-assignment changes request trace
+preparation after meshing.
 Color, scalar material properties and maps use material updates; lighting/background use
 their corresponding tracer APIs. All affected updates reset accumulation. Capture flushes
 the current raster image when the newest traced state has not yet been presented; it remains
 a mesh-idle/current-image capture, not a request to wait for convergence.
 
-Shadow maps are invalidated by caster geometry/classification, light direction, shadow
-frustum, enablement and context changes, not by camera motion or editor overlays.
+In the model editor, shadow maps are invalidated by caster geometry/classification,
+light direction, shadow frustum, enablement and context changes, not by camera motion
+or editor overlays.
 AO, guide grids and editor decorations remain raster-only. Production trace settings
 remain four ordinary bounces, the existing transmissive traversal allowance, 128 samples,
-2x2 tiles and 0.75 render scale.
+2x2 tiles and 0.75 model render scale; scene scaling also follows the viewport ceiling below.
 
 `patches/` contains Bun patches for Three 0.185.1, three-gpu-pathtracer 0.0.24 and
 three-mesh-bvh 0.9.14. `bun install --frozen-lockfile` reapplies them. Recheck the dependency
 regressions before upgrading; do not replace them with private-field mutation in app code.
+
+## Scene Resources
+
+Scenes compose models sized 16-256 voxels per axis rather than enlarging
+`VoxelDocument`. Extents are at most 16,384 per axis, with 10,000 instances; pivot
+positions lie within centered X/Z extents and Y from zero to the extent.
+Transformed geometry can extend beyond
+those pivot limits. `WorldIndex` is a fixed sparse grid of **256-unit world cells**,
+not an octree. An instance spanning more than 512 cells goes into an oversized
+fallback set that each query checks against its bounds.
+
+Adaptive rendering uses chunk-local greedy meshes, shared geometry and instanced
+batches. LOD **1/4/8** denotes voxel step size: LOD 1 reads full 16-cubed chunks;
+LOD 4 uses each descriptor's 4-cubed occupied-majority preview; LOD 8 downsamples
+that preview. Screen-size hysteresis avoids oscillation, and selection requests
+LOD 1 without bypassing resource limits. Coarse surfaces remain while detail loads.
+
+| Resource | Current bound and accounting |
+| --- | --- |
+| Raw chunk cache | 64 MiB (`SCENE_CPU_BUDGET`); immutable hashes, deduplicated in-flight reads, evictable cache; callers own separate byte copies |
+| Scene geometry | 128 MiB (`SCENE_GEOMETRY_BUDGET`), counting retained CPU and GPU surface/matrix copies, pending-worker allowance, and full-detail staging reservations |
+| Scene metadata | 128 MiB conservative estimate (`METADATA_BYTES`), at most 262,144 chunk references and 10,000 each of instances, assets, and layers; these limits apply together |
+| Hydrated child editor | 72 MiB of owned layer-chunk bytes (`MAX_BINARY_BYTES`), checked before loading; not a total editor-memory limit |
+| Scene undo/redo | 8 MiB estimated delta history (`HISTORY_BYTES`); old entries, or an oversized entry itself, may be evicted; child voxel edits are not scene undo entries |
+| Model undo | Existing 64 MiB chunk-history target (`HISTORY_LIMIT`), separate from hydration and scene history; the newest edit is retained even if oversized |
+| Streaming work | One mesh worker/job at a time, at most 64 queued demands, 8 MiB frame upload allowance; adaptive grouping stops at 16,384 groups and reports omitted contributors |
+
+Constants live in `src/scene-types.ts`, `src/scene.ts`, `src/scene-storage.ts`,
+`src/scene-renderer.ts`, `src/protocol.ts`, and `src/editor.ts`. These are resource
+budgets, not a combined browser-memory cap or voxel-performance claim. Retained
+standalone/child editing state and session texture payloads are additional. In particular,
+`src/scene.test.ts` covers 100M-plus repeated and unique-source voxel metadata without
+fetching/scanning voxel arrays; it does not demonstrate rendering all those voxels.
+The viewport's represented count describes source voxels for drawn instance/chunks,
+not unique occupied world cells or the number of full-detail cells resident in RAM.
+
+## Scene Dependencies
+
+`sceneChunkFingerprint` in `src/scene-mesher.ts` keys a mesh by its chunk and six
+face neighbors, ordered visible model-layer ownership, immutable blob descriptors,
+and transparency classes of materials used in that neighborhood. Editing a chunk
+invalidates only dependent surfaces; RGB/scalar PBR changes reuse meshes unless
+their opacity/transmission classification changes. TRS updates reuse asset surfaces;
+reverse asset/instance references localize world-index updates. Worker generations
+and dependency keys reject stale results. Child saves hash dirty chunk bytes (all
+chunks on replacement/resize). Record-delta persistence and compare-and-swap are
+described in [MODEL-LIBRARY.md](MODEL-LIBRARY.md#scene-recovery).
+
+Committed scene content, material, lighting, or visibility changes invalidate prepared
+full-scene content. Streaming and selection alone do not rebuild the tracer; camera
+changes restart accumulation, and viewport pixel-area changes recheck preparation.
+Scene mode suspends model mesh work; child editing releases dormant scene surfaces.
+
+## Scene Quality Ceilings
+
+Progressive PBR in Render mode prepares **every visible scene layer at LOD 1**,
+including offscreen shadow/reflection contributors. The adapter expands instances
+into ordinary world-space meshes grouped by material before BVH preparation; it
+never hands adaptive instancing to the tracer as a supposedly complete scene.
+Both tracing and full-scene capture require at most **1,000,000 expanded triangles**
+(including two stage triangles) and a **96 MiB conservative estimated peak**.
+`sceneDetailBudget` and `expandSceneDetail` in `src/scene-renderer.ts` are authoritative:
+
+```text
+peakBytes = sourceBytes + 16 MiB + triangles * 2048
+          + materialEntries * 8192 + min(viewportPixels, 1_000_000) * 48
+```
+
+The estimate covers retained source buffers, expanded/baked/merged arrays, BVH worker
+copies and GPU tables, material tables, and new viewport-dependent trace targets.
+`viewportPixels` is drawing-buffer width times height, not CSS pixel area.
+The material-entry guard is 65,534, with the stage included in preflight. The memory
+ceiling rejects far below the triangle ceiling; 1M is not an admitted workload
+promise. Staging must also fit the 128 MiB geometry budget alongside live adaptive
+resources. Existing host raster targets and the raw cache are separate, so 96 MiB
+is not total page/GPU memory. `VoxelRenderer.prepareSceneContent` rechecks the adapter.
+
+`VoxelRenderer.ensurePathTracer` uses four bounces, 2x2 tiles, and scene render scale
+`0.75 * min(1, sqrt(1_000_000 / viewportPixels))`; sampling stops at 128 completed
+samples. Budget, dependency, or tracing failures report realtime **Raster fallback**.
+Adaptive raster may reduce detail under pressure. Its shadow working set uses a
+receiver-scoped light-space volume, including the visible ground and relevant
+offscreen casters without making every scene instance resident. The query extends
+through scene depth rather than imposing an arbitrary shadow-distance cutoff.
+Streaming, budget failures, or omitted contributors are reported rather than
+claiming exact shadows/reflections.
+
+- **Viewport detail** is the default Capture quality. It waits for drawable current
+  scene dependencies, then captures the current image: a current progressive sample
+  when available, otherwise adaptive raster. It does not wait for convergence.
+- **Full-scene detail** requests `capture(true)`: full LOD-1 raster geometry for all
+  visible layers, even if PBR is enabled. Missing/oversized dependencies or a changed
+  scene/camera reject rather than silently returning a partial or lower-detail PNG.
+  Scene editing overlays are excluded; the live viewport is restored afterward.
+
+Labels come from `src/scene-ui.ts`; capture behavior is in `src/renderer.ts`.
+`src/scene-mesher.test.ts` covers localized invalidation, bounded preparation, ordinary
+trace meshes, fallback, stale results, and exact-capture rejection/restoration.
 
 ## Measurements
 
@@ -100,7 +201,7 @@ bun scripts/mesher-benchmark.ts
 bunx vite --config tests/vite.config.ts --port 5188
 ```
 
-The completed run passed 172 Bun tests, production build/typecheck and the Impeccable
+The historical audit run passed 172 Bun tests, production build/typecheck and the Impeccable
 detector on changed rendering/UI files. Browser checks used Chromium WebGL2 via ANGLE
 SwiftShader, not a discrete GPU. Desktop 1280x577 and mobile 393x852 app checks loaded,
 edited/rendered a model and showed no horizontal overflow.

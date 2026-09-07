@@ -64,6 +64,30 @@ data uses tabular figures.
   status sits below it on a slightly translucent surface. Place keeps its active and recent
   material cubes inside its popup, and the active cube opens the full Palette.
 
+## Scene Workspace
+
+- The main project menu offers **Scene editor** and **Create scene from this model**.
+  Child editing keeps a scene/model breadcrumb with the shared-instance count and
+  **Done: Return to scene**. The scene menu's **Return to model editor** restores
+  the standalone workspace; it is distinct from finishing a child edit.
+- Reuse the canvas-first instruments and responsive layout. The scene dock is
+  **Select, Place, Transform, Layer**; Stage contains **Scene, Instance, Render**.
+  Transform offers Move, Rotate, Scale, snapping, and exact single-instance TRS
+  fields. Searchable asset/instance lists and library results use 50-item pages.
+- Keep **Edit model** and **Make unique** together with explicit sharing copy:
+  editing changes every copy, including locked copies, but not the source library
+  model. Locks protect instance changes, not the shared asset's voxel contents.
+  The library's Models tab reuses existing thumbnails; Scenes lists saved scenes
+  by name and instance/asset counts, without promising scene thumbnails.
+- Render exposes **Progressive PBR** and **Capture quality** with **Viewport detail**
+  and **Full-scene detail**, followed by **Capture PNG**. Full-scene detail is a
+  budgeted exact-geometry raster capture, not a converged PBR image. Keep rejection
+  and adaptive-fallback messages explicit; see [RENDERING.md](RENDERING.md#scene-quality-ceilings).
+- Show local recovery and server-save state separately. Label represented voxel
+  counts, current LOD/loading, and estimated CPU/GPU geometry usage truthfully,
+  not as fully resident voxels or total device memory. Warn about uncached online
+  assets and omitted session-only texture images; never imply unlimited undo.
+
 ## Interaction States
 
 - Active tools use solid cobalt with white labels and icons.

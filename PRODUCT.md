@@ -10,18 +10,20 @@ web
 
 Delegated recommendation confirmed: Bun, TypeScript, Vite, and Three.js. The
 application uses a browser-based editor with native local recovery and file APIs,
-plus a Bun/SQLite server for a shared model library.
+plus a Bun/SQLite server for shared model and scene libraries.
 
 ## Users
 
 Voxel artists and game creators working on a desktop or tablet who want to make,
-inspect, and render compact voxel models without installing desktop software.
+inspect, and render voxel models and compose them into scenes without installing
+desktop software.
 
 ## Product Purpose
 
 Voxel Studio is a focused browser-based voxel editor and renderer. Success means
 a creator can open the app, shape and color a model directly in 3D, return to it
-later, exchange it with MagicaVoxel, and capture a finished image.
+later, exchange it with MagicaVoxel, arrange model instances into a larger scene,
+and capture a finished image.
 
 ## Positioning
 
@@ -33,16 +35,26 @@ It should feel like drawing in space rather than operating a traditional desktop
 ## Operating Context
 
 Creators work in one full-screen 3D viewport using a mouse and keyboard, pen, or
-touch. They retain a point, surface, texture, or body selection mode while using
-four primary tools: Select, Place, Sculpt, and Layer. Place reuses the selection mode,
+touch. In the model editor they retain a point, surface, texture, or body selection
+mode while using four primary tools: Select, Place, Sculpt, and Layer. Place reuses the selection mode,
 with Paint and Volume operations plus a momentary Eyedropper; Layer activates
 the owner of a clicked voxel. Creators can also navigate the camera,
 adjust the palette and lighting, and import or export files.
 
+The separate scene editor places, selects, transforms, and layers model instances.
+Edit model enters the existing voxel editor for a shared scene asset; Done returns
+to the composition without replacing the standalone model workspace.
+
 ## Capabilities and Constraints
 
-- One model per document with dimensions from 16 to 256 voxels on each axis and
-  resizing anchored to either the coordinate origin or the canvas center.
+- The model editor keeps one model per document, with dimensions from 16 to 256
+  voxels on each axis and resizing anchored to the coordinate origin or canvas center.
+- Scene documents support extents up to 16,384 units per axis and 10,000 composed
+  model instances with independent position, quaternion rotation, and scale (TRS).
+  Copies share a scene-local asset: Edit model updates all its instances, including
+  hidden or locked copies; Make unique detaches one instance first. Scene layer
+  locks protect instance edits and TRS, not shared model contents. Library models
+  are copied into scene assets, not live-linked or updated by child editing.
 - Named voxel layers with one active layer, visibility and locking controls,
   overlapping per-layer voxels, and local persistence. The highest visible layer
   wins at each coordinate; clicking a visible voxel with the Layer tool activates
@@ -73,18 +85,31 @@ adjust the palette and lighting, and import or export files.
   Opaque surfaces remain visible where they meet transparent or transmissive
   voxels.
 - Single-model MagicaVoxel VOX import and VOX 150 export with a 255-color palette.
-- One local autosave in IndexedDB, plus explicit server saves in a shared model
-  library. A dedicated gallery overlay shows isometric model thumbnails with
+- One standalone model autosave in IndexedDB, plus explicit server saves in a shared
+  model library. A dedicated gallery overlay shows isometric model thumbnails with
   name search and custom-tag filters. Saving and saving copies use a separate
   dialog. Server saves include layers, palette, material properties and lighting,
   but not texture image files, camera position or undo history. No account is
   required; the shared library is for personal or trusted-team servers.
+- Scenes have separate local recovery, explicit scene-library saves, and streaming
+  `.vscene` import/export. A recovered manifest may still need online access to
+  uncached chunks; it is not a guarantee of a complete offline scene. Texture
+  images remain session-only. See [MODEL-LIBRARY.md](MODEL-LIBRARY.md) for persistence.
+- The standalone editing session is preserved while composing a scene. Only the
+  last visited child model retains its editing session and undo history for reuse;
+  visiting another child discards the older child's history, not its saved edits.
+  Scene history is separate from model-content history, bounded, and may evict
+  undo entries. Histories do not survive refresh or library/file round trips.
 - Selection scope plus active and recent materials persist across refreshes.
 - Desktop-first interaction with pen and touch support and a mobile-safe layout.
-- Animation, multiple scene objects, per-voxel material metadata, cloud sync,
+- Animation, per-voxel material metadata, cloud sync,
   and collaboration are outside the first release.
 - A 256-cubed document is a supported coordinate volume. Pathological models
   with extreme exposed surface area may exceed practical WebGL geometry budgets.
+- Scene metadata validation covers 100 million-plus represented/source voxel
+  fixtures without hydrating a giant voxel document. This is not an FPS or
+  full-detail rendering promise: streaming, adaptive LOD, model hydration, and
+  full-scene PBR/capture have distinct [resource budgets](RENDERING.md#scene-resources).
 
 ## Brand Commitments
 

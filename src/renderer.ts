@@ -30,6 +30,28 @@ export interface CameraSnapshot {
   viewport: { width: number; height: number }
 }
 
+/** Borrowed viewport content. The adapter owns its root/resources, never the host GL context.
+ * Bounds are world-space; call setSceneContent again after changing them. Full detail
+ * must contain every contributor as ordinary meshes, independently owned and budgeted.
+ */
+export interface SceneContent {
+  root: THREE.Group
+  bounds: THREE.Box3
+  whenReady(): Promise<void>
+  onViewportChange(): void
+  prepareFullDetail?(signal: AbortSignal): Promise<PreparedSceneContent>
+}
+
+export interface PreparedSceneContent {
+  root: THREE.Group
+  scope: 'full-scene'
+  triangles: number
+  peakBytes: number
+  geometryBytes: number
+  sourceBytes: number
+  dispose(): void
+}
+
 export function shouldOrbitTouch(actionable: boolean, activeTouches: number) {
   return !actionable && activeTouches === 0
 }
@@ -40,6 +62,73 @@ export function isTouchTap(startX: number, startY: number, endX: number, endY: n
 
 export function castsRealtimeShadow(material: Pick<PaletteMaterial, 'opacity' | 'transmission'>) {
   return material.opacity >= 1 && material.transmission === 0
+}
+
+/** Conservative directional-shadow demand: camera-clipped receivers in light XY,
+ * extended toward the light through occupied scene depth. Polygon clipping handles
+ * horizon crossings and negative orthographic near planes without ground-ray divides.
+ * worldToLight uses the shadow camera convention (+Z points toward the light).
+ */
+export function sceneShadowVolume(camera: THREE.Camera, occupied: THREE.Box3, receivers: Iterable<THREE.Box3>, worldToLight: THREE.Matrix4, groundY?: number, margin = 0, groundBounds?: THREE.Box3) {
+  if (occupied.isEmpty()) return
+  camera.updateMatrixWorld(true)
+  const frustum = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse))
+  const lightBounds = new THREE.Box3(), point = new THREE.Vector3()
+  const include = (points: THREE.Vector3[]) => {
+    for (const vertex of points) lightBounds.expandByPoint(point.copy(vertex).applyMatrix4(worldToLight))
+  }
+  const clip = (polygon: THREE.Vector3[]) => {
+    for (const plane of frustum.planes) {
+      const result: THREE.Vector3[] = []
+      for (let i = 0; i < polygon.length; i++) {
+        const a = polygon[i], b = polygon[(i + 1) % polygon.length]
+        const da = plane.distanceToPoint(a) + 1e-7, db = plane.distanceToPoint(b) + 1e-7
+        if (da >= 0) result.push(a)
+        if ((da >= 0) !== (db >= 0)) result.push(a.clone().lerp(b, da / (da - db)))
+      }
+      polygon = result
+      if (!polygon.length) break
+    }
+    return polygon
+  }
+  const corners = (bounds: THREE.Box3) => Array.from({ length: 8 }, (_, i) => new THREE.Vector3(
+    i & 1 ? bounds.max.x : bounds.min.x, i & 2 ? bounds.max.y : bounds.min.y, i & 4 ? bounds.max.z : bounds.min.z))
+  const viewCorners = corners(new THREE.Box3(new THREE.Vector3(-1, -1, -1), new THREE.Vector3(1, 1, 1))).map(p => p.unproject(camera))
+  for (const bounds of receivers) {
+    if (bounds.isEmpty() || !frustum.intersectsBox(bounds)) continue
+    const vertices = corners(bounds)
+    if (vertices.every(p => frustum.containsPoint(p))) { include(vertices); continue }
+    for (const face of [[0, 1, 3, 2], [4, 6, 7, 5], [0, 4, 5, 1], [2, 3, 7, 6], [0, 2, 6, 4], [1, 5, 7, 3]]) include(clip(face.map(i => vertices[i])))
+    // A receiver can contain the frustum without any receiver corner being visible.
+    include(viewCorners.filter(p => bounds.containsPoint(p)))
+  }
+  if (groundY !== undefined && (camera instanceof THREE.PerspectiveCamera
+    ? camera.getWorldPosition(point).y > groundY : camera.getWorldDirection(point).y < 0)) {
+    const footprint = occupied.clone(), light = worldToLight.elements
+    footprint.min.y = footprint.max.y = groundY
+    // Shadows can land outside the occupied XZ box. Bound ground receivers by the
+    // occupied scene's projected shadow footprint, then by the finite stage floor.
+    if (light[6] > 1e-8) for (const vertex of corners(occupied)) {
+      const distance = (vertex.y - groundY) / light[6]
+      footprint.expandByPoint(point.set(vertex.x - light[2] * distance, groundY, vertex.z - light[10] * distance))
+    }
+    if (groundBounds) {
+      footprint.min.x = Math.max(footprint.min.x, groundBounds.min.x); footprint.max.x = Math.min(footprint.max.x, groundBounds.max.x)
+      footprint.min.z = Math.max(footprint.min.z, groundBounds.min.z); footprint.max.z = Math.min(footprint.max.z, groundBounds.max.z)
+    }
+    if (!footprint.isEmpty()) include(clip([
+      new THREE.Vector3(footprint.min.x, groundY, footprint.min.z), new THREE.Vector3(footprint.max.x, groundY, footprint.min.z),
+      new THREE.Vector3(footprint.max.x, groundY, footprint.max.z), new THREE.Vector3(footprint.min.x, groundY, footprint.max.z),
+    ]))
+  }
+  if (lightBounds.isEmpty()) return
+  const padding = Math.max(0, margin) + 1e-5
+  lightBounds.expandByScalar(padding)
+  lightBounds.max.z = Math.max(lightBounds.max.z, occupied.clone().applyMatrix4(worldToLight).max.z + padding)
+  const { min, max } = lightBounds
+  if (![...min.toArray(), ...max.toArray()].every(Number.isFinite)) throw new Error('Cannot determine shadow demand from a non-finite camera/light transform.')
+  return new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4()
+    .makeOrthographic(min.x, max.x, max.y, min.y, -max.z, -min.z).multiply(worldToLight))
 }
 
 export function realtimeEnvironmentIntensity(metalness: number) {
@@ -352,6 +441,20 @@ export class VoxelRenderer {
   private orthographicSpan = 32
   private host: HTMLElement
   private callbacks: RendererCallbacks
+  private sceneContent?: SceneContent
+  private modelSuspended = false
+  private fullContent?: PreparedSceneContent
+  private fullPreparation?: Promise<PreparedSceneContent>
+  private fullAbort?: AbortController
+  private fullEpoch = 0
+  private fullViewportPixels = 0
+  private traceScene?: THREE.Scene
+  private traceGround?: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
+  private sceneInteraction = false
+  private sceneCameraDirty = false
+  private modelView?: CameraSnapshot
+  private modelSettings?: ViewSettings
+  private modelRenderMode?: boolean
 
   constructor(host: HTMLElement, document: VoxelDocument, settings: ViewSettings, callbacks: RendererCallbacks) {
     this.host = host
@@ -395,6 +498,7 @@ export class VoxelRenderer {
       if (this.rasterFrame !== undefined) cancelAnimationFrame(this.rasterFrame)
       this.rasterFrame = undefined
       this.disposePathTracer()
+      this.releaseSceneDetail()
       this.callbacks.onPathTracingStatus('Graphics context lost')
     })
     this.renderer.domElement.addEventListener('webglcontextrestored', () => {
@@ -421,7 +525,7 @@ export class VoxelRenderer {
   private bindWorker() {
     const worker = this.worker
     this.worker.onmessage = event => {
-      if (worker !== this.worker) return
+      if (worker !== this.worker || this.modelSuspended) return
       const message = event.data as { type: 'ready' } | { type: 'meshed'; results: MeshResult[] } | { type: 'gridded'; results: GridResult[] }
       if (message.type === 'ready') {
         this.workerReady = true
@@ -439,7 +543,7 @@ export class VoxelRenderer {
       }
     }
     this.worker.onerror = () => {
-      if (worker !== this.worker) return
+      if (worker !== this.worker || this.modelSuspended) return
       this.inFlight = 0
       this.queued.clear()
       this.queuedGrids.clear()
@@ -451,8 +555,8 @@ export class VoxelRenderer {
   }
 
   private createCamera(projection: ViewSettings['projection']) {
-    if (projection === 'perspective') return new THREE.PerspectiveCamera(34, 1, 0.1, 2000)
-    return new THREE.OrthographicCamera(-20, 20, 20, -20, -1000, 2000)
+    if (projection === 'perspective') return new THREE.PerspectiveCamera(34, 1, this.sceneContent ? 0.5 : 0.1, this.sceneContent ? 131072 : 2000)
+    return new THREE.OrthographicCamera(-20, 20, 20, -20, this.sceneContent ? -65536 : -1000, this.sceneContent ? 131072 : 2000)
   }
 
   private createEnvironment() {
@@ -488,7 +592,7 @@ export class VoxelRenderer {
     controls.touches.ONE = -1 as THREE.TOUCH
     controls.touches.TWO = THREE.TOUCH.DOLLY_ROTATE
     controls.minDistance = 2
-    controls.maxDistance = 1200
+    controls.maxDistance = this.sceneContent ? 65536 : 1200
     controls.addEventListener('start', () => {
       if (!interacting) { changed = false; this.callbacks.onViewStart() }
       interacting = true
@@ -507,6 +611,7 @@ export class VoxelRenderer {
   private bindPointerEvents() {
     const canvas = this.renderer.domElement
     canvas.addEventListener('pointerdown', event => {
+      if (this.sceneContent) return
       if (event.pointerType !== 'touch') return
       const orbit = this.renderMode || shouldOrbitTouch(this.touchTargetActionable(this.targetAt(event)), this.touchPointers.size)
       this.controls.touches.ONE = orbit ? THREE.TOUCH.ROTATE : -1 as THREE.TOUCH
@@ -514,6 +619,7 @@ export class VoxelRenderer {
     }, { capture: true })
     canvas.addEventListener('contextmenu', event => event.preventDefault())
     canvas.addEventListener('pointerdown', event => {
+      if (this.sceneContent) return
       if (event.pointerType === 'touch') {
         this.touchPointers.add(event.pointerId)
         if (this.touchPointers.size > 1) {
@@ -592,6 +698,7 @@ export class VoxelRenderer {
       }
     })
     canvas.addEventListener('pointermove', event => {
+      if (this.sceneContent) return
       if (this.touchPointers.size > 1) return
       if (this.marqueeDrag && this.activePointer === event.pointerId) {
         this.moveMarquee(event)
@@ -605,6 +712,7 @@ export class VoxelRenderer {
       this.showHover(target)
     })
     canvas.addEventListener('pointerup', event => {
+      if (this.sceneContent) return
       const deselect = !this.renderMode && event.pointerType === 'touch' && this.orbitTouch?.pointerId === event.pointerId
         && isTouchTap(this.orbitTouch.startX, this.orbitTouch.startY, event.clientX, event.clientY)
       if (this.orbitTouch?.pointerId === event.pointerId) this.orbitTouch = undefined
@@ -637,6 +745,7 @@ export class VoxelRenderer {
       }
     })
     canvas.addEventListener('pointercancel', event => {
+      if (this.sceneContent) return
       this.touchPointers.delete(event.pointerId)
       if (this.orbitTouch?.pointerId === event.pointerId) this.orbitTouch = undefined
       this.cancelPaint()
@@ -644,6 +753,7 @@ export class VoxelRenderer {
       this.cancelMarquee()
     })
     canvas.addEventListener('pointerleave', () => {
+      if (this.sceneContent) return
       this.hover.visible = false
       this.callbacks.onHover()
       this.render()
@@ -652,7 +762,7 @@ export class VoxelRenderer {
   }
 
   private keyboard(event: KeyboardEvent) {
-    if (this.renderMode) return
+    if (this.sceneContent || this.renderMode) return
     const movement: Partial<Vec3> = {}
     if (event.key === 'ArrowLeft') movement.x = -1
     else if (event.key === 'ArrowRight') movement.x = 1
@@ -853,7 +963,7 @@ export class VoxelRenderer {
       || this.document.getVisibleVoxelLayer(cell.x, cell.y, cell.z) === this.document.activeLayerId)) this.selection.set(this.selectionKey(cell), { ...cell })
     this.clearSelectionPreview()
     const selected = [...this.selection.values()]
-    if (selected.length) {
+    if (selected.length && !this.sceneContent) {
       const material = new THREE.MeshBasicMaterial({ color: 0x2f66db, transparent: true, opacity: floating ? 0.4 : 0.3, depthTest: !floating, depthWrite: false })
       const preview = new THREE.InstancedMesh(new THREE.BoxGeometry(1.06, 1.06, 1.06), material, selected.length)
       preview.userData.editorOverlay = true
@@ -865,7 +975,7 @@ export class VoxelRenderer {
       })
       preview.instanceMatrix.needsUpdate = true
       preview.computeBoundingSphere()
-      preview.visible = !this.renderMode
+      preview.visible = !this.renderMode && !this.sceneContent
       this.selectionPreview = preview
       this.scene.add(preview)
     }
@@ -883,7 +993,7 @@ export class VoxelRenderer {
   }
 
   private finishSelection(selection: SelectionState, notify: boolean, focus: boolean) {
-    if (focus) this.moveFocus(this.focusCenter())
+    if (focus && !this.sceneContent) this.moveFocus(this.focusCenter())
     if (notify) this.callbacks.onSelectionChange(selection)
     this.render()
   }
@@ -1106,7 +1216,7 @@ export class VoxelRenderer {
     if (this.pushPullDrag) this.callbacks.onPushPullPreview()
     this.pushPullPreview = undefined
     this.pushPullDrag = undefined
-    if (this.selectionPreview) this.selectionPreview.visible = !this.renderMode
+    if (this.selectionPreview) this.selectionPreview.visible = !this.renderMode && !this.sceneContent
     this.activePointer = undefined
     this.render()
   }
@@ -1178,6 +1288,7 @@ export class VoxelRenderer {
 
   private receiveMeshes(message: { type: 'meshed'; results: MeshResult[] }) {
     if (message.type !== 'meshed') return
+    if (this.sceneContent) return
     this.inFlight = 0
     for (const result of message.results) {
       if (this.versions.get(result.id) !== result.version || !this.document.chunks.has(result.id)) continue
@@ -1259,6 +1370,7 @@ export class VoxelRenderer {
   }
 
   private pump() {
+    if (this.sceneContent) return
     if (!this.workerReady || this.meshFailed || this.inFlight) { this.reportMeshStats(); return }
     while (this.queued.size || this.queuedGrids.size) {
       const grid = !this.queued.size
@@ -1277,6 +1389,7 @@ export class VoxelRenderer {
   }
 
   markDirty(ids: Iterable<number>) {
+    if (this.sceneContent) return
     for (const id of ids) {
       this.versions.set(id, ++this.nextVersion)
       this.queued.add(id)
@@ -1289,6 +1402,7 @@ export class VoxelRenderer {
   }
 
   whenMeshIdle() {
+    if (this.modelSuspended) return Promise.reject(new Error('Model meshing is suspended in scene mode.'))
     if (this.meshFailed) return Promise.reject(new Error('The voxel surface worker stopped.'))
     if (!this.queued.size && !this.queuedGrids.size && !this.inFlight) return Promise.resolve()
     return new Promise<void>((resolve, reject) => this.meshWaiters.push({ resolve, reject }))
@@ -1376,11 +1490,11 @@ export class VoxelRenderer {
     this.queuedGrids.clear()
     this.versions.clear()
     this.worker.terminate()
-    this.worker = new Worker(new URL('./mesher.worker.ts', import.meta.url), { type: 'module' })
+    if (!this.sceneContent) this.worker = new Worker(new URL('./mesher.worker.ts', import.meta.url), { type: 'module' })
     this.inFlight = 0
     this.workerReady = false
     this.meshFailed = false
-    this.bindWorker()
+    if (!this.sceneContent) this.bindWorker()
     for (const id of [...this.chunkMeshes.keys()]) this.removeChunk(id)
     if (!preserveMaterials) {
       this.disposeMaterials()
@@ -1486,7 +1600,7 @@ export class VoxelRenderer {
   }
 
   private pathTracingEnabled() {
-    return this.renderMode && this.settings.pathTracing && !this.pathTracingFailed && !this.contextLost
+    return (!this.sceneContent || !!this.sceneContent.prepareFullDetail) && !this.sceneInteraction && this.renderMode && this.settings.pathTracing && !this.pathTracingFailed && !this.contextLost
   }
 
   private stopPathTracingSamples() {
@@ -1494,11 +1608,10 @@ export class VoxelRenderer {
     this.pathTracingFrame = undefined
   }
 
-  private startPathTracingSamples() {
+  private startPathTracingSamples(reset = true) {
     if (!this.pathTracer || !this.pathTracingEnabled() || !this.pathTracingReady) return
     this.stopPathTracingSamples()
-    this.pathTracer.reset()
-    this.presentationDirty = true
+    if (reset) { this.pathTracer.reset(); this.presentationDirty = true }
     this.resetFps()
     let reportedSamples = -1
     const sample = () => {
@@ -1536,7 +1649,7 @@ export class VoxelRenderer {
     tracer.setBVHWorker(worker)
     tracer.bounces = 4
     tracer.tiles.set(2, 2)
-    tracer.renderScale = 0.75
+    tracer.renderScale = this.sceneContent ? 0.75 * Math.min(1, Math.sqrt(1_000_000 / (this.renderer.domElement.width * this.renderer.domElement.height))) : 0.75
     tracer.renderDelay = 0
     tracer.minSamples = 1
     tracer.fadeDuration = 180
@@ -1552,6 +1665,7 @@ export class VoxelRenderer {
     this.pathTracingReady = false
     this.stopPathTracingSamples()
     this.render()
+    if (this.sceneContent && !this.sceneContent.prepareFullDetail && this.renderMode && this.settings.pathTracing) this.callbacks.onPathTracingStatus('Scene raster only (no full-detail adapter)')
     if (!this.pathTracingEnabled()) return
     if (this.inFlight || this.queued.size) {
       this.callbacks.onPathTracingStatus('Updating mesh')
@@ -1564,10 +1678,22 @@ export class VoxelRenderer {
     if (this.pathTracingBuildRunning) return
     this.pathTracingBuildRunning = true
     let buildingTracer: WebGLPathTracer | undefined
+    let buildingRevision = this.pathTracingRevision
     try {
       while (this.pathTracingEnabled() && this.pathTracingBuildRequested && !this.inFlight && !this.queued.size) {
         const revision = this.pathTracingRevision
+        buildingRevision = revision
         this.pathTracingBuildRequested = false
+        const content = this.sceneContent
+        let prepared: PreparedSceneContent | undefined
+        if (content) {
+          this.callbacks.onPathTracingStatus('Preparing full scene')
+          prepared = await this.prepareSceneContent()
+          if (!this.pathTracingEnabled() || content !== this.sceneContent) break
+          if (revision !== this.pathTracingRevision) { this.pathTracingBuildRequested = true; continue }
+          // A fresh generator avoids retaining a previous expanded scene during a rebuild.
+          this.disposePathTracer()
+        }
         const tracer = await this.ensurePathTracer()
         buildingTracer = tracer
         if (!tracer || !this.pathTracingEnabled()) break
@@ -1577,7 +1703,8 @@ export class VoxelRenderer {
         }
         let progressStep = -1
         this.callbacks.onPathTracingStatus('Preparing')
-        await tracer.setSceneAsync(this.scene, this.camera, {
+        const traceScene = prepared ? this.createTraceScene(prepared) : this.scene
+        await tracer.setSceneAsync(traceScene, this.camera, {
           onProgress: progress => {
             if (!this.pathTracingEnabled() || revision !== this.pathTracingRevision) return
             const step = Math.floor(progress * 10)
@@ -1589,9 +1716,10 @@ export class VoxelRenderer {
         })
         this.pathTracingReady = this.pathTracingEnabled() && revision === this.pathTracingRevision
           && !this.pathTracingBuildRequested && !this.inFlight && !this.queued.size
+        if (this.pathTracingReady) this.sceneCameraDirty = false
       }
     } catch (error) {
-      if (!this.contextLost && (!buildingTracer || buildingTracer === this.pathTracer)) this.failPathTracing(error)
+      if (!this.contextLost && (!buildingTracer || buildingTracer === this.pathTracer) && buildingRevision === this.pathTracingRevision && this.pathTracingEnabled()) this.failPathTracing(error)
     } finally {
       this.pathTracingBuildRunning = false
     }
@@ -1604,6 +1732,11 @@ export class VoxelRenderer {
     this.pathTracingWorker = undefined
     this.pathTracer?.dispose()
     this.pathTracer = undefined
+    this.traceScene?.clear()
+    this.traceScene = undefined
+    this.traceGround?.geometry.dispose()
+    this.traceGround?.material.dispose()
+    this.traceGround = undefined
   }
 
   private failPathTracing(error: unknown) {
@@ -1621,6 +1754,7 @@ export class VoxelRenderer {
     this.pathTracingRevision++
     this.stopPathTracingSamples()
     this.disposePathTracer()
+    if (this.sceneContent) this.releaseSceneDetail()
     this.resetFps()
     this.callbacks.onPathTracingStatus('Raster fallback')
     this.callbacks.onError(`Progressive PBR stopped. Using the realtime renderer. ${error instanceof Error ? error.message : ''}`.trim())
@@ -1640,12 +1774,20 @@ export class VoxelRenderer {
         else if (change === 'environment') this.pathTracer.updateEnvironment()
         else this.pathTracer.setCamera(this.camera)
       }
+      if (changes.includes('camera')) this.sceneCameraDirty = false
       this.startPathTracingSamples()
     } catch (error) { this.failPathTracing(error) }
   }
 
   private cameraChanged() {
+    if (this.sceneContent) this.sceneCameraDirty = true
+    if (this.sceneContent && this.camera instanceof THREE.PerspectiveCamera) {
+      // Scene-scale depth precision without sacrificing close-up voxel editing.
+      this.camera.near = Math.max(0.1, this.controls.getDistance() / 1000)
+      this.camera.updateProjectionMatrix()
+    }
     this.updateWorkspaceGridVisibility()
+    this.sceneContent?.onViewportChange()
     if (this.pathTracer && this.pathTracingReady && !this.pathTracingBuildRunning) this.updatePathTracing('camera')
     this.render()
   }
@@ -1658,18 +1800,23 @@ export class VoxelRenderer {
     this.renderMode = enabled
     this.hover.visible = false
     this.marqueePreview.visible = false
-    if (this.selectionPreview) this.selectionPreview.visible = !enabled
+    if (this.selectionPreview) this.selectionPreview.visible = !enabled && !this.sceneContent
     this.updateWorkspaceGridVisibility()
     if (this.limits) this.limits.visible = this.settings.grid && !enabled
     this.updateFaceGridVisibility()
     if (this.ground) this.ground.visible = enabled
+    this.sceneContent?.onViewportChange()
     if (enabled && this.settings.pathTracing) {
       this.pathTracingFailed = false
-      this.requestPathTraceRebuild()
+      if (this.sceneContent && this.pathTracingReady && !this.pathTracingBuildRequested) {
+        if (this.sceneCameraDirty) this.updatePathTracing('camera')
+        else this.startPathTracingSamples(false)
+      } else this.requestPathTraceRebuild()
     } else {
       this.pathTracingRevision++
       this.resetFps()
-      this.pathTracingReady = false
+      if (!this.sceneContent) this.pathTracingReady = false
+      else if (this.pathTracingBuildRunning || this.fullPreparation) this.invalidateSceneContent()
       this.stopPathTracingSamples()
       this.callbacks.onPathTracingStatus('Ready')
       this.render()
@@ -1681,6 +1828,7 @@ export class VoxelRenderer {
     const projectionChanged = settings.projection !== this.settings.projection
     const pathTracingChanged = settings.pathTracing !== this.settings.pathTracing
     const faceGridChanged = settings.faceGrid !== this.settings.faceGrid
+    const sceneDependenciesChanged = this.sceneContent && (['background', 'ambient', 'light', 'lightAzimuth', 'shadows'] as const).some(key => settings[key] !== previous[key])
     this.settings = { ...settings }
     const background = new THREE.Color(settings.background)
     this.scene.background = background
@@ -1699,9 +1847,11 @@ export class VoxelRenderer {
       ;(this.ground.material as THREE.MeshStandardMaterial).color.set(settings.background).offsetHSL(0, -0.04, -0.035)
       ;(this.ground.material as THREE.Material).needsUpdate = true
     }
-    const radius = Math.max(this.document.dimensions.x, this.document.dimensions.y, this.document.dimensions.z)
+    const stageSize = this.sceneContent?.bounds.getSize(new THREE.Vector3()) ?? this.document.dimensions
+    const center = this.sceneContent?.bounds.getCenter(new THREE.Vector3()) ?? new THREE.Vector3()
+    const radius = Math.max(this.sceneContent ? 32 : 0, stageSize.x, stageSize.y, stageSize.z)
     const radians = THREE.MathUtils.degToRad(settings.lightAzimuth)
-    this.sunlight.position.set(Math.cos(radians) * radius, radius * 1.7, Math.sin(radians) * radius)
+    this.sunlight.position.set(Math.cos(radians) * radius, radius * 1.7, Math.sin(radians) * radius).add(center)
     if (settings.shadows !== previous.shadows) for (const material of this.materials) Object.assign(material, { castShadow: settings.shadows })
     if (settings.shadows !== previous.shadows || settings.lightAzimuth !== previous.lightAzimuth) this.renderer.shadowMap.needsUpdate = true
     this.fitShadowCamera()
@@ -1712,12 +1862,13 @@ export class VoxelRenderer {
     }
     if (pathTracingChanged && settings.pathTracing) this.pathTracingFailed = false
     if (pathTracingChanged) this.resetFps()
-    if (pathTracingChanged && this.pathTracingEnabled()) this.requestPathTraceRebuild()
+    if (sceneDependenciesChanged) this.invalidateSceneContent()
+    else if (pathTracingChanged && this.pathTracingEnabled()) this.requestPathTraceRebuild()
     else if (!this.pathTracingEnabled()) {
       if (pathTracingChanged) this.pathTracingRevision++
       this.pathTracingReady = false
       this.stopPathTracingSamples()
-      this.callbacks.onPathTracingStatus('Ready')
+      this.callbacks.onPathTracingStatus(this.sceneContent && this.renderMode && settings.pathTracing ? 'Scene raster fallback' : 'Ready')
     } else {
       const changes: ('materials' | 'lights' | 'environment' | 'camera')[] = []
       if (settings.background !== previous.background || settings.shadows !== previous.shadows) changes.push('materials')
@@ -1726,6 +1877,7 @@ export class VoxelRenderer {
       if (projectionChanged) changes.push('camera')
       if (changes.length) this.updatePathTracing(...changes)
     }
+    this.sceneContent?.onViewportChange()
     this.render()
   }
 
@@ -1738,17 +1890,19 @@ export class VoxelRenderer {
     if (!this.grid) return
     this.grid.visible = this.settings.grid && !this.renderMode
     if (!this.grid.visible) return
+    if (this.sceneContent) return
     for (const child of this.grid.children) child.visible = workspaceGridPlaneVisible(this.document.dimensions, child.userData.normal as Vec3, this.camera.position)
   }
 
   private switchProjection(projection: ViewSettings['projection']) {
     this.cancelFocusAnimation()
     const position = this.camera.position.clone()
+    const target = this.controls.target.clone()
     this.controls.dispose()
     this.camera = this.createCamera(projection)
     this.camera.position.copy(position)
     this.controls = this.createControls(this.camera)
-    this.controls.target.copy(this.focusCenter())
+    this.controls.target.copy(this.sceneContent ? target : this.focusCenter())
     this.controls.update()
     this.resize()
   }
@@ -1768,7 +1922,10 @@ export class VoxelRenderer {
       ;(this.limits.material as THREE.Material).dispose()
     }
     if (this.ground) { this.scene.remove(this.ground); this.ground.geometry.dispose(); (this.ground.material as THREE.Material).dispose() }
-    const size = Math.max(32, this.document.dimensions.x, this.document.dimensions.z)
+    const sceneBounds = this.sceneContent?.bounds
+    const stageSize = sceneBounds?.getSize(new THREE.Vector3()) ?? this.document.dimensions
+    const center = sceneBounds?.getCenter(new THREE.Vector3()) ?? new THREE.Vector3()
+    const size = Math.max(32, stageSize.x, stageSize.z)
     this.grid = new THREE.Group()
     const gridNormals: Vec3[] = [
       { x: 0, y: 1, z: 0 },
@@ -1777,7 +1934,7 @@ export class VoxelRenderer {
       { x: 0, y: 0, z: 1 },
       { x: 0, y: 0, z: -1 },
     ]
-    for (const normal of gridNormals) {
+    for (const normal of sceneBounds ? [] : gridNormals) {
       const geometry = new THREE.BufferGeometry()
       geometry.setAttribute('position', new THREE.BufferAttribute(workspaceGridPositions(this.document.dimensions, normal), 3))
       const lines = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ color: 0xb8c3ca, transparent: true, opacity: 0.58 }))
@@ -1785,11 +1942,17 @@ export class VoxelRenderer {
       lines.userData.normal = normal
       this.grid.add(lines)
     }
+    if (sceneBounds) {
+      const spacing = Math.max(1, 2 ** Math.ceil(Math.log2(size / 64)))
+      const grid = new THREE.GridHelper(Math.ceil(size / spacing) * spacing, Math.ceil(size / spacing), 0x7b8993, 0xb8c3ca)
+      grid.position.set(center.x, sceneBounds.min.y, center.z)
+      this.grid.add(grid)
+    }
     const bounds = new THREE.Box3(
       new THREE.Vector3(-this.document.dimensions.x / 2, 0, -this.document.dimensions.z / 2),
       new THREE.Vector3(this.document.dimensions.x / 2, this.document.dimensions.y, this.document.dimensions.z / 2),
     )
-    this.limits = new THREE.Box3Helper(bounds, 0x7b8993)
+    this.limits = new THREE.Box3Helper(sceneBounds?.clone() ?? bounds, 0x7b8993)
     const limitsMaterial = this.limits.material as THREE.LineBasicMaterial
     limitsMaterial.transparent = true
     limitsMaterial.opacity = 0.68
@@ -1801,11 +1964,11 @@ export class VoxelRenderer {
       new THREE.MeshStandardMaterial({ color: this.settings.background, roughness: 1, envMap: this.environmentTarget.texture, envMapIntensity: 0 }),
     )
     this.ground.rotation.x = -Math.PI / 2
-    this.ground.position.y = -0.03
+    this.ground.position.set(center.x, (sceneBounds?.min.y ?? 0) - 0.03, center.z)
     this.ground.receiveShadow = true
     this.ground.visible = this.renderMode
     this.scene.add(this.ground)
-    this.sunlightTarget.position.set(0, this.document.dimensions.y / 3, 0)
+    this.sunlightTarget.position.copy(sceneBounds ? center : new THREE.Vector3(0, this.document.dimensions.y / 3, 0))
     this.setSettings(this.settings)
   }
 
@@ -1816,7 +1979,7 @@ export class VoxelRenderer {
     const camera = this.sunlight.shadow.camera
     const { x, y, z } = this.document.dimensions
     const size = Math.max(32, x, z)
-    const bounds = new THREE.Box3(new THREE.Vector3(-size, -0.03, -size), new THREE.Vector3(size, y, size)).applyMatrix4(camera.matrixWorldInverse)
+    const bounds = (this.sceneContent?.bounds.clone() ?? new THREE.Box3(new THREE.Vector3(-size, -0.03, -size), new THREE.Vector3(size, y, size))).applyMatrix4(camera.matrixWorldInverse)
     const values = [bounds.min.x - 1, bounds.max.x + 1, bounds.max.y + 1, bounds.min.y - 1, Math.max(0.1, -bounds.max.z - 1), -bounds.min.z + 1]
     if (values.some((value, index) => value !== [camera.left, camera.right, camera.top, camera.bottom, camera.near, camera.far][index])) this.renderer.shadowMap.needsUpdate = true
     ;[camera.left, camera.right, camera.top, camera.bottom, camera.near, camera.far] = values
@@ -1824,6 +1987,7 @@ export class VoxelRenderer {
   }
 
   frameModel() {
+    if (this.sceneContent) { this.frameSceneBounds(this.sceneContent.bounds); return }
     this.cancelFocusAnimation()
     const bounds = this.focusBounds()
     const center = this.focusCenter()
@@ -1836,6 +2000,188 @@ export class VoxelRenderer {
     this.resize()
     this.controls.update()
     this.render()
+  }
+
+  /** Live references: reacquire after projection/context changes. Do not dispose them. */
+  getSceneViewport() {
+    return { renderer: this.renderer, scene: this.scene, camera: this.camera,
+      canvas: this.renderer.domElement, environment: this.environmentTarget.texture,
+      controls: this.controls, renderMode: this.renderMode, shadows: this.settings.shadows }
+  }
+
+  /** Receiver-scoped shadow residency only; the shared shadow map keeps its existing
+   * scene-wide fit. Include the PCF footprint so filtered edge shadows are retained. */
+  getSceneShadowVolume(receivers: Iterable<THREE.Box3>, occupied: THREE.Box3) {
+    if (!this.settings.shadows) return
+    const shadow = this.sunlight.shadow, camera = shadow.camera
+    const texel = Math.max((camera.right - camera.left) / shadow.mapSize.x, (camera.top - camera.bottom) / shadow.mapSize.y)
+    let groundBounds: THREE.Box3 | undefined
+    if (this.ground?.visible) {
+      this.ground.updateWorldMatrix(true, false)
+      this.ground.geometry.computeBoundingBox()
+      groundBounds = this.ground.geometry.boundingBox!.clone().applyMatrix4(this.ground.matrixWorld)
+    }
+    return sceneShadowVolume(this.camera, occupied, receivers, camera.matrixWorldInverse,
+      this.ground?.visible ? this.ground.position.y : undefined, texel * (Math.abs(shadow.radius) + 1) + Math.abs(shadow.normalBias), groundBounds)
+  }
+
+  /** Mount/unmount external scene content on the existing camera, stage and raster host.
+   * Passing undefined restores the model camera/settings and its input hooks.
+   */
+  setSceneContent(content?: SceneContent) {
+    const previous = this.sceneContent
+    if (!previous && !content) return
+    if (!previous) { this.modelView = this.getView(); this.modelSettings = { ...this.settings }; this.modelRenderMode = this.renderMode }
+    if (previous !== content) { this.disposePathTracer(); this.releaseSceneDetail(); this.pathTracingFailed = false }
+    this.sceneContent = content
+    if (content && !previous) this.suspendModelMeshes()
+    else if (!content) this.resumeModelMeshes()
+    this.cancelFocusAnimation()
+    this.cancelPaint()
+    this.cancelPushPull()
+    this.cancelMarquee()
+    this.touchPointers.clear()
+    this.orbitTouch = undefined
+    for (const object of [this.hover, this.marqueePreview, this.selectionPreview, this.fillPreview, this.pushPullPreview]) if (object) object.visible = false
+    if (previous && previous !== content) this.scene.remove(previous.root)
+    if (content) this.scene.add(content.root)
+    this.model.visible = !content
+    this.controls.enabled = true
+    this.controls.touches.ONE = -1 as THREE.TOUCH
+    this.controls.maxDistance = content ? 65536 : 1200
+    this.camera.near = this.camera instanceof THREE.PerspectiveCamera ? content ? 0.5 : 0.1 : content ? -65536 : -1000
+    this.camera.far = content ? 131072 : 2000
+    this.camera.updateProjectionMatrix()
+    this.renderer.domElement.setAttribute('aria-label', content ? 'Scene viewport. Select or place objects; right drag or two-finger drag orbits. Escape cancels a transform.' : 'Voxel editing viewport. Arrow keys move the keyboard cursor, Page Up and Page Down change height, Space applies the active tool, and Shift Space reverses Push Pull or Move.')
+    this.rebuildStage()
+    if (!content) {
+      if (this.modelSettings) this.setSettings(this.modelSettings)
+      if (this.modelRenderMode !== undefined) this.setRenderMode(this.modelRenderMode)
+      if (this.modelView) this.setView(this.modelView)
+      if (this.selectionPreview) this.selectionPreview.visible = !this.renderMode
+      this.modelView = undefined
+      this.modelSettings = undefined
+      this.modelRenderMode = undefined
+    }
+    this.renderer.shadowMap.needsUpdate = true
+    this.requestPathTraceRebuild()
+  }
+
+  /** Only committed scene dependencies call this. Streaming and selection never do. */
+  invalidateSceneContent() {
+    if (!this.sceneContent) return
+    this.disposePathTracer()
+    this.releaseSceneDetail()
+    this.pathTracingFailed = false
+    this.requestPathTraceRebuild()
+  }
+
+  setSceneInteraction(active: boolean) {
+    if (this.sceneInteraction === active) return
+    this.sceneInteraction = active
+    if (active) { this.stopPathTracingSamples(); this.render() }
+    else if (this.pathTracingReady && this.pathTracingEnabled()) this.startPathTracingSamples(false)
+  }
+
+  private releaseSceneDetail() {
+    this.fullEpoch++
+    this.fullAbort?.abort()
+    this.fullAbort = undefined
+    this.fullPreparation = undefined
+    this.fullContent?.dispose()
+    this.fullContent = undefined
+  }
+
+  private prepareSceneContent(): Promise<PreparedSceneContent> {
+    if (this.fullContent) return Promise.resolve(this.fullContent)
+    if (this.fullPreparation) return this.fullPreparation
+    const content = this.sceneContent
+    if (!content?.prepareFullDetail) return Promise.reject(new Error('This scene adapter cannot provide exact full-scene content.'))
+    const controller = new AbortController(), epoch = this.fullEpoch
+    this.fullAbort = controller
+    this.fullViewportPixels = this.renderer.domElement.width * this.renderer.domElement.height
+    const promise = content.prepareFullDetail(controller.signal).then(prepared => {
+      if (controller.signal.aborted || epoch !== this.fullEpoch || content !== this.sceneContent) {
+        prepared.dispose(); throw new DOMException('Full-scene preparation was superseded', 'AbortError')
+      }
+      // Defense at the tracer boundary: never accidentally accept an instanced adapter.
+      try {
+        if (prepared.scope !== 'full-scene' || !Number.isSafeInteger(prepared.triangles) || prepared.triangles > 1_000_000 || !Number.isFinite(prepared.peakBytes) || prepared.peakBytes > 96 * 1024 * 1024) throw new Error('Full-scene adapter exceeded its declared budget.')
+        const materials = new Set<THREE.Material>()
+        let triangles = 2
+        prepared.root.traverse(object => {
+          if ((object as THREE.InstancedMesh).isInstancedMesh || (object as THREE.BatchedMesh).isBatchedMesh) throw new Error('The tracer requires ordinary expanded meshes, not instancing.')
+          if (object instanceof THREE.Mesh) {
+            triangles += (object.geometry.index?.count ?? object.geometry.getAttribute('position').count) / 3
+            for (const material of Array.isArray(object.material) ? object.material : [object.material]) materials.add(material)
+          }
+        })
+        if (triangles > prepared.triangles || materials.size > 65534) throw new Error('Full-scene adapter understated its triangle/material count.')
+      } catch (error) { prepared.dispose(); throw error }
+      this.fullContent = prepared
+      return prepared
+    }).finally(() => { if (this.fullPreparation === promise) this.fullPreparation = undefined })
+    this.fullPreparation = promise
+    return promise
+  }
+
+  private createTraceScene(prepared: PreparedSceneContent) {
+    const scene = new THREE.Scene()
+    scene.background = this.scene.background
+    scene.environment = this.scene.environment
+    scene.environmentIntensity = this.scene.environmentIntensity
+    scene.backgroundIntensity = this.scene.backgroundIntensity
+    scene.add(prepared.root)
+    const light = this.sunlight.clone()
+    light.target = this.sunlightTarget.clone()
+    scene.add(light, light.target)
+    if (this.ground?.visible) {
+      const source = this.ground as THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
+      const ground = new THREE.Mesh(source.geometry.clone(), source.material.clone())
+      ground.material.envMap = null
+      Object.assign(ground.material, { castShadow: this.settings.shadows })
+      ground.position.copy(source.position); ground.quaternion.copy(source.quaternion); ground.scale.copy(source.scale)
+      ground.receiveShadow = true
+      scene.add(ground); this.traceGround = ground
+    }
+    this.traceScene = scene
+    return scene
+  }
+
+  private suspendModelMeshes() {
+    this.modelSuspended = true
+    this.worker.terminate()
+    this.workerReady = false
+    this.inFlight = 0
+    this.queued.clear(); this.queuedGrids.clear(); this.versions.clear()
+    for (const id of [...this.chunkMeshes.keys()]) this.removeChunk(id)
+    this.clearSelectionPreview()
+    for (const waiter of this.meshWaiters.splice(0)) waiter.reject(new Error('Model meshing was suspended for scene mode.'))
+    this.callbacks.onMeshStats(0, 0)
+  }
+
+  private resumeModelMeshes() {
+    if (!this.modelSuspended) return
+    this.modelSuspended = false
+    this.meshFailed = false
+    this.workerReady = false
+    this.inFlight = 0
+    this.worker = new Worker(new URL('./mesher.worker.ts', import.meta.url), { type: 'module' })
+    this.bindWorker()
+    this.updateSelection([...this.selection.values()], this.floatingSelection, false, false)
+    this.markDirty(this.document.chunks.keys())
+  }
+
+  frameSceneBounds(bounds: THREE.Box3) {
+    if (bounds.isEmpty()) return
+    this.cancelFocusAnimation()
+    const center = bounds.getCenter(new THREE.Vector3())
+    const size = Math.max(8, bounds.getSize(new THREE.Vector3()).length())
+    const aspect = Math.max(0.1, this.host.clientWidth / Math.max(1, this.host.clientHeight))
+    const fit = 1 / Math.min(1, aspect)
+    const direction = this.camera.position.clone().sub(this.controls.target).normalize()
+    if (!direction.lengthSq()) direction.set(1, 0.78, 1).normalize()
+    this.setView({ position: center.clone().addScaledVector(direction, size * 2 * fit), target: center, orthographicSpan: size * 1.3 * fit, zoom: 1 })
   }
 
   getView(): CameraSnapshot {
@@ -1882,6 +2228,7 @@ export class VoxelRenderer {
     this.camera.updateProjectionMatrix()
     this.renderer.getDrawingBufferSize(size)
     this.raster.setSize(size.x, size.y)
+    if (this.sceneContent && (this.fullContent || this.fullPreparation) && this.fullViewportPixels !== size.x * size.y) this.invalidateSceneContent()
     this.cameraChanged()
   }
 
@@ -1937,18 +2284,66 @@ export class VoxelRenderer {
     })
   }
 
-  async capture() {
-    await this.whenMeshIdle()
+  /** exact=true is a full-scene LOD-1 raster capture with all shadow contributors.
+   * The bounded adapter rejects oversized/missing dependencies; no partial PNG is returned. */
+  async capture(exact = false) {
+    const content = this.sceneContent
+    const viewBefore = exact ? JSON.stringify(this.getView()) : undefined
+    const epoch = this.fullEpoch
+    const prepared = exact && content ? await this.prepareSceneContent() : undefined
+    if (!prepared) await (content ? content.whenReady() : this.whenMeshIdle())
+    if (content !== this.sceneContent) throw new Error('Viewport changed during capture. Try again.')
+    if (exact && (epoch !== this.fullEpoch || viewBefore !== JSON.stringify(this.getView()))) throw new Error('Scene or camera changed during exact capture. Try again.')
     if (this.contextLost || this.renderer.getContext().isContextLost()) throw new Error('Cannot capture while the graphics context is lost.')
     if (this.rasterFrame !== undefined) cancelAnimationFrame(this.rasterFrame)
     this.rasterFrame = undefined
-    if (this.presentationDirty || !this.pathTracingEnabled() || !this.pathTracingReady) this.renderRaster()
+    const overlays: THREE.Object3D[] = []
+    if (content) {
+      for (const object of [this.grid, this.limits]) if (object?.visible) overlays.push(object)
+      content.root.traverse(object => { if (object.visible && object.userData.editorOverlay) overlays.push(object) })
+    }
+    const parent = prepared?.root.parent
+    const contentVisible = content?.root.visible
+    const environments = new Map<THREE.MeshStandardMaterial, THREE.Texture | null>()
+    try {
+      for (const object of overlays) object.visible = false
+      if (prepared && content) {
+        content.root.visible = false
+        prepared.root.traverse(object => {
+          if (!(object instanceof THREE.Mesh)) return
+          for (const material of Array.isArray(object.material) ? object.material : [object.material]) if (material instanceof THREE.MeshStandardMaterial && !environments.has(material)) {
+            environments.set(material, material.envMap)
+            material.envMap = this.environmentTarget.texture; material.needsUpdate = true
+          }
+        })
+        this.scene.add(prepared.root)
+        this.renderer.shadowMap.needsUpdate = true
+      }
+      if (prepared || this.presentationDirty || !this.pathTracingEnabled() || !this.pathTracingReady) this.renderRaster()
+    } finally {
+      if (prepared && content) {
+        this.scene.remove(prepared.root); parent?.add(prepared.root)
+        content.root.visible = contentVisible!
+        this.renderer.shadowMap.needsUpdate = true
+        for (const [material, environment] of environments) { material.envMap = environment; material.needsUpdate = true }
+      }
+      for (const object of overlays) object.visible = true
+      if (overlays.length) this.render()
+    }
     const view = this.getView()
     const blob = await new Promise<Blob>((resolve, reject) => this.renderer.domElement.toBlob(blob => blob ? resolve(blob) : reject(new Error('Could not capture the viewport.')), 'image/png'))
+    if (prepared && content === this.sceneContent && epoch === this.fullEpoch && this.pathTracingEnabled() && this.pathTracingReady && this.pathTracer) {
+      // Restore the accumulated trace presentation after the exact raster snapshot,
+      // without resetting samples or consuming an extra sample at the 128-sample cap.
+      const paused = this.pathTracer.pausePathTracing
+      try { this.pathTracer.pausePathTracing = true; this.pathTracer.renderSample(); this.presentationDirty = false }
+      finally { this.pathTracer.pausePathTracing = paused }
+    }
     return { blob, view }
   }
 
   async inspect(views: readonly InspectionView[] = defaultInspectionViews) {
+    if (this.sceneContent) throw new Error('Model inspection is unavailable in scene mode. Use viewport capture for a raster scene PNG.')
     const faces = views.filter((name): name is FaceView => (faceViews as readonly string[]).includes(name))
     const isometric = views.filter(name => name.startsWith('iso-'))
     if (isometric.length) await this.whenMeshIdle()

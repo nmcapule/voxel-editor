@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { decodeProjectSnapshot, parseProjectSnapshot, type ProjectSnapshot } from '../src/protocol'
 import { StudioCommandError } from '../src/studio'
 import { renderModelThumbnail } from './model-thumbnail'
+import { createSceneRoutes } from './scene-server'
 
 export const PROJECT_ROOT = fileURLToPath(new URL('../', import.meta.url))
 export const MAX_REQUEST_BYTES = 100 * 1024 * 1024
@@ -37,9 +38,9 @@ interface ModelServerOptions {
 type ModelRow = Omit<ModelSummary, 'tags' | 'dimensions'> & { tags: string; dimensions: string }
 const summaryColumns = 'id, name, tags, version, createdAt, updatedAt, dimensions, voxelCount'
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-const responseHeaders = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Cross-Origin-Resource-Policy': 'same-origin' }
+export const responseHeaders = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Cross-Origin-Resource-Policy': 'same-origin' }
 
-class HttpError extends Error {
+export class HttpError extends Error {
   status: number
   constructor(status: number, message: string) { super(message); this.status = status }
 }
@@ -48,7 +49,7 @@ function summary(row: ModelRow): ModelSummary {
   return { ...row, tags: JSON.parse(row.tags), dimensions: JSON.parse(row.dimensions) }
 }
 
-function parseTags(value: unknown): string[] {
+export function parseTags(value: unknown): string[] {
   if (!Array.isArray(value)) throw new HttpError(400, 'Tags must be an array of strings.')
   const tags = new Set<string>()
   for (const entry of value) {
@@ -61,11 +62,11 @@ function parseTags(value: unknown): string[] {
   return [...tags]
 }
 
-async function readBody(request: Request, limit: number) {
-  const tooLarge = () => new HttpError(413, `The model request is too large. The limit is ${limit / 1024 / 1024} MiB.`)
+export async function readBody(request: Request, limit: number, subject = 'model') {
+  const tooLarge = () => new HttpError(413, `The ${subject} request is too large. The limit is ${limit / 1024 / 1024} MiB.`)
   const length = request.headers.get('content-length')
   if (length !== null && (!/^\d+$/.test(length) || Number(length) > limit)) throw tooLarge()
-  if (request.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/json') throw new HttpError(400, 'Send the model as application/json.')
+  if (request.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/json') throw new HttpError(400, `Send the ${subject} as application/json.`)
   if (request.headers.has('content-encoding') && request.headers.get('content-encoding') !== 'identity') throw new HttpError(400, 'Send uncompressed JSON; encoded request bodies are not supported.')
   if (!request.body) throw new HttpError(400, 'A JSON body containing snapshot and tags is required.')
   const reader = request.body.getReader()
@@ -132,6 +133,14 @@ export function createModelServer(options: ModelServerOptions = {}) {
   const dataDir = realpathSync(dirname(databasePath))
   if (distDir && (dataDir === distDir || dataDir.startsWith(distDir + sep))) throw new Error('VOXEL_DATA_DIR must be outside dist so the database cannot be downloaded.')
   const db = new Database(databasePath, { create: true, strict: true })
+  // Bun 1.3 only finalizes cached queries on close; this service exceeds its 20-query cache.
+  const statements: ReturnType<Database['prepare']>[] = []
+  const query = ((sql: string) => {
+    const statement = db.prepare(sql)
+    statements.push(statement)
+    return statement
+  }) as Database['query']
+  const closeDatabase = () => { for (const statement of statements) statement.finalize(); db.close() }
   let closing: Promise<void> | undefined
   try {
     db.exec(`
@@ -147,14 +156,14 @@ export function createModelServer(options: ModelServerOptions = {}) {
       CREATE INDEX IF NOT EXISTS models_updated ON models(updatedAt DESC, id);
     `)
     db.transaction(() => {
-      if (!db.query<{ name: string }, []>('PRAGMA table_info(models)').all().some(column => column.name === 'thumbnail')) {
+      if (!query<{ name: string }, []>('PRAGMA table_info(models)').all().some(column => column.name === 'thumbnail')) {
         db.exec('ALTER TABLE models ADD COLUMN thumbnail BLOB')
       }
     }).immediate()
-    const getSummary = db.query<ModelRow, [string]>(`SELECT ${summaryColumns} FROM models WHERE id = ?`)
-    const getModel = db.query<ModelRow & { snapshot: string }, [string]>(`SELECT ${summaryColumns}, snapshot FROM models WHERE id = ?`)
-    const getThumbnail = db.query<{ version: number; thumbnail: Uint8Array<ArrayBuffer> | null }, [string]>('SELECT version, thumbnail FROM models WHERE id = ?')
-    const cacheThumbnail = db.query('UPDATE models SET thumbnail = ? WHERE id = ?')
+    const getSummary = query<ModelRow, [string]>(`SELECT ${summaryColumns} FROM models WHERE id = ?`)
+    const getModel = query<ModelRow & { snapshot: string }, [string]>(`SELECT ${summaryColumns}, snapshot FROM models WHERE id = ?`)
+    const getThumbnail = query<{ version: number; thumbnail: Uint8Array<ArrayBuffer> | null }, [string]>('SELECT version, thumbnail FROM models WHERE id = ?')
+    const cacheThumbnail = query('UPDATE models SET thumbnail = ? WHERE id = ?')
     // ponytail: synchronous cold renders hold the writer lock; move to a worker with version-CAS if contention matters.
     const generateThumbnail = db.transaction((id: string) => {
       const row = getThumbnail.get(id)
@@ -167,22 +176,23 @@ export function createModelServer(options: ModelServerOptions = {}) {
     })
     const filter = `(? = '' OR instr(nameSearch, ?) > 0 OR EXISTS (SELECT 1 FROM json_each(models.tags) WHERE instr(value, ?) > 0))
       AND (? = '' OR EXISTS (SELECT 1 FROM json_each(models.tags) WHERE value = ?))`
-    const browse = db.query<ModelRow, [string, string, string, string, string, number]>(`SELECT ${summaryColumns} FROM models WHERE ${filter} ORDER BY updatedAt DESC, id LIMIT 50 OFFSET ?`)
-    const count = db.query<{ total: number }, [string, string, string, string, string]>(`SELECT count(*) AS total FROM models WHERE ${filter}`)
-    const allTags = db.query<{ tag: string }, []>('SELECT DISTINCT value AS tag FROM models, json_each(models.tags) ORDER BY tag')
+    const browse = query<ModelRow, [string, string, string, string, string, number]>(`SELECT ${summaryColumns} FROM models WHERE ${filter} ORDER BY updatedAt DESC, id LIMIT 50 OFFSET ?`)
+    const count = query<{ total: number }, [string, string, string, string, string]>(`SELECT count(*) AS total FROM models WHERE ${filter}`)
+    const allTags = query<{ tag: string }, []>('SELECT DISTINCT value AS tag FROM models, json_each(models.tags) ORDER BY tag')
     // Keep the list, count and global tags in one read transaction, including with other server processes.
     const list = db.transaction((q: string, tag: string, offset: number) => ({
       models: browse.all(q, q, q, tag, tag, offset).map(summary),
       tags: allTags.all().map(row => row.tag),
       total: count.get(q, q, q, tag, tag)!.total,
     }))
-    const insert = db.query(`INSERT INTO models (id, name, nameSearch, tags, version, createdAt, updatedAt, dimensions, voxelCount, snapshot)
+    const insert = query(`INSERT INTO models (id, name, nameSearch, tags, version, createdAt, updatedAt, dimensions, voxelCount, snapshot)
       VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`)
-    const update = db.query<ModelRow, [string, string, string, string, string, string, number, string, string, number]>(`UPDATE models
+    const update = query<ModelRow, [string, string, string, string, string, string, number, string, string, number]>(`UPDATE models
       SET name = ?, nameSearch = ?, tags = ?, version = version + 1,
         updatedAt = CASE WHEN updatedAt >= ? THEN strftime('%Y-%m-%dT%H:%M:%fZ', updatedAt, '+0.001 seconds') ELSE ? END,
         dimensions = ?, voxelCount = ?, snapshot = ?, thumbnail = NULL
       WHERE id = ? AND version = ? RETURNING ${summaryColumns}`)
+    const sceneRoutes = createSceneRoutes(db, { maxRequestBytes: limit, isClosing: () => closing !== undefined }, query)
     const server = Bun.serve({
       hostname, port, development: false, reusePort: false,
       // Enforce the bounded streaming read ourselves so even oversized requests receive JSON errors.
@@ -202,6 +212,10 @@ export function createModelServer(options: ModelServerOptions = {}) {
           let path: string
           try { path = decodeURIComponent(url.pathname) } catch { throw new HttpError(400, 'The request path is invalid.') }
           if (/[\p{Cc}\\%]/u.test(path) || path.split('/').some(part => part.startsWith('.'))) throw new HttpError(404, 'Not found.')
+          if (path === '/api/scenes' || path.startsWith('/api/scenes/')) {
+            checkOrigin(request, options.trustProxy ?? false)
+            return await sceneRoutes(request, path)
+          }
           if (path === '/api/models' || path.startsWith('/api/models/')) {
             checkOrigin(request, options.trustProxy ?? false)
             const parts = path === '/api/models' ? [] : path.slice('/api/models/'.length).split('/')
@@ -281,11 +295,11 @@ export function createModelServer(options: ModelServerOptions = {}) {
     return {
       server,
       close() {
-        closing ??= (async () => { try { await server.stop(true) } finally { db.close() } })()
+        closing ??= (async () => { try { await server.stop(true) } finally { closeDatabase() } })()
         return closing
       },
     }
-  } catch (error) { db.close(); throw error }
+  } catch (error) { closeDatabase(); throw error }
 }
 
 if (import.meta.main) {

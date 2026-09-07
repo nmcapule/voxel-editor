@@ -61,6 +61,7 @@ export default defineConfig({
     proxy: {
       ...(process.env.VOXEL_MODEL_PORT ? {
         '^/api/models(?:[/?]|$)': { target: `http://127.0.0.1:${process.env.VOXEL_MODEL_PORT}`, changeOrigin: false },
+        '^/api/scenes(?:[/?]|$)': { target: `http://127.0.0.1:${process.env.VOXEL_MODEL_PORT}`, changeOrigin: false },
       } : {}),
       ...(process.env.VOXEL_ASSISTANT_PORT ? {
         '^/__assistant/socket$': { target: `http://127.0.0.1:${process.env.VOXEL_ASSISTANT_PORT}`, ws: true },

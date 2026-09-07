@@ -4,7 +4,8 @@ import { mountModelLibrary } from './model-library'
 import { SerialCommandQueue, base64ToBytes, bytesToBase64, decodeProjectSnapshot, encodeProjectSnapshot, parseCommand, type RemoteCommand } from './protocol'
 import { connectRemote } from './remote'
 import { VoxelRenderer } from './renderer'
-import { Studio, StudioCommandError, type AuxiliaryTool, type PaintMode, type PbrMap, type SculptMode, type SelectionMode, type SelectionState, type StudioCommand, type StudioOutcome, type Tool } from './studio'
+import { SceneWorkspace } from './scene-workspace'
+import { Studio, StudioCommandError, type AuxiliaryTool, type PaintMode, type PbrMap, type SculptMode, type SelectionMode, type SelectionState, type StudioCommand, type StudioEffects, type StudioOutcome, type Tool } from './studio'
 import { loadProject, saveProjectSnapshot, snapshotProject, type LibraryLink, type ViewSettings } from './storage'
 import { exportVox, importVox, VOX_EXPORT_WARNING } from './vox'
 
@@ -77,9 +78,13 @@ let recentColors = [...new Set([activeColor, ...storedRecentColors.filter(isPale
 let selection: SelectionState = { cells: [], count: 0 }
 let clipboard: (Vec3 & { color: number })[] = []
 let pendingPaste: Studio['pendingPaste']
-const studioController = new Studio(voxelDocument, settings, { selectionMode, activeColor, recentColors })
-const loadedPbrMaps = studioController.loadedPbrMaps
+let studioController = new Studio(voxelDocument, settings, { selectionMode, activeColor, recentColors })
+let loadedPbrMaps = studioController.loadedPbrMaps
 let renderer!: VoxelRenderer
+let scenes: SceneWorkspace | undefined
+let editorGeneration = 0
+const sessionMaps = new WeakMap<Studio, Map<string, Extract<RemoteCommand, { type: 'material.map.set' }>>>()
+const assetMaps = new Map<string, Map<string, Extract<RemoteCommand, { type: 'material.map.set' }>>>()
 
 app.innerHTML = `
   <svg class="icon-sprite" aria-hidden="true">
@@ -126,6 +131,9 @@ app.innerHTML = `
             <strong>Project</strong>
             <button type="button" data-action="save-model" role="menuitem">Save model...</button>
             <button type="button" data-action="browse-models" role="menuitem">Browse models...</button>
+            <button type="button" data-action="scene-editor" role="menuitem">Scene editor</button>
+            <button type="button" data-action="scene-from-model" role="menuitem">Create scene from this model</button>
+            <button type="button" data-action="export-owning-scene" role="menuitem" hidden>Export owning scene...</button>
             <button type="button" data-action="new" role="menuitem">New document</button>
             <button type="button" data-action="import" role="menuitem">Import VOX</button>
             <button type="button" data-action="export" role="menuitem">Export VOX</button>
@@ -374,12 +382,20 @@ function dismissGuide() {
 }
 
 function updateSaveStatus() {
+  if (scenes?.hasScene) {
+    const state = scenes.saveState
+    saveStatus.dataset.state = state
+    saveStatus.querySelector('span')!.textContent = state === 'saving' ? 'Saving scene...' : state === 'error' ? 'Scene save failed' : 'Scene recovery saved'
+    saveStatus.title = 'Model edits are saved inside the owning scene. Texture images are session-only.'
+    return
+  }
   saveStatus.dataset.state = saveState
   saveStatus.querySelector('span')!.textContent = saveState === 'saving' ? 'Saving locally…' : saveState === 'error' ? 'Local save failed' : libraryLink && !libraryLink.dirty ? 'Saved to server' : 'Saved locally'
   saveStatus.title = libraryLink?.dirty ? 'Local recovery saved. Use Save model to update the server copy.' : 'Local autosave is separate from the shared server library.'
 }
 
-function queueSave() {
+function queueSave(effects?: StudioEffects) {
+  if (scenes?.hasScene) { scenes.modelChanged(effects); return }
   if (storageError) return
   if (saveTimer) clearTimeout(saveTimer)
   saveState = 'saving'
@@ -390,6 +406,7 @@ function queueSave() {
 
 function persistSave(revision: number) {
   saveTimer = undefined
+  if (scenes?.hasScene) return scenes.flush()
   const snapshot = snapshotProject(voxelDocument, settings, libraryLink)
   pendingSave = pendingSave.catch(() => {}).then(() => saveProjectSnapshot(snapshot)).then(() => {
     if (revision === saveRevision) { saveState = 'saved'; updateSaveStatus() }
@@ -404,6 +421,7 @@ function persistSave(revision: number) {
 }
 
 async function flushSave() {
+  if (scenes?.hasScene) { await scenes.flush(); return }
   if (storageError) throw new StudioCommandError('save_failed', storageError)
   if (saveTimer) clearTimeout(saveTimer)
   if (saveState === 'saving') await persistSave(saveRevision)
@@ -445,6 +463,7 @@ function applyStudioEffects(command: RemoteCommand, outcome: StudioOutcome, sour
     if (libraryLink) libraryLink = { ...libraryLink, dirty: true }
   }
   if (effects.documentReplaced) {
+    if (effects.clearPbrMaps) sessionMaps.get(studioController)?.clear()
     renderer.setDocument(voxelDocument, effects.preserveMaterials)
     renderer.setActiveColor(activeColor)
   } else {
@@ -488,7 +507,7 @@ function applyStudioEffects(command: RemoteCommand, outcome: StudioOutcome, sour
   }
   if (effects.settingsChanged) renderSettings()
   if (effects.toolsChanged || effects.selectionChanged) renderToolControls()
-  if (effects.save) queueSave()
+  if (effects.save) queueSave(effects)
   if (effects.announcement) announce(effects.announcement)
 }
 
@@ -504,15 +523,31 @@ function emitCommandEvent(command: RemoteCommand, source: CommandSource, outcome
   for (const listener of commandListeners) listener(event)
 }
 
-type QueuedCommand = { command: RemoteCommand; source: CommandSource; ifRevision?: number; viewVersion?: number }
+type QueuedCommand = { command: RemoteCommand; source: CommandSource; ifRevision?: number; viewVersion?: number; editorGeneration: number }
 type ApplicationResult = { changed: boolean; revision: number; result: unknown }
 let rendererViewVersion = 0
 
-async function executeApplicationCommand({ command, source, ifRevision, viewVersion }: QueuedCommand): Promise<ApplicationResult> {
+async function executeApplicationCommand({ command, source, ifRevision, viewVersion, editorGeneration: generation }: QueuedCommand): Promise<ApplicationResult> {
+  if (generation !== editorGeneration) throw new StudioCommandError('revision_conflict', 'The active editor changed before this command ran. Retry in the current editor.')
+  if (scenes?.active) {
+    const revision = scenes.revision
+    if (ifRevision !== undefined && ifRevision !== revision) throw new StudioCommandError('revision_conflict', 'The scene changed before this command ran.')
+    if (command.type === 'state.get') return { changed: false, revision, result: { editor: 'scene', name: scenes.snapshot().name, instanceCount: scenes.snapshot().instances.length, view: renderer.getView(), streaming: scenes.renderer.stats, saveState: scenes.saveState } }
+    if (command.type === 'project.snapshot.get') return { changed: false, revision, result: scenes.snapshot() }
+    if (command.type === 'view.get') return { changed: false, revision, result: renderer.getView() }
+    if (command.type === 'view.set') { renderer.setView(command.view); scenes.viewChanged(); return { changed: true, revision, result: renderer.getView() } }
+    if (command.type === 'view.frame') { scenes.renderer.frameSelection(); scenes.viewChanged(); return { changed: true, revision, result: renderer.getView() } }
+    if (command.type === 'save.flush') { await scenes.flush(); return { changed: false, revision, result: { saveState: scenes.saveState } } }
+    if (command.type === 'view.capture') {
+      const { blob, view } = await renderer.capture()
+      return { changed: false, revision, result: { mime: 'image/png', dataBase64: bytesToBase64(new Uint8Array(await blob.arrayBuffer())), view, revision } }
+    }
+    throw new StudioCommandError('invalid_state', 'This command edits voxels. Select an instance and choose Edit model first.')
+  }
   if (ifRevision !== undefined && ifRevision !== studioController.revision) throw new StudioCommandError('revision_conflict', `Expected revision ${ifRevision}, current revision is ${studioController.revision}.`, { expected: ifRevision, actual: studioController.revision })
   switch (command.type) {
     case 'state.get':
-      return { changed: false, revision: studioController.revision, result: { ...studioController.stateSnapshot(), view: renderer.getView(), mesh: renderer.meshState(), saveState } }
+      return { changed: false, revision: studioController.revision, result: { ...studioController.stateSnapshot(), view: renderer.getView(), mesh: renderer.meshState(), saveState: scenes?.hasScene ? scenes.saveState : saveState } }
     case 'composition.get': {
       const { type: _type, ...query } = command
       return { changed: false, revision: studioController.revision, result: studioController.composition(query) }
@@ -568,12 +603,17 @@ async function executeApplicationCommand({ command, source, ifRevision, viewVers
       const bytes = base64ToBytes(command.dataBase64)
       const outcome = await studioController.loadPbrMap(command.index, command.map, command.name,
         () => renderer.setPbrMap(command.index, command.map, new Blob([bytes], { type: command.mime })))
+      const maps = sessionMaps.get(studioController) ?? new Map()
+      maps.set(`${command.index}:${command.map}`, command)
+      sessionMaps.set(studioController, maps)
       if (activeColor === command.index) renderPaletteMaterial()
       applyStudioEffects(command, outcome, source)
       emitCommandEvent(command, source, outcome)
       return { changed: true, revision: outcome.revision, result: outcome.result }
     }
     case 'material.map.clear': {
+      const retained = sessionMaps.get(studioController)
+      for (const [key, map] of retained ?? []) if (map.index === command.index && (!command.map || command.map === map.map)) retained!.delete(key)
       const maps = loadedPbrMaps.get(command.index)
       const mutation = command.map ? maps?.has(command.map) : Boolean(maps?.size)
       renderer.clearPbrMaps(command.index, command.map)
@@ -598,8 +638,9 @@ async function executeApplicationCommand({ command, source, ifRevision, viewVers
 
 const applicationQueue = new SerialCommandQueue<QueuedCommand, ApplicationResult>(executeApplicationCommand)
 
-function dispatchApplicationCommand(command: RemoteCommand, source: CommandSource = 'ui', ifRevision?: number, viewVersion?: number) {
-  return applicationQueue.dispatch({ command, source, ifRevision, viewVersion })
+function dispatchApplicationCommand(command: RemoteCommand, source: CommandSource = 'ui', ifRevision?: number, viewVersion?: number, signal?: AbortSignal) {
+  if (scenes?.busy && command.type !== 'save.flush') return Promise.reject(new StudioCommandError('invalid_state', 'Wait for the current scene operation to finish.'))
+  return applicationQueue.dispatch({ command, source, ifRevision, viewVersion, editorGeneration }, signal)
 }
 
 function commandFailed(error: unknown) {
@@ -947,12 +988,15 @@ async function loadPbrMap(input: HTMLInputElement) {
   const file = input.files?.[0]
   const map = input.dataset.pbrMap as PbrMap
   if (!file) return
+  const generation = editorGeneration
   const color = activeColor
   const label = document.querySelector<HTMLElement>(`[data-pbr-name="${map}"]`)!
   input.disabled = true
   label.textContent = 'Loading...'
   try {
-    await dispatchApplicationCommand({ type: 'material.map.set', index: color, map, name: file.name, mime: file.type || 'application/octet-stream', dataBase64: bytesToBase64(new Uint8Array(await file.arrayBuffer())) })
+    const dataBase64 = bytesToBase64(new Uint8Array(await file.arrayBuffer()))
+    if (generation !== editorGeneration) throw new Error('The editor changed while the texture was loading.')
+    await dispatchApplicationCommand({ type: 'material.map.set', index: color, map, name: file.name, mime: file.type || 'application/octet-stream', dataBase64 })
   } catch {
     if (activeColor === color) renderPaletteMaterial()
     showToast(`${file.name} could not be decoded as a texture.`, 'warning')
@@ -1040,6 +1084,7 @@ renderer = new VoxelRenderer(document.querySelector('#viewport')!, voxelDocument
     rendererViewVersion++
   },
   onViewChange(view) {
+    if (scenes?.active) { scenes.viewChanged(); return }
     void dispatchApplicationCommand({ type: 'view.set', view }, 'renderer', undefined, rendererViewVersion).catch(commandFailed)
   },
   onHover(cell) {
@@ -1069,6 +1114,52 @@ const modelLibrary = mountModelLibrary({
   notify: showToast,
 })
 import.meta.hot?.dispose(() => modelLibrary.dispose())
+
+scenes = new SceneWorkspace({
+  renderer,
+  currentModel: () => ({ controller: studioController, library: libraryLink, view: renderer.getView() }),
+  flushModel: async () => { await dispatchApplicationCommand({ type: 'save.flush' }) },
+  contextChanged: () => { editorGeneration++; libraryGeneration++; rendererViewVersion++; clearShortcutPrefix() },
+  saveStateChanged: updateSaveStatus,
+  notify: message => showToast(message, 'warning'),
+  async activateModel(session, assetKey) {
+    studioController = session.controller
+    loadedPbrMaps = studioController.loadedPbrMaps
+    if (assetKey) {
+      const maps = assetMaps.get(assetKey) ?? sessionMaps.get(studioController) ?? new Map()
+      assetMaps.set(assetKey, maps); sessionMaps.set(studioController, maps)
+      for (const command of maps.values()) {
+        const names = loadedPbrMaps.get(command.index) ?? new Map()
+        names.set(command.map, command.name); loadedPbrMaps.set(command.index, names)
+      }
+    }
+    libraryLink = session.library
+    libraryChanges = 0
+    syncStudioState()
+    renderer.setDocument(voxelDocument)
+    renderer.setSettings(settings)
+    renderer.setView(session.view)
+    renderer.setActiveColor(activeColor)
+    renderer.setTool(activeTool)
+    renderer.setPaintMode(paintMode)
+    renderer.setSculptMode(sculptMode)
+    renderer.setSelectionMode(selectionMode)
+    renderer.setFillShape(fillShape)
+    renderer.setFillDepth(fillDepth)
+    renderer.setAuxiliary(auxiliaryTool)
+    renderer.applySelection(selection, false)
+    renderer.setRenderMode(renderMode)
+    for (const command of sessionMaps.get(studioController)?.values() ?? []) {
+      await renderer.setPbrMap(command.index, command.map, new Blob([base64ToBytes(command.dataBase64)], { type: command.mime }))
+    }
+    studio.dataset.tool = activeTool
+    studio.dataset.renderMode = String(renderMode)
+    document.querySelector<HTMLButtonElement>('[data-action="render"]')!.setAttribute('aria-pressed', String(renderMode))
+    closePanel(); closeToolPopups(); dismissGuide()
+    renderPalette(); renderDocumentFacts(); renderSettings(); renderPaletteMaterial(); renderToolControls(); updateSaveStatus()
+  },
+})
+import.meta.hot?.dispose(() => scenes?.dispose())
 
 function openPanel(tab = 'model') {
   if (layerPanel.matches(':popover-open')) layerPanel.hidePopover()
@@ -1125,6 +1216,7 @@ function toggleRenderMode() {
 }
 
 document.addEventListener('click', async event => {
+  if (scenes?.active) return
   const target = event.target as HTMLElement
   const clipboardButton = target.closest<HTMLButtonElement>('[data-clipboard-action]')
   if (clipboardButton) {
@@ -1227,6 +1319,14 @@ document.addEventListener('click', async event => {
   const button = target.closest<HTMLButtonElement>('[data-action]')
   if (!button) return
   const action = button.dataset.action
+  if (action === 'export-owning-scene') {
+    try { await scenes!.exportScene() } catch (error) { if (!(error instanceof DOMException && error.name === 'AbortError')) commandFailed(error) }
+    return
+  }
+  if (action === 'scene-editor' || action === 'scene-from-model') {
+    try { await scenes!.start(action === 'scene-from-model') } catch (error) { commandFailed(error) }
+    return
+  }
   if (action === 'save-model' || action === 'browse-models') {
     clearShortcutPrefix()
     closeToolPopups()
@@ -1288,9 +1388,12 @@ fileInput.addEventListener('change', async () => {
   const file = fileInput.files?.[0]
   fileInput.value = ''
   if (!file) return
+  const generation = editorGeneration, revision = studioController.revision
   if (voxelDocument.voxelCount && !confirm('Replace the current model with this VOX file?')) return
   try {
-    const response = await dispatchApplicationCommand({ type: 'io.vox.import', dataBase64: bytesToBase64(new Uint8Array(await file.arrayBuffer())), name: file.name, allowReplace: true })
+    const dataBase64 = bytesToBase64(new Uint8Array(await file.arrayBuffer()))
+    if (generation !== editorGeneration) throw new Error('The editor changed while the VOX file was loading. Import it again in the intended model.')
+    const response = await dispatchApplicationCommand({ type: 'io.vox.import', dataBase64, name: file.name, allowReplace: true }, 'ui', revision)
     const imported = response.result as { voxelCount: number; warning: string | null }
     closePanel()
     showToast(imported.warning ?? `Imported ${formatNumber(imported.voxelCount)} voxels.`, imported.warning ? 'warning' : 'normal')
@@ -1402,6 +1505,7 @@ document.querySelector<HTMLInputElement>('#fill-depth')!.addEventListener('chang
 })
 
 document.addEventListener('keydown', event => {
+  if (scenes?.active || scenes?.busy) return
   const editingText = event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement || event.target instanceof HTMLTextAreaElement
   const key = event.key.toLowerCase()
   if (event.key === 'Escape' && toolPopups.some(popup => popup.matches(':popover-open'))) { clearShortcutPrefix(); return }
@@ -1490,7 +1594,7 @@ if (import.meta.env.VITE_CANVAS_ASSISTANT === 'true') {
     const dispose = mountAssistant({
       root: studio,
       menu: document.querySelector('#project-menu .menu-sheet')!,
-      execute: (command, { signal, ifRevision }) => applicationQueue.dispatch({ command: parseCommand(command), source: 'assistant', ifRevision }, signal),
+      execute: (command, { signal, ifRevision }) => dispatchApplicationCommand(parseCommand(command), 'assistant', ifRevision, undefined, signal),
       subscribe(listener) {
         const forward = (event: CommandEvent) => listener({ source: event.source, command: event.command.type, revision: event.outcome.revision, changed: event.outcome.changed })
         commandListeners.add(forward)
@@ -1503,7 +1607,7 @@ if (import.meta.env.VITE_CANVAS_ASSISTANT === 'true') {
 
 connectRemote({
   dispatch: request => dispatchApplicationCommand(request.command, 'remote', request.ifRevision),
-  revision: () => studioController.revision,
+  revision: () => scenes?.active ? scenes.revision : studioController.revision,
   subscribe(listener) {
     const forward = (event: CommandEvent) => {
       if (event.source === 'remote') return
@@ -1519,5 +1623,8 @@ connectRemote({
 })
 
 window.addEventListener('beforeunload', event => {
-  if (saveState === 'saving') event.preventDefault()
+  if (saveState === 'saving' || scenes?.hasScene && scenes.saveState !== 'saved') event.preventDefault()
 })
+
+try { await scenes.restore() }
+catch (error) { showToast(`Scene recovery could not be opened. ${error instanceof Error ? error.message : 'Retry after checking storage.'}`, 'warning') }

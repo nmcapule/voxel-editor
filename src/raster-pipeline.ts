@@ -220,23 +220,25 @@ export class RasterPipeline {
           uniform sampler2D rasterSelectedMask;
         `
         const reject = selecting ? `
-          if (gl_FragCoord.z >= texelFetch(rasterOpaqueDepth, rasterPixel, 0).r
-            || gl_FragCoord.z >= texelFetch(rasterPreviousDepth, rasterPixel, 0).r) discard;
+          if (gl_FragDepth >= texelFetch(rasterOpaqueDepth, rasterPixel, 0).r
+            || gl_FragDepth >= texelFetch(rasterPreviousDepth, rasterPixel, 0).r) discard;
         ` : `
           if (texelFetch(rasterSelectedMask, rasterPixel, 0).r == 0.0
-            || gl_FragCoord.z != texelFetch(rasterSelectedDepth, rasterPixel, 0).r) discard;
+            || gl_FragDepth != texelFetch(rasterSelectedDepth, rasterPixel, 0).r) discard;
         `
         if (!shader.fragmentShader.includes('#include <alphahash_fragment>')) {
           throw new Error('RasterPipeline: unsupported material shader (missing alpha stage).')
         }
-        shader.fragmentShader = declarations + shader.fragmentShader.replace('void main() {', `
+        // Exact peeling must compare and write the same invariant depth in both programs.
+        shader.fragmentShader = 'invariant gl_FragDepth;\n' + declarations + shader.fragmentShader.replace('void main() {', `
           void main() {
+            gl_FragDepth = gl_FragCoord.z;
             ivec2 rasterPixel = ivec2(gl_FragCoord.xy);
             ${reject}
         `).replace('#include <alphahash_fragment>', `
           #include <alphahash_fragment>
           if (diffuseColor.a <= 0.0) discard;
-          ${selecting ? 'gl_FragDepth = gl_FragCoord.z; gl_FragColor = vec4(1.0); return;' : ''}
+          ${selecting ? 'gl_FragColor = vec4(1.0); return;' : ''}
         `).replace('#include <transmission_pars_fragment>', THREE.ShaderChunk.transmission_pars_fragment
           .replaceAll('transmissionSamplerMap', 'rasterTransmissionMap')
           .replaceAll('transmissionSamplerSize', 'rasterTransmissionSize')

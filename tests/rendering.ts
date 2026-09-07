@@ -251,6 +251,83 @@ export async function runRenderingChecks(renderer: VoxelRenderer, settings: View
         return { probes }
       })
 
+      await run('oblique water has no interior holes across chunk seams', async () => {
+        const document = new VoxelDocument({ x: 64, y: 16, z: 64 })
+        // Keep water's optical properties; emission makes any missing fragment unambiguous.
+        document.palette[12] = 0xffffff
+        document.materials[12].emissiveIntensity = 2
+        fill(document, 12, 0, 5, 0, 64, 6, 64)
+        await load(document, { background: '#000000' })
+        const ray = new THREE.Raycaster()
+        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -6)
+        const point = new THREE.Vector3(), ndc = new THREE.Vector2()
+        const results = []
+        for (const projection of ['perspective', 'orthographic'] as const) for (const opacity of [1, 0.5]) {
+          document.materials[12].opacity = opacity
+          renderer.updatePaletteMaterial(12)
+          renderer.setSettings({ ...baseline, projection, background: '#000000' })
+          for (const [x, y, z] of [[37, 64, 113], [128, 19, 31]]) {
+            renderer.setView({ position: { x, y, z }, target: { x: 0, y: 6, z: 0 }, up: { x: 0, y: 1, z: 0 }, fov: 35, zoom: 1, orthographicSpan: 92 })
+            await image(renderer)
+            // Read before FXAA so even a single dropped pixel fails instead of being blurred away.
+            const beauty = Reflect.get(Reflect.get(renderer, 'raster'), 'beauty') as WebGLRenderTarget
+            const pixels = new Uint16Array(beauty.width * beauty.height * 4)
+            webgl.readRenderTargetPixels(beauty, 0, 0, beauty.width, beauty.height, pixels)
+            let probes = 0
+            for (let py = 0; py < beauty.height; py++) for (let px = 0; px < beauty.width; px++) {
+              ndc.set((px + 0.5) / beauty.width * 2 - 1, (py + 0.5) / beauty.height * 2 - 1)
+              ray.setFromCamera(ndc, Reflect.get(renderer, 'camera'))
+              if (!ray.ray.intersectPlane(plane, point) || Math.abs(point.x) > 30 || Math.abs(point.z) > 30) continue
+              const red = THREE.DataUtils.fromHalfFloat(pixels[(py * beauty.width + px) * 4])
+              check(red > 0.5, `${projection}, opacity ${opacity}, camera (${x},${y},${z}): water hole at pixel (${px},${py}), red=${red}`)
+              probes++
+            }
+            check(probes > 10000, 'Water regression must scan a substantial slab interior, not just sample points')
+            results.push({ projection, opacity, position: [x, y, z], probes })
+          }
+        }
+        return results
+      })
+
+      await run('transparent layers one float depth step apart remain distinct', async () => {
+        const { RasterPipeline } = await import('../src/raster-pipeline')
+        const scene = new THREE.Scene()
+        scene.background = new THREE.Color(0)
+        const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
+        const geometry = new THREE.PlaneGeometry(2, 2)
+        const rear = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: 0.5 }))
+        const front = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.5 }))
+        rear.position.z = -(0.75 + 2 ** -24)
+        front.position.z = -0.75
+        const pipeline = new RasterPipeline(webgl, scene, { ambientOcclusion: false, antialias: false })
+        pipeline.setSize(8, 8)
+        pipeline.renderToScreen = false
+        const results = []
+        try {
+          for (const depthWrite of [false, true]) for (const reverse of [false, true]) {
+            rear.material.depthWrite = front.material.depthWrite = depthWrite
+            rear.material.needsUpdate = front.material.needsUpdate = true
+            scene.clear().add(...(reverse ? [front, rear] : [rear, front]))
+            pipeline.render(camera)
+            const beauty = Reflect.get(pipeline, 'beauty') as WebGLRenderTarget
+            const pixels = new Uint16Array(8 * 8 * 4)
+            webgl.readRenderTargetPixels(beauty, 0, 0, 8, 8, pixels)
+            check(pipeline.lastFrame.layers === 2, 'One-ULP-separated surfaces must produce two layers')
+            for (let i = 0; i < pixels.length; i++) {
+              const expected = [0.25, 0.5, 0, 1][i % 4]
+              check(Math.abs(THREE.DataUtils.fromHalfFloat(pixels[i]) - expected) < 0.001, `Depth tolerance merged or double-shaded neighboring layers at channel ${i}`)
+            }
+            results.push({ depthWrite, reverse, layers: pipeline.lastFrame.layers })
+          }
+          return results
+        } finally {
+          pipeline.dispose()
+          geometry.dispose()
+          rear.material.dispose()
+          front.material.dispose()
+        }
+      })
+
       await run('opacity-zero geometry and visible editor helpers do not affect AO', async () => {
         const document = fixture()
         document.palette[42] = 0x4f5664

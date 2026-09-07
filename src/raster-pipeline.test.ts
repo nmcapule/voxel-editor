@@ -161,6 +161,9 @@ test('physical variants retain maps, opacity, IOR and dynamic transmission unifo
     } as THREE.WebGLProgramParametersWithUniforms
     material.onBeforeCompile(shader, h.webgl)
     expect(shader.vertexShader).toContain('invariant gl_Position;')
+    expect(shader.fragmentShader).toContain('invariant gl_FragDepth;')
+    expect(shader.fragmentShader).toContain('gl_FragDepth = gl_FragCoord.z;')
+    expect(shader.fragmentShader.indexOf('gl_FragDepth = gl_FragCoord.z;')).toBeLessThan(shader.fragmentShader.indexOf('discard;'))
     expect(shader.fragmentShader).not.toContain('transmissionSamplerMap')
     expect(shader.fragmentShader).toContain('rasterTransmissionMap')
     expect(shader.uniforms.transmission.value).toBe(source.transmission)
@@ -170,9 +173,9 @@ test('physical variants retain maps, opacity, IOR and dynamic transmission unifo
     expect(shader.uniforms.customSourceUniform.value).toBe(42)
     if (material.depthFunc === THREE.GreaterEqualDepth) {
       expect(material.blending).toBe(THREE.NoBlending)
-      expect(shader.fragmentShader).toContain('gl_FragDepth = gl_FragCoord.z;')
+      expect(shader.fragmentShader).toContain('gl_FragDepth >= texelFetch(rasterPreviousDepth')
     } else {
-      expect(shader.fragmentShader).toContain('gl_FragCoord.z != texelFetch(rasterSelectedDepth')
+      expect(shader.fragmentShader).toContain('gl_FragDepth != texelFetch(rasterSelectedDepth')
       expect(material.depthWrite).toBe(false)
       shaders.push(shader)
     }

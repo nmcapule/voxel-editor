@@ -413,11 +413,12 @@ test('exact capture uses full geometry and raster environment, restores live con
   const root = new THREE.Group(), scene = new THREE.Scene(); scene.add(root)
   let captures = 0
   const probe = Object.assign(Object.create(VoxelRenderer.prototype), {
-    fullEpoch: 0, scene, environmentTarget: { texture: environment }, renderMode: false, settings: { pathTracing: false },
+    fullEpoch: 0, scene, environmentTarget: { texture: environment }, renderMode: true, settings: { pathTracing: true },
     sceneContent: { root, prepareFullDetail: async () => detail },
     renderer: { shadowMap: {}, getContext: () => ({ isContextLost: () => false }), domElement: { width: 100, height: 100, toBlob(callback: (blob: Blob) => void) { captures++; callback(new Blob(['exact'])) } } },
     render() {}, getView: () => ({ name: 'stable' }),
-    renderRaster() {
+    renderRaster(_camera: unknown, _raster: unknown, shadows: boolean) {
+      expect(shadows).toBe(true)
       expect(root.visible).toBe(false); expect(detail.root.parent).toBe(scene)
       const material = (detail.root.children[0] as THREE.Mesh).material as THREE.MeshPhysicalMaterial
       expect(material.envMap).toBe(environment); expect(Reflect.get(material, 'castShadow')).toBe(false)

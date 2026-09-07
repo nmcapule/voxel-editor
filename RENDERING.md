@@ -60,7 +60,10 @@ a mesh-idle/current-image capture, not a request to wait for convergence.
 
 In the model editor, shadow maps are invalidated by caster geometry/classification,
 light direction, shadow frustum, enablement and context changes, not by camera motion
-or editor overlays.
+or editor overlays. Progressive preparation/compilation previews neither update nor sample
+shadow maps; traced samples use ray visibility. Existing raster maps remain cached, with
+pending invalidation preserved for Edit mode, raster fallback, full-scene raster capture
+and offscreen inspection.
 AO, guide grids and editor decorations remain raster-only. Production trace settings
 remain four ordinary bounces, the existing transmissive traversal allowance, 128 samples,
 2x2 tiles and 0.75 model render scale; scene scaling also follows the viewport ceiling below.

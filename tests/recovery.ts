@@ -2,8 +2,9 @@
 // Start without awaiting CDP: import('/tests/recovery.ts').then(m =>
 //   m.runRecoveryChecks(transparencyTest.renderer, transparencyTest.settings)).
 // Poll window.recoveryChecks (finite waits, incremental results).
-import type { Camera, MeshPhysicalMaterial, Object3D, WebGLRenderer, WebGLRenderTarget } from 'three'
+import type { Camera, DirectionalLight, MeshPhysicalMaterial, Object3D, WebGLRenderer, WebGLRenderTarget } from 'three'
 import type { WebGLPathTracer } from 'three-gpu-pathtracer'
+import type { RasterPipeline } from '../src/raster-pipeline'
 import type { VoxelRenderer } from '../src/renderer'
 import type { ViewSettings } from '../src/storage'
 
@@ -91,11 +92,11 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
     check(!Reflect.get(renderer, 'pathTracingFailed'), 'Renderer entered path-tracing fallback')
     check(!renderer.meshState().failed, 'Mesher failed')
   }
-  const idle = () => until(() => {
+  const idle = (timeout = 15000) => until(() => {
     healthy()
     return !Reflect.get(renderer, 'contextLost') && renderer.meshState().pending === 0
       && Reflect.get(renderer, 'rasterFrame') === undefined && !Reflect.get(renderer, 'presentationDirty')
-  }, 'idle raster frame')
+  }, 'idle raster frame', timeout)
   // Reading the preserved canvas never calls capture()/render(): recovery must draw itself.
   const pixels = () => {
     const copy = new OffscreenCanvas(canvas.width, canvas.height)
@@ -346,6 +347,113 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
       return { activeSamples: previous.samples, restoredSamples: tracer.samples, interruptedCompilation: compiling.compiling, activeCaptureError, compilationCaptureError, uncaughtErrors: report.errors.length - errorStart }
     })
 
+    await run('progressive preparation and compilation previews neither draw nor sample shadow maps', async () => {
+      const tracer = await ready()
+      const raster = Reflect.get(renderer, 'raster') as RasterPipeline
+      const sunlight = Reflect.get(renderer, 'sunlight') as DirectionalLight
+      const previous = { dynamicLowRes: tracer.dynamicLowRes, pausePathTracing: tracer.pausePathTracing }
+      const restoreStart = restores.length
+      let releasePreparation!: () => void, releaseCompilation!: () => void
+      const preparation = new Promise<void>(resolve => { releasePreparation = resolve })
+      const compilation = new Promise<void>(resolve => { releaseCompilation = resolve })
+      let shadowDraws = 0, builds = 0, compiles = 0, compilationCallbacks = 0, observing = false
+      const previews: {
+        phase: 'preparing' | 'compiling'; shadowDraws: number; enabled: boolean; castShadow: boolean
+        dirty: boolean; complete: boolean; delta: ReturnType<typeof difference>
+      }[] = []
+      try {
+        watch(THREE.Mesh.prototype, 'onBeforeShadow', (original, args) => { shadowDraws++; return original(...args) })
+        renderer.setSettings({ ...options, shadows: false })
+        // Software GPU recovery can delay compositor RAFs behind pending shader work.
+        await idle(180000)
+        const reference = pixels()
+        check(shadowDraws === 0, 'Shadow-disabled reference must not issue depth draws')
+        renderer.setSettings(options)
+        webgl.shadowMap.needsUpdate = true
+        await idle(180000)
+        const shadowed = pixels(), warmDraws = shadowDraws, cachedMap = sunlight.shadow.map
+        const effect = mean(roi(reference, [-5.2, -0.03, 0])) - mean(roi(shadowed, [-5.2, -0.03, 0]))
+        check(warmDraws > 0 && cachedMap && !webgl.shadowMap.needsUpdate, 'Positive control must populate a clean real shadow map')
+        check(effect > 25, `Cached shadow must visibly darken the ground probe: ${effect}`)
+
+        // Hold real async results, not scene data or shader output, until each RAF preview is observed.
+        watch(tracer, 'setSceneAsync', (original, args) => {
+          builds++
+          return Promise.all([original(...args), preparation]).then(([result]) => result)
+        })
+        watch(raster, 'render', (original, args) => {
+          const phase = !Reflect.get(renderer, 'pathTracingReady') && Reflect.get(renderer, 'pathTracingBuildRunning') ? 'preparing'
+            : Reflect.get(renderer, 'pathTracingReady') && !Reflect.get(renderer, 'pathTracingBuildRunning')
+              && tracer.dynamicLowRes && Reflect.get(tracer, 'isCompiling') ? 'compiling' : undefined
+          if (!observing || !phase) return original(...args)
+          const start = shadowDraws
+          const flags = { enabled: webgl.shadowMap.enabled, castShadow: sunlight.castShadow, dirty: webgl.shadowMap.needsUpdate }
+          const result = original(...args)
+          previews.push({ phase, ...flags, shadowDraws: shadowDraws - start, complete: raster.lastFrame.complete, delta: difference(reference.data, pixels().data) })
+          return result
+        })
+        watch(tracer, 'rasterizeSceneCallback', (original, args) => {
+          if (tracer.dynamicLowRes && Reflect.get(tracer, 'isCompiling')) compilationCallbacks++
+          return original(...args)
+        })
+        Object.assign(tracer, { dynamicLowRes: true, pausePathTracing: false })
+        observing = true
+        webgl.shadowMap.needsUpdate = true
+        renderer.setSettings({ ...options, pathTracing: true })
+        await until(() => { healthy(); return builds > 0 && previews.some(frame => frame.phase === 'preparing') }, 'automatic preparing raster preview', 180000)
+        check(webgl.shadowMap.enabled && sunlight.castShadow && webgl.shadowMap.needsUpdate, 'Preparing preview must restore both shadow flags and retain pending invalidation')
+
+        watch(webgl, 'compileAsync', (original, args) => {
+          compiles++
+          return Promise.all([original(...args), compilation]).then(([result]) => result)
+        })
+        // Exercise the real compiler/fallback even when this tracer already has a cached program.
+        Reflect.get(tracer, '_pathTracer').material.needsUpdate = true
+        releasePreparation()
+        await until(() => { healthy(); return compiles > 0 && compilationCallbacks > 0 && previews.some(frame => frame.phase === 'compiling') }, 'automatic dynamic-low-res compilation raster preview', 180000)
+        check(webgl.shadowMap.enabled && sunlight.castShadow && webgl.shadowMap.needsUpdate, 'Compiling preview must restore both shadow flags and retain pending invalidation')
+        for (const phase of ['preparing', 'compiling'] as const) {
+          const frames = previews.filter(frame => frame.phase === phase)
+          check(frames.length > 0 && frames.every(frame => frame.complete && frame.dirty), `${phase}: must complete real previews with a dirty cached map`)
+          check(frames.every(frame => !frame.enabled && !frame.castShadow && frame.shadowDraws === 0), `${phase}: shadow maps must be scoped off without depth draws: ${JSON.stringify(frames)}`)
+          check(frames.every(frame => frame.delta.mean <= 0.5 && frame.delta.max <= 2), `${phase}: cached shadows must not be sampled: ${JSON.stringify(frames)}`)
+        }
+        releaseCompilation()
+        await ready()
+        observing = false
+        check(shadowDraws === warmDraws && sunlight.shadow.map === cachedMap && webgl.shadowMap.needsUpdate, 'Preparation, compilation and real traced samples must leave the dirty cached map undrawn')
+
+        renderer.setSettings(options)
+        await idle(180000)
+        const restoredDraws = shadowDraws - warmDraws
+        const repeat = difference(shadowed.data, pixels().data)
+        check(restoredDraws > 0 && !webgl.shadowMap.needsUpdate && webgl.shadowMap.enabled && sunlight.castShadow, 'Switching only path tracing off must consume the pending shadow update')
+        check(repeat.mean <= 0.5 && repeat.max <= 2, `Raster must upgrade back to the shadowed pixels: ${JSON.stringify(repeat)}`)
+
+        tracer.pausePathTracing = false
+        renderer.setSettings({ ...options, pathTracing: true })
+        await ready()
+        Reflect.get(renderer, 'stopPathTracingSamples').call(renderer)
+        const beforeInspection = shadowDraws
+        webgl.shadowMap.needsUpdate = true
+        const images = await bounded(renderer.inspect(['iso-front-right']), 'shadowed inspection while tracing')
+        const inspectionDraws = shadowDraws - beforeInspection
+        check(inspectionDraws > 0 && images[0]?.blob.size > 0, 'Explicit isometric inspection must draw real shadows in PT mode')
+        check(Reflect.get(renderer, 'pathTracingEnabled').call(renderer) && webgl.shadowMap.enabled && sunlight.castShadow, 'Inspection must preserve PT mode and shadow flags')
+        return { warmDraws, effect, builds, compiles, compilationCallbacks, previews, restoredDraws, repeat, inspectionDraws }
+      } finally {
+        observing = false
+        releasePreparation()
+        releaseCompilation()
+        for (const restore of restores.splice(restoreStart).reverse()) restore()
+        tracer.dynamicLowRes = previous.dynamicLowRes
+        tracer.pausePathTracing = false
+        renderer.setSettings({ ...options, pathTracing: true })
+        try { await ready() }
+        finally { tracer.pausePathTracing = previous.pausePathTracing }
+      }
+    })
+
     await run('shadows control changes fixed-seed actual traced ground samples', async () => {
       renderer.setSettings({ ...options, pathTracing: true })
       if (!Reflect.get(renderer, 'renderMode')) renderer.setRenderMode(true)
@@ -443,7 +551,7 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
     }
     window.removeEventListener('error', onError)
     window.removeEventListener('unhandledrejection', onRejection)
-    report.ok = report.checks.length === 6 && report.checks.every(result => result.ok) && !report.errors.length
+    report.ok = report.checks.length === 7 && report.checks.every(result => result.ok) && !report.errors.length
     report.current = 'complete'
     report.running = false
   }

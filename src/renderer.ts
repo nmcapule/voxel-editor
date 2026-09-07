@@ -2285,11 +2285,20 @@ export class VoxelRenderer {
     }, 750)
   }
 
-  private renderRaster(camera = this.camera, raster = this.raster) {
+  private renderRaster(camera = this.camera, raster = this.raster, shadows = !this.pathTracingEnabled()) {
     if (this.contextLost) return
     // FXAA washes out pixel-wide triangle edges; keep the topology inspection view sharp.
     if (raster === this.raster) raster.antialias = !this.settings.meshTriangles || this.renderMode || !!this.sceneContent
-    raster.render(camera)
+    const shadowMap = this.renderer.shadowMap
+    const enabled = shadowMap.enabled, needsUpdate = shadowMap.needsUpdate, castShadow = this.sunlight.castShadow
+    // Light shadow counts also switch shaders, preventing cached-map sampling in trace previews.
+    shadowMap.enabled = this.sunlight.castShadow = this.settings.shadows && shadows
+    try { raster.render(camera) }
+    finally {
+      if (!shadowMap.enabled) shadowMap.needsUpdate = needsUpdate
+      shadowMap.enabled = enabled
+      this.sunlight.castShadow = castShadow
+    }
     this.rasterError = undefined
     if (raster === this.raster) {
       this.presentationDirty = false
@@ -2349,7 +2358,7 @@ export class VoxelRenderer {
         this.scene.add(prepared.root)
         this.renderer.shadowMap.needsUpdate = true
       }
-      if (prepared || this.presentationDirty || !this.pathTracingEnabled() || !this.pathTracingReady) this.renderRaster()
+      if (prepared || this.presentationDirty || !this.pathTracingEnabled() || !this.pathTracingReady) this.renderRaster(this.camera, this.raster, !!prepared || !this.pathTracingEnabled())
     } finally {
       if (prepared && content) {
         this.scene.remove(prepared.root); parent?.add(prepared.root)
@@ -2420,7 +2429,7 @@ export class VoxelRenderer {
           camera.left = camera.bottom = -extent
           camera.right = camera.top = extent
           camera.updateProjectionMatrix()
-          this.renderRaster(camera, raster)
+          this.renderRaster(camera, raster, true)
           const pixels = new Uint16Array(512 * 512 * 4)
           this.renderer.readRenderTargetPixels(raster.readBuffer, 0, 0, 512, 512, pixels)
           const rgba = new Uint8ClampedArray(pixels.length)

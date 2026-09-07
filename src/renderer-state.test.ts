@@ -74,6 +74,51 @@ test('captures flush current camera/material pixels without waiting for RAF', as
   }
 })
 
+test('progressive raster previews suppress maps and preserve pending updates and renderer state', () => {
+  const shadowMap = { enabled: true, needsUpdate: true }, sunlight = { castShadow: true }
+  let expected = false, fail = false, frames = 0
+  const raster = { render() {
+    expect(shadowMap.enabled).toBe(expected)
+    expect(sunlight.castShadow).toBe(expected)
+    shadowMap.needsUpdate = false
+    if (fail) throw new Error('draw failed')
+  } }
+  const probe = Object.assign(Object.create(VoxelRenderer.prototype), {
+    renderer: { shadowMap }, sunlight, raster, settings: { pathTracing: true, shadows: true }, renderMode: true,
+    recordFrame() { frames++ },
+  })
+  for (const ready of [false, true]) for (const dirty of [false, true]) for (const throws of [false, true]) {
+    probe.pathTracingReady = ready
+    shadowMap.needsUpdate = dirty
+    fail = throws
+    probe.presentationDirty = true
+    if (throws) expect(() => probe.renderRaster()).toThrow('draw failed')
+    else probe.renderRaster()
+    expect(shadowMap).toEqual({ enabled: true, needsUpdate: dirty })
+    expect(sunlight.castShadow).toBe(true)
+    expect(probe.presentationDirty).toBe(throws)
+  }
+  expect(frames).toBe(0)
+  fail = false
+  expected = true
+  probe.renderRaster(undefined, raster, true)
+  expect(shadowMap.needsUpdate).toBe(false)
+  for (const state of [{ renderMode: false }, { pathTracingFailed: true }, { sceneInteraction: true }, { sceneContent: {} }]) {
+    Object.assign(probe, { renderMode: true, pathTracingFailed: false, sceneInteraction: false, sceneContent: undefined }, state)
+    shadowMap.needsUpdate = true
+    probe.renderRaster()
+    expect(shadowMap.needsUpdate).toBe(false)
+  }
+  expect(frames).toBe(4)
+  probe.settings.shadows = false
+  shadowMap.enabled = false
+  shadowMap.needsUpdate = true
+  expected = false
+  probe.renderRaster(undefined, raster, true)
+  expect(shadowMap).toEqual({ enabled: false, needsUpdate: true })
+  expect(sunlight.castShadow).toBe(true)
+})
+
 test('ambient environment follows the path tracer +Y => V=1 convention', () => {
   const probe = Object.assign(Object.create(VoxelRenderer.prototype), {
     hemisphere: { color: new Color(0xffffff), groundColor: new Color(0x8c91a0) },

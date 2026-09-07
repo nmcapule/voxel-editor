@@ -183,6 +183,7 @@ async function integration(name: typeof cases[number]) {
     setSettings() {}
     setActiveColor() {}
     setTool() {}
+    refreshLayerScope() {}
     setPaintMode() {}
     setSculptMode() {}
     setSelectionMode() {}

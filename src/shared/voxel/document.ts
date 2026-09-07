@@ -365,13 +365,13 @@ export class VoxelDocument {
     return changed
   }
 
-  paddedChunk(id: number, visibleOnly = false) {
+  paddedChunk(id: number, visibleOnly = false, layerIds?: readonly number[]) {
     const origin = chunkCoords(id)
     const padded = new Uint8Array(PADDED_SIZE ** 3)
     const start = { x: origin.x * CHUNK_SIZE - 1, y: origin.y * CHUNK_SIZE - 1, z: origin.z * CHUNK_SIZE - 1 }
     const min = { x: Math.max(0, start.x), y: Math.max(0, start.y), z: Math.max(0, start.z) }
     const max = { x: Math.min(this.dimensions.x - 1, start.x + PADDED_SIZE - 1), y: Math.min(this.dimensions.y - 1, start.y + PADDED_SIZE - 1), z: Math.min(this.dimensions.z - 1, start.z + PADDED_SIZE - 1) }
-    const layers = this.layers.filter(layer => !visibleOnly || layer.visible).reverse()
+    const layers = this.layers.filter(layer => (!visibleOnly || layer.visible) && (layerIds === undefined || layerIds.includes(layer.id))).reverse()
     // Resolve at most 27 chunk/layer stacks once, including edge and corner halo cells.
     for (let cz = min.z >> 4; cz <= max.z >> 4; cz++) {
       for (let cy = min.y >> 4; cy <= max.y >> 4; cy++) {
@@ -656,14 +656,22 @@ function axisNormal(normal: Vec3) {
     && Math.abs(normal.x) + Math.abs(normal.y) + Math.abs(normal.z) === 1
 }
 
+export function pushPullFaces(cells: Vec3[], normal: Vec3) {
+  if (!axisNormal(normal)) return []
+  const selected = new Map(cells.map(cell => [`${cell.x},${cell.y},${cell.z}`, cell]))
+  // Keep each selected run's front at its own depth, not on the clicked plane.
+  return [...selected.values()]
+    .filter(cell => !selected.has(`${cell.x + normal.x},${cell.y + normal.y},${cell.z + normal.z}`))
+    .sort((a, b) => (a.x - b.x) * normal.x + (a.y - b.y) * normal.y + (a.z - b.z) * normal.z)
+}
+
 export function pushPullRange(document: VoxelDocument, cells: Vec3[], normal: Vec3, layerId = document.activeLayerId) {
   if (!axisNormal(normal)) return { pull: 0, push: 0 }
   let pull = Infinity
   let push = Infinity
-  for (const cell of cells) {
+  for (const cell of pushPullFaces(cells.filter(cell => document.getLayerVoxel(cell.x, cell.y, cell.z, layerId)), normal)) {
     let free = 0
-    while (document.contains(cell.x + normal.x * (free + 1), cell.y + normal.y * (free + 1), cell.z + normal.z * (free + 1))
-      && !document.getLayerVoxel(cell.x + normal.x * (free + 1), cell.y + normal.y * (free + 1), cell.z + normal.z * (free + 1), layerId)) free++
+    while (document.contains(cell.x + normal.x * (free + 1), cell.y + normal.y * (free + 1), cell.z + normal.z * (free + 1))) free++
     pull = Math.min(pull, free)
 
     let filled = 0
@@ -703,15 +711,22 @@ export function moveVoxels(document: VoxelDocument, session: EditSession, cells:
 }
 
 export function pushPull(document: VoxelDocument, session: EditSession, cells: Vec3[], normal: Vec3, distance: number, layerId = document.activeLayerId) {
-  const range = pushPullRange(document, cells, normal, layerId)
+  const sources = cells.filter(cell => document.getLayerVoxel(cell.x, cell.y, cell.z, layerId))
+  if (!sources.length) return 0
+  const range = pushPullRange(document, sources, normal, layerId)
   const amount = Math.max(-range.push, Math.min(range.pull, Math.round(distance)))
+  const fronts = pushPullFaces(sources, normal).map(cell => ({ ...cell, color: document.getLayerVoxel(cell.x, cell.y, cell.z, layerId) }))
   if (amount > 0) {
-    for (const cell of cells) {
-      const color = document.getLayerVoxel(cell.x, cell.y, cell.z, layerId)
-      for (let step = 1; step <= amount; step++) session.set(cell.x + normal.x * step, cell.y + normal.y * step, cell.z + normal.z * step, color)
+    const selected = new Set(sources.map(cell => `${cell.x},${cell.y},${cell.z}`))
+    for (const cell of fronts) {
+      for (let step = 1; step <= amount; step++) {
+        const x = cell.x + normal.x * step, y = cell.y + normal.y * step, z = cell.z + normal.z * step
+        // Preserve selected material layers; the farther front wins where sweeps meet.
+        if (!selected.has(`${x},${y},${z}`)) session.set(x, y, z, cell.color)
+      }
     }
   } else if (amount < 0) {
-    for (const cell of cells) {
+    for (const cell of fronts) {
       for (let step = 0; step < -amount; step++) session.set(cell.x - normal.x * step, cell.y - normal.y * step, cell.z - normal.z * step, 0)
     }
   }
@@ -739,11 +754,13 @@ export function dirtyChunks(document: VoxelDocument, ids: Iterable<number>) {
 
 export function surfaceVoxels(document: VoxelDocument, min: Vec3, max: Vec3, normal: Vec3, layerId?: number) {
   const cells: Vec3[] = []
+  if (layerId !== undefined && !document.getLayer(layerId)?.visible) return cells
+  const getVoxel = layerId === undefined ? document.getVisibleVoxel.bind(document)
+    : (x: number, y: number, z: number) => document.getLayerVoxel(x, y, z, layerId)
   for (let z = min.z; z <= max.z; z++) {
     for (let y = min.y; y <= max.y; y++) {
       for (let x = min.x; x <= max.x; x++) {
-        if (document.getVisibleVoxel(x, y, z) && (layerId === undefined || document.getVisibleVoxelLayer(x, y, z) === layerId)
-          && !document.getVisibleVoxel(x + normal.x, y + normal.y, z + normal.z)) cells.push({ x, y, z })
+        if (getVoxel(x, y, z) && !getVoxel(x + normal.x, y + normal.y, z + normal.z)) cells.push({ x, y, z })
       }
     }
   }
@@ -752,27 +769,33 @@ export function surfaceVoxels(document: VoxelDocument, min: Vec3, max: Vec3, nor
 
 export function occupiedVoxels(document: VoxelDocument, min: Vec3, max: Vec3, layerId?: number) {
   const cells: Vec3[] = []
-  document.forEachVisibleVoxel((x, y, z, _color, owner) => {
+  if (layerId !== undefined && !document.getLayer(layerId)?.visible) return cells
+  const visit = (x: number, y: number, z: number, _color: number, owner: number) => {
     if ((layerId === undefined || owner === layerId)
       && x >= min.x && x <= max.x && y >= min.y && y <= max.y && z >= min.z && z <= max.z) cells.push({ x, y, z })
-  })
+  }
+  if (layerId === undefined) document.forEachVisibleVoxel(visit)
+  else document.forEachVoxel(visit)
   return cells
 }
 
-export function connectedSurfaceVoxels(document: VoxelDocument, start: Vec3, normal: Vec3, color?: number) {
+export function connectedSurfaceVoxels(document: VoxelDocument, start: Vec3, normal: Vec3, color?: number, layerId?: number) {
   const cells: Vec3[] = []
+  if (layerId !== undefined && !document.getLayer(layerId)?.visible) return cells
+  const getVoxel = layerId === undefined ? document.getVisibleVoxel.bind(document)
+    : (x: number, y: number, z: number) => document.getLayerVoxel(x, y, z, layerId)
   const pending = [{ ...start }]
   const visited = new Set<number>()
-  const layerId = document.getVisibleVoxelLayer(start.x, start.y, start.z)
+  const owner = layerId ?? document.getVisibleVoxelLayer(start.x, start.y, start.z)
   const axes = (['x', 'y', 'z'] as const).filter(axis => normal[axis] === 0)
   for (let index = 0; index < pending.length; index++) {
     const cell = pending[index]
     const key = cell.x + cell.y * document.dimensions.x + cell.z * document.dimensions.x * document.dimensions.y
     if (visited.has(key)) continue
     visited.add(key)
-    const cellColor = document.getVisibleVoxel(cell.x, cell.y, cell.z)
-    if (!cellColor || document.getVisibleVoxelLayer(cell.x, cell.y, cell.z) !== layerId || color !== undefined && cellColor !== color
-      || document.getVisibleVoxel(cell.x + normal.x, cell.y + normal.y, cell.z + normal.z)) continue
+    const cellColor = getVoxel(cell.x, cell.y, cell.z)
+    if (!cellColor || layerId === undefined && document.getVisibleVoxelLayer(cell.x, cell.y, cell.z) !== owner || color !== undefined && cellColor !== color
+      || getVoxel(cell.x + normal.x, cell.y + normal.y, cell.z + normal.z)) continue
     cells.push(cell)
     for (const axis of axes) {
       for (const step of [-1, 1]) {
@@ -784,18 +807,21 @@ export function connectedSurfaceVoxels(document: VoxelDocument, start: Vec3, nor
   return cells
 }
 
-export function connectedBodyVoxels(document: VoxelDocument, start: Vec3, color?: number) {
+export function connectedBodyVoxels(document: VoxelDocument, start: Vec3, color?: number, layerId?: number) {
   const cells: Vec3[] = []
+  if (layerId !== undefined && !document.getLayer(layerId)?.visible) return cells
+  const getVoxel = layerId === undefined ? document.getVisibleVoxel.bind(document)
+    : (x: number, y: number, z: number) => document.getLayerVoxel(x, y, z, layerId)
   const pending = [{ ...start }]
   const visited = new Set<number>()
-  const layerId = document.getVisibleVoxelLayer(start.x, start.y, start.z)
+  const owner = layerId ?? document.getVisibleVoxelLayer(start.x, start.y, start.z)
   for (let index = 0; index < pending.length; index++) {
     const cell = pending[index]
     const key = cell.x + cell.y * document.dimensions.x + cell.z * document.dimensions.x * document.dimensions.y
     if (visited.has(key)) continue
     visited.add(key)
-    const cellColor = document.getVisibleVoxel(cell.x, cell.y, cell.z)
-    if (!cellColor || document.getVisibleVoxelLayer(cell.x, cell.y, cell.z) !== layerId || color !== undefined && cellColor !== color) continue
+    const cellColor = getVoxel(cell.x, cell.y, cell.z)
+    if (!cellColor || layerId === undefined && document.getVisibleVoxelLayer(cell.x, cell.y, cell.z) !== owner || color !== undefined && cellColor !== color) continue
     cells.push(cell)
     for (const axis of ['x', 'y', 'z'] as const) {
       for (const step of [-1, 1]) {

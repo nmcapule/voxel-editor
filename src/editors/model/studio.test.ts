@@ -73,22 +73,29 @@ describe('studio command kernel', () => {
     expect(studio.revision).toBe(revision)
   })
 
-  test('applies edits, selection, and history through one effect boundary', () => {
+  test('applies covered active-layer paint, selection, and history through one effect boundary', () => {
     const document = new VoxelDocument()
     document.setVoxel(1, 1, 1, 5)
+    const upper = document.createLayer()
+    document.setVoxel(1, 1, 1, 7)
+    document.setActiveLayer(1)
     const studio = new Studio(document, settings)
 
     studio.execute({ type: 'selection.set', cells: [{ x: 1, y: 1, z: 1 }] })
     const painted = studio.execute({ type: 'edit.paint', color: 6 })
-    expect(document.getVoxel(1, 1, 1)).toBe(6)
+    expect(document.getLayerVoxel(1, 1, 1)).toBe(6)
+    expect(document.getLayerVoxel(1, 1, 1, upper.id)).toBe(7)
     expect(painted.effects).toMatchObject({ factsChanged: true, save: true })
     expect(painted.effects.dirtyChunks).toContain(0)
 
     studio.execute({ type: 'history.undo' })
-    expect(document.getVoxel(1, 1, 1)).toBe(5)
+    expect(document.getLayerVoxel(1, 1, 1)).toBe(5)
+    expect(document.getLayerVoxel(1, 1, 1, upper.id)).toBe(7)
     expect(studio.selection.cells).toEqual([{ x: 1, y: 1, z: 1 }])
     studio.execute({ type: 'history.redo' })
-    expect(document.getVoxel(1, 1, 1)).toBe(6)
+    expect(document.getLayerVoxel(1, 1, 1)).toBe(6)
+    expect(document.getLayerVoxel(1, 1, 1, upper.id)).toBe(7)
+    expect(studio.selection.cells).toEqual([{ x: 1, y: 1, z: 1 }])
   })
 
   test('targets an explicit layer instead of ambient active state', () => {
@@ -104,6 +111,308 @@ describe('studio command kernel', () => {
     studio.execute({ type: 'history.redo' })
     expect(studio.document.activeLayerId).toBe(1)
     expect(studio.document.getLayerVoxel(2, 3, 4, upper.id)).toBe(7)
+  })
+
+  test('selects exact active-layer occupancy under overlaps and rejects other-layer-only cells', () => {
+    const document = new VoxelDocument()
+    const cell = { x: 1, y: 1, z: 1 }
+    const other = { x: 2, y: 1, z: 1 }
+    document.setVoxel(cell.x, cell.y, cell.z, 5)
+    const upper = document.createLayer()
+    document.setVoxel(cell.x, cell.y, cell.z, 7)
+    document.setVoxel(other.x, other.y, other.z, 5)
+    document.setActiveLayer(1)
+    const studio = new Studio(document, settings)
+
+    const outcome = studio.execute({ type: 'selection.set', cells: [cell, cell, other, { x: 0, y: 0, z: 0 }, { x: 32, y: 1, z: 1 }] })
+    expect(document.getVisibleVoxelLayer(cell.x, cell.y, cell.z)).toBe(upper.id)
+    expect(outcome.result.selection).toEqual({ cells: [cell], count: 1, floating: undefined })
+    expect(studio.selection.cells).toEqual([cell])
+    studio.execute({ type: 'selection.set', cells: [cell], additive: true })
+    expect(studio.selection.count).toBe(0)
+  })
+
+  test.each(['point', 'surface', 'texture', 'body'] as const)('resolves %s selection through covered active-layer cells only', mode => {
+    const document = new VoxelDocument()
+    const active = document.createLayer()
+    const voxels = [
+      { x: 1, y: 1, z: 1, color: 5 },
+      { x: 2, y: 1, z: 1, color: 5 },
+      { x: 3, y: 1, z: 1, color: 5 },
+      { x: 4, y: 1, z: 1, color: 6 },
+      { x: 3, y: 0, z: 1, color: 5 },
+      { x: 6, y: 1, z: 1, color: 5 },
+    ]
+    for (const voxel of voxels) document.setVoxel(voxel.x, voxel.y, voxel.z, voxel.color)
+    document.createLayer()
+    // Cover the seed, a connecting cell, its outward face, and a body cell.
+    for (const cell of [voxels[0], voxels[1], { x: 2, y: 2, z: 1 }, voxels[4]]) document.setVoxel(cell.x, cell.y, cell.z, 7)
+    const other = { x: 5, y: 1, z: 1 }
+    document.setVoxel(other.x, other.y, other.z, 5)
+    document.setActiveLayer(active.id)
+    const studio = new Studio(document, settings, { selectionMode: mode })
+    const cells = voxels.map(({ color: _color, ...cell }) => cell)
+    const normal = { x: 0, y: 1, z: 0 }
+
+    for (const cell of [cells[0], cells[2]]) {
+      studio.execute({ type: 'selection.resolve', cell, normal, mode: cell === cells[0] ? mode : undefined })
+      const expected = mode === 'point' ? [cell]
+        : mode === 'surface' ? cells.slice(0, 4)
+        : mode === 'texture' ? [cells[0], cells[1], cells[2], cells[4]]
+        : cells.slice(0, 5)
+      expect(new Set(studio.selection.cells)).toEqual(new Set(expected))
+      expect(studio.selection.count).toBe(expected.length)
+      expect(studio.execute({ type: 'selection.resolve', cell: other, normal, additive: true }).changed).toBe(false)
+      expect(new Set(studio.selection.cells)).toEqual(new Set(expected))
+      studio.execute({ type: 'selection.resolve', cell, normal, additive: true })
+      expect(studio.selection.count).toBe(0)
+    }
+    studio.execute({ type: 'selection.set', cells: [cells[0]] })
+    studio.execute({ type: 'selection.resolve', cell: other, normal })
+    expect(studio.selection.count).toBe(0)
+  })
+
+  test('keeps covered selections when another layer is hidden or shown', () => {
+    const document = new VoxelDocument()
+    const cell = { x: 1, y: 1, z: 1 }
+    document.setVoxel(cell.x, cell.y, cell.z, 5)
+    const upper = document.createLayer()
+    document.setVoxel(cell.x, cell.y, cell.z, 7)
+    upper.visible = false
+    document.setActiveLayer(1)
+    const studio = new Studio(document, settings)
+    studio.execute({ type: 'selection.set', cells: [cell] })
+    const selection = studio.selection
+
+    for (const visible of [true, false, true]) {
+      expect(studio.execute({ type: 'layer.visibility', id: upper.id, visible }).effects.selectionChanged).toBe(false)
+      expect(studio.selection).toEqual(selection)
+    }
+    expect(studio.execute({ type: 'layer.visibility', id: 1, visible: false }).effects.selectionChanged).toBe(true)
+    expect(studio.selection.count).toBe(0)
+    studio.execute({ type: 'layer.visibility', id: 1, visible: true })
+    expect(studio.selection.count).toBe(0)
+  })
+
+  test.each(['locked', 'hidden'] as const)('protects a %s active layer without confusing visibility and editability', state => {
+    const document = new VoxelDocument()
+    const cell = { x: 1, y: 1, z: 1 }
+    const voxel = { ...cell, color: 5 }
+    document.setVoxel(cell.x, cell.y, cell.z, voxel.color)
+    document.createLayer()
+    document.setVoxel(cell.x, cell.y, cell.z, 7)
+    document.setActiveLayer(1)
+    const studio = new Studio(document, settings)
+    studio.execute({ type: 'selection.set', cells: [cell] })
+    studio.execute({ type: 'clipboard.copy' })
+    studio.execute(state === 'locked' ? { type: 'layer.lock', id: 1, locked: true } : { type: 'layer.visibility', id: 1, visible: false })
+    const before = studio.composition({ visibility: 'all' }).voxels
+    const revision = studio.revision
+    const normal = { x: 1, y: 0, z: 0 }
+    const expected = state === 'locked' ? [cell] : []
+
+    studio.execute({ type: 'selection.set', cells: [cell] })
+    expect(studio.selection.cells).toEqual(expected)
+    for (const mode of ['point', 'surface', 'texture', 'body'] as const) {
+      studio.execute({ type: 'selection.resolve', cell, normal, mode })
+      expect(studio.selection.cells).toEqual(expected)
+    }
+    if (state === 'locked') {
+      studio.execute({ type: 'clipboard.copy' })
+      expect(studio.clipboard).toEqual([voxel])
+    }
+    for (const command of [
+      { type: 'edit.paint', cells: [cell], color: 6 },
+      { type: 'edit.erase', cells: [cell] },
+      { type: 'edit.setVoxels', voxels: [{ ...cell, color: 6 }] },
+      { type: 'edit.fill', min: cell, max: cell, shape: 'box', color: 6 },
+      { type: 'edit.move', cells: [cell], normal, distance: 1 },
+      { type: 'edit.pushPull', cells: [cell], normal, distance: 1 },
+      { type: 'clipboard.paste.begin' },
+    ] satisfies StudioCommand[]) expect(() => studio.execute(command)).toThrow(state)
+    expect(() => studio.execute({ type: 'clipboard.cut' })).toThrow(StudioCommandError)
+    expect(studio.composition({ visibility: 'all' }).voxels).toEqual(before)
+    expect(studio.revision).toBe(revision)
+    expect(studio.canUndo).toBe(false)
+  })
+
+  test.each([
+    { type: 'edit.paint', color: 6 },
+    { type: 'edit.erase' },
+    { type: 'edit.setVoxels', voxels: [{ x: 1, y: 1, z: 1, color: 6 }] },
+    { type: 'edit.fill', min: { x: 1, y: 1, z: 1 }, max: { x: 1, y: 1, z: 1 }, shape: 'box', color: 6 },
+    { type: 'edit.move', normal: { x: 1, y: 0, z: 0 }, distance: 2 },
+    { type: 'edit.pushPull', normal: { x: 1, y: 0, z: 0 }, distance: 2 },
+  ] satisfies StudioCommand[])('preserves covered active selection for explicit nonactive $type and history', command => {
+    const document = new VoxelDocument()
+    const cell = { x: 1, y: 1, z: 1 }
+    document.setVoxel(cell.x, cell.y, cell.z, 5)
+    const upper = document.createLayer()
+    document.setVoxel(cell.x, cell.y, cell.z, 7)
+    document.setActiveLayer(1)
+    const studio = new Studio(document, settings)
+    studio.execute({ type: 'layer.lock', id: 1, locked: true })
+    studio.execute({ type: 'selection.set', cells: [cell] })
+    const untouched = studio.composition({ visibility: 'layer', layerId: 1 }).voxels
+    const before = studio.composition({ visibility: 'layer', layerId: upper.id }).voxels
+
+    expect(studio.execute({ ...command, layerId: upper.id }).changed).toBe(true)
+    const after = studio.composition({ visibility: 'layer', layerId: upper.id }).voxels
+    expect(after).not.toEqual(before)
+    expect(studio.selection.cells).toEqual([cell])
+    expect(document.activeLayerId).toBe(1)
+    expect(studio.composition({ visibility: 'layer', layerId: 1 }).voxels).toEqual(untouched)
+    for (const type of ['history.undo', 'history.redo'] as const) {
+      studio.execute({ type })
+      expect(studio.composition({ visibility: 'layer', layerId: upper.id }).voxels).toEqual(type === 'history.undo' ? before : after)
+      expect(studio.composition({ visibility: 'layer', layerId: 1 }).voxels).toEqual(untouched)
+      expect(studio.selection.cells).toEqual([cell])
+      expect(document.activeLayerId).toBe(1)
+    }
+  })
+
+  test.each(['edit.move', 'edit.pushPull'] as const)('%s overwrites same-layer destinations across multiple steps with covered selection history', type => {
+    const document = new VoxelDocument()
+    const cell = { x: 1, y: 1, z: 1 }
+    const destination = { x: 4, y: 1, z: 1 }
+    document.setVoxel(1, 1, 1, 5)
+    document.setVoxel(3, 1, 1, 6)
+    document.setVoxel(4, 1, 1, 8)
+    const upper = document.createLayer()
+    for (let x = 1; x <= 4; x++) document.setVoxel(x, 1, 1, 7)
+    document.setActiveLayer(1)
+    const studio = new Studio(document, settings)
+    studio.execute({ type: 'selection.set', cells: [cell] })
+    const untouched = studio.composition({ visibility: 'layer', layerId: upper.id }).voxels
+
+    expect(studio.execute({ type, normal: { x: 1, y: 0, z: 0 }, distance: 3 }).result).toEqual({ distance: 3, selection: [destination] })
+    const after = type === 'edit.move' ? [0, 0, 6, 5] : [5, 5, 5, 5]
+    expect([1, 2, 3, 4].map(x => document.getLayerVoxel(x, 1, 1))).toEqual(after)
+    expect(studio.selection.cells).toEqual([destination])
+    expect(studio.composition({ visibility: 'layer', layerId: upper.id }).voxels).toEqual(untouched)
+    for (const history of ['history.undo', 'history.redo'] as const) {
+      studio.execute({ type: history })
+      expect([1, 2, 3, 4].map(x => document.getLayerVoxel(x, 1, 1))).toEqual(history === 'history.undo' ? [5, 0, 6, 8] : after)
+      expect(studio.selection.cells).toEqual(history === 'history.undo' ? [cell] : [destination])
+      expect(studio.composition({ visibility: 'layer', layerId: upper.id }).voxels).toEqual(untouched)
+      expect(document.activeLayerId).toBe(1)
+    }
+  })
+
+  test('push-pull advances stepped volume fronts equally, preserves full selection history, and shrinks one cell per step', () => {
+    const document = new VoxelDocument()
+    const columns = (heights: number[]) => heights.flatMap((height, index) => Array.from({ length: height }, (_, y) => ({ x: index + 1, y: y + 1, z: 1 })))
+    const cells = columns([2, 4])
+    for (const cell of cells) document.setVoxel(cell.x, cell.y, cell.z, 4 + cell.y)
+    const studio = new Studio(document, settings)
+    const normal = { x: 0, y: 1, z: 0 }
+    const fronts = [{ x: 1, y: 2, z: 1 }, { x: 2, y: 4, z: 1 }]
+    const colors = () => [1, 2].map(x => Array.from({ length: 7 }, (_, y) => document.getLayerVoxel(x, y + 1, 1)))
+
+    for (const distance of [2, -2]) {
+      const selected = distance > 0 ? cells : columns([4, 6])
+      studio.execute({ type: 'selection.set', cells: selected })
+      const before = studio.composition().voxels
+      const endpoints = fronts.map(cell => ({ ...cell, y: cell.y + (distance > 0 ? 2 : 0) }))
+      expect(studio.execute({ type: 'edit.pushPull', normal, distance }).result).toEqual({ distance, selection: endpoints })
+      expect(studio.selection.cells).toEqual(endpoints)
+      expect(colors()).toEqual(distance > 0
+        ? [[5, 6, 6, 6, 0, 0, 0], [5, 6, 7, 8, 8, 8, 0]]
+        : [[5, 6, 0, 0, 0, 0, 0], [5, 6, 7, 8, 0, 0, 0]])
+      const after = studio.composition().voxels
+      for (const type of ['history.undo', 'history.redo'] as const) {
+        studio.execute({ type })
+        expect(studio.composition().voxels).toEqual(type === 'history.undo' ? before : after)
+        expect(studio.selection.cells).toEqual(type === 'history.undo' ? selected : endpoints)
+      }
+    }
+
+    studio.execute({ type: 'selection.set', cells })
+    expect(studio.execute({ type: 'edit.pushPull', normal, distance: -1 }).result).toEqual({
+      distance: -1, selection: fronts.map(cell => ({ ...cell, y: cell.y - 1 })),
+    })
+    expect(colors()).toEqual([[5, 0, 0, 0, 0, 0, 0], [5, 6, 7, 0, 0, 0, 0]])
+    expect(studio.execute({ type: 'edit.pushPull', normal, distance: -1 }).result).toEqual({
+      distance: -1, selection: [{ x: 2, y: 2, z: 1 }],
+    })
+    expect(colors()).toEqual([[0, 0, 0, 0, 0, 0, 0], [5, 6, 0, 0, 0, 0, 0]])
+  })
+
+  test.each(['clipboard.copy', 'clipboard.cut'] as const)('pastes %s colors into covered cells and restores selection through history', type => {
+    const document = new VoxelDocument()
+    const cells = [{ x: 1, y: 1, z: 1 }, { x: 2, y: 1, z: 1 }]
+    const destinations = cells.map(cell => ({ ...cell, x: cell.x + 4 }))
+    const voxels = cells.map((cell, index) => ({ ...cell, color: 5 + index }))
+    for (const voxel of voxels) document.setVoxel(voxel.x, voxel.y, voxel.z, voxel.color)
+    document.setVoxel(5, 1, 1, 8)
+    const upper = document.createLayer()
+    for (const cell of [...cells, ...destinations]) document.setVoxel(cell.x, cell.y, cell.z, 7)
+    document.setActiveLayer(1)
+    const studio = new Studio(document, settings)
+    const untouched = studio.composition({ visibility: 'layer', layerId: upper.id }).voxels
+    const original = studio.composition({ visibility: 'layer', layerId: 1 }).voxels
+    studio.execute({ type: 'selection.set', cells })
+    studio.execute({ type })
+    expect(studio.clipboard).toEqual(voxels)
+    const selectionBefore = type === 'clipboard.copy' ? cells : []
+    expect(studio.selection.cells).toEqual(selectionBefore)
+    const before = studio.composition({ visibility: 'layer', layerId: 1 }).voxels
+    expect(studio.composition({ visibility: 'layer', layerId: upper.id }).voxels).toEqual(untouched)
+
+    studio.execute({ type: 'clipboard.paste.begin' })
+    for (const visible of [false, true]) studio.execute({ type: 'layer.visibility', id: upper.id, visible })
+    expect(studio.selection).toEqual({ cells, count: 2, floating: true })
+    studio.execute({ type: 'clipboard.paste.place', offset: { x: 4, y: 0, z: 0 } })
+    expect(studio.pendingPaste).toBeUndefined()
+    expect(studio.selection).toEqual({ cells: destinations, count: 2, floating: undefined })
+    expect(destinations.map(cell => document.getLayerVoxel(cell.x, cell.y, cell.z))).toEqual([5, 6])
+    const after = studio.composition({ visibility: 'layer', layerId: 1 }).voxels
+    expect(studio.composition({ visibility: 'layer', layerId: upper.id }).voxels).toEqual(untouched)
+    for (const history of ['history.undo', 'history.redo'] as const) {
+      studio.execute({ type: history })
+      expect(studio.composition({ visibility: 'layer', layerId: 1 }).voxels).toEqual(history === 'history.undo' ? before : after)
+      expect(studio.selection.cells).toEqual(history === 'history.undo' ? selectionBefore : destinations)
+      expect(studio.composition({ visibility: 'layer', layerId: upper.id }).voxels).toEqual(untouched)
+      expect(document.activeLayerId).toBe(1)
+    }
+    if (type === 'clipboard.cut') {
+      studio.execute({ type: 'history.undo' })
+      studio.execute({ type: 'history.undo' })
+      expect(studio.composition({ visibility: 'layer', layerId: 1 }).voxels).toEqual(original)
+      expect(studio.selection.cells).toEqual(cells)
+      studio.execute({ type: 'history.redo' })
+      expect(studio.composition({ visibility: 'layer', layerId: 1 }).voxels).toEqual(before)
+      expect(studio.selection.count).toBe(0)
+      expect(studio.composition({ visibility: 'layer', layerId: upper.id }).voxels).toEqual(untouched)
+    }
+  })
+
+  test('preserves floating paste on unrelated visibility changes and cancels when its destination is hidden', () => {
+    const document = new VoxelDocument()
+    const cell = { x: 1, y: 1, z: 1 }
+    document.setVoxel(cell.x, cell.y, cell.z, 5)
+    const upper = document.createLayer()
+    document.setVoxel(cell.x, cell.y, cell.z, 7)
+    document.setActiveLayer(1)
+    const studio = new Studio(document, settings)
+    studio.execute({ type: 'selection.set', cells: [cell] })
+    studio.execute({ type: 'clipboard.cut' })
+    studio.execute({ type: 'clipboard.paste.begin' })
+    const paste = studio.pendingPaste
+    const before = studio.composition({ visibility: 'all' }).voxels
+
+    for (const visible of [false, true]) {
+      expect(studio.execute({ type: 'layer.visibility', id: upper.id, visible }).effects.selectionChanged).toBe(false)
+      expect(studio.pendingPaste).toBe(paste)
+      expect(studio.selection).toEqual({ cells: [cell], count: 1, floating: true })
+    }
+    expect(studio.execute({ type: 'layer.visibility', id: 1, visible: false }).effects).toMatchObject({ selectionChanged: true, selectionFocus: true, toolsChanged: true })
+    expect(studio.pendingPaste).toBeUndefined()
+    expect(studio.selection.count).toBe(0)
+    expect(studio.selection.floating).toBeFalsy()
+    studio.execute({ type: 'layer.visibility', id: 1, visible: true })
+    expect(() => studio.execute({ type: 'clipboard.paste.place', offset: { x: 4, y: 0, z: 0 } })).toThrow('There is no pending paste.')
+    expect(studio.composition({ visibility: 'all' }).voxels).toEqual(before)
   })
 
   test('returns stable paginated composition for visible and layered voxels', () => {

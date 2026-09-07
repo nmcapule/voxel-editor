@@ -9,6 +9,7 @@ import {
   dirtyChunks,
   moveVoxels,
   pushPull,
+  pushPullFaces,
   resizeVoxelDocument,
   type Dimensions,
   type FillShape,
@@ -436,10 +437,11 @@ export class Studio {
   }
 
   private selectionState(cells: Vec3[], floating = false): SelectionState {
+    const layer = this.document.activeLayer
     const unique = new Map<number, Vec3>()
     for (const cell of cells) {
       if (!this.document.contains(cell.x, cell.y, cell.z)) continue
-      if (!floating && this.document.getVisibleVoxelLayer(cell.x, cell.y, cell.z) !== this.document.activeLayerId) continue
+      if (!floating && (!layer.visible || !this.document.getLayerVoxel(cell.x, cell.y, cell.z, layer.id))) continue
       unique.set(cellKey(cell, this.document.dimensions), { ...cell })
     }
     const next = [...unique.values()]
@@ -464,15 +466,16 @@ export class Studio {
   }
 
   private resolveSelection(command: Extract<StudioCommand, { type: 'selection.resolve' }>) {
-    const color = this.document.getVisibleVoxel(command.cell.x, command.cell.y, command.cell.z)
-    if (!color || this.document.getVisibleVoxelLayer(command.cell.x, command.cell.y, command.cell.z) !== this.document.activeLayerId) {
+    const layer = this.document.activeLayer
+    const color = this.document.getLayerVoxel(command.cell.x, command.cell.y, command.cell.z, layer.id)
+    if (!layer.visible || !color) {
       return command.additive ? this.unchanged() : this.updateSelection([], false, command.focus === true)
     }
     const mode = command.mode ?? this.selectionMode
     const cells = mode === 'point' ? [command.cell]
-      : mode === 'surface' ? connectedSurfaceVoxels(this.document, command.cell, command.normal)
-      : mode === 'texture' ? connectedBodyVoxels(this.document, command.cell, color)
-      : connectedBodyVoxels(this.document, command.cell)
+      : mode === 'surface' ? connectedSurfaceVoxels(this.document, command.cell, command.normal, undefined, layer.id)
+      : mode === 'texture' ? connectedBodyVoxels(this.document, command.cell, color, layer.id)
+      : connectedBodyVoxels(this.document, command.cell, undefined, layer.id)
     return this.updateSelection(command.additive ? this.mergeSelection(cells) : cells, false, command.focus === true)
   }
 
@@ -531,10 +534,11 @@ export class Studio {
     const activeLayerId = this.document.activeLayerId
     const before = copyCells(this.selection.cells)
     const session = new EditSession(this.document, layerId)
+    const fronts = move ? targets : pushPullFaces(targets, normal)
     const amount = move ? moveVoxels(this.document, session, targets, normal, distance, layerId) : pushPull(this.document, session, targets, normal, distance, layerId)
     const edit = session.commit()
     if (!edit) return this.unchanged({ distance: 0 })
-    const next = layerId === activeLayerId ? this.selectionState(targets.map(cell => ({ x: cell.x + normal.x * amount, y: cell.y + normal.y * amount, z: cell.z + normal.z * amount }))).cells : before
+    const next = layerId === activeLayerId ? this.selectionState(fronts.map(cell => ({ x: cell.x + normal.x * amount, y: cell.y + normal.y * amount, z: cell.z + normal.z * amount }))).cells : before
     const selectionChanged = !sameCells(before, next)
     this.history.push(edit, before, next, activeLayerId, activeLayerId)
     this.selection = this.selectionState(next)
@@ -624,10 +628,14 @@ export class Studio {
     const layer = this.requireLayer(id)
     if (layer.visible === visible) return this.unchanged()
     layer.visible = visible
-    const previous = this.selection.cells
-    const next = previous.filter(cell => this.document.getVisibleVoxelLayer(cell.x, cell.y, cell.z) === this.document.activeLayerId)
-    this.selection = { cells: next, count: next.length }
-    return this.changed({ dirtyChunks: [...dirtyChunks(this.document, this.document.chunks.keys())], selectionChanged: !sameCells(previous, next), selectionFocus: true, factsChanged: true, toolsChanged: true, save: true, announcement: `${layer.name} ${visible ? 'shown' : 'hidden'}` }, { layer: { ...layer } })
+    const previous = this.selection
+    const pasteCanceled = !visible && this.pendingPaste?.layerId === id
+    if (pasteCanceled) this.pendingPaste = undefined
+    this.selection = this.document.activeLayer.visible && !pasteCanceled
+      ? this.selectionState(previous.cells, previous.floating)
+      : { cells: [], count: 0 }
+    const selectionChanged = pasteCanceled || !sameCells(previous.cells, this.selection.cells) || Boolean(previous.floating) !== Boolean(this.selection.floating)
+    return this.changed({ dirtyChunks: [...dirtyChunks(this.document, this.document.chunks.keys())], selectionChanged, selectionFocus: true, factsChanged: true, toolsChanged: true, save: true, announcement: `${layer.name} ${visible ? 'shown' : 'hidden'}` }, { layer: { ...layer } })
   }
 
   private deleteLayer(id: number, allowNonEmpty: boolean) {

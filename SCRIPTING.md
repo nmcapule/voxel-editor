@@ -141,3 +141,9 @@ save.flush
 ```
 
 The runtime validator in `src/editors/model/protocol.ts` is the authoritative argument schema. Destructive resize, layer deletion, project replacement, and VOX replacement require their corresponding explicit approval flag.
+
+`edit.pushPull` reshapes the entire supplied selection along `normal`. Each
+contiguous selected run extends or retracts from its own front by the same
+clamped distance, preserving stepped face offsets. Pulls preserve selected source
+colors and overwrite unselected destinations on the edited layer; where sweeps
+overlap, the farther front wins. The resulting fronts become the new selection.

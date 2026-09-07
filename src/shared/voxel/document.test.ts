@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { CHUNK_SIZE, DEFAULT_PALETTE, EditSession, History, VoxelDocument, chunkId, connectedBodyVoxels, connectedSurfaceVoxels, fillShapeVoxels, moveRange, moveVoxels, occupiedVoxels, pushPull, pushPullRange, resizeVoxelDocument, surfaceVoxels, voxelLine } from './document'
+import { CHUNK_SIZE, DEFAULT_PALETTE, EditSession, History, PADDED_SIZE, VoxelDocument, chunkCoords, chunkId, connectedBodyVoxels, connectedSurfaceVoxels, fillShapeVoxels, moveRange, moveVoxels, occupiedVoxels, pushPull, pushPullRange, resizeVoxelDocument, surfaceVoxels, voxelLine } from './document'
 import { meshChunk } from './mesher'
 import { castsRealtimeShadow, realtimeEnvironmentIntensity, workspaceGridPlaneVisible, workspaceGridPositions } from '../rendering/stage'
 import { isTouchTap, pushPullGhostVoxels, shouldOrbitTouch, traceGridRay, tracePlaneRay } from '../../editors/model/renderer'
@@ -76,7 +76,7 @@ describe('voxel document', () => {
     ])
   })
 
-  test('pushes and pulls selected voxels without crossing a collision', () => {
+  test('pulls through occupied voxels and pushes into contiguous solid voxels', () => {
     const document = new VoxelDocument({ x: 16, y: 16, z: 16 })
     document.setVoxel(2, 0, 2, 5)
     document.setVoxel(3, 0, 2, 5)
@@ -85,7 +85,7 @@ describe('voxel document', () => {
     const normal = { x: 0, y: 1, z: 0 }
     const cells = [{ x: 2, y: 0, z: 2 }, { x: 3, y: 0, z: 2 }]
 
-    expect(pushPullRange(document, cells, normal)).toEqual({ pull: 2, push: 1 })
+    expect(pushPullRange(document, cells, normal)).toEqual({ pull: 15, push: 1 })
     expect(pushPullGhostVoxels(cells, normal, 2, false)).toEqual([
       { x: 2, y: 1, z: 2 }, { x: 2, y: 2, z: 2 },
       { x: 3, y: 1, z: 2 }, { x: 3, y: 2, z: 2 },
@@ -94,15 +94,122 @@ describe('voxel document', () => {
       { x: 2, y: 2, z: 2 }, { x: 2, y: 1, z: 2 },
     ])
     const session = new EditSession(document)
-    expect(pushPull(document, session, cells, normal, 8)).toBe(2)
-    expect(document.getVoxel(3, 2, 2)).toBe(5)
-    expect(document.getVoxel(2, 3, 2)).toBe(7)
+    expect(pushPull(document, session, cells, normal, 8)).toBe(8)
+    expect(document.getVoxel(3, 8, 2)).toBe(5)
+    expect(document.getVoxel(2, 3, 2)).toBe(5)
 
-    const top = [{ x: 3, y: 2, z: 2 }]
+    const top = [{ x: 3, y: 8, z: 2 }]
     const pushSession = new EditSession(document)
     expect(pushPull(document, pushSession, top, normal, -2)).toBe(-2)
-    expect(document.getVoxel(3, 2, 2)).toBe(0)
-    expect(document.getVoxel(3, 0, 2)).toBe(5)
+    expect(document.getVoxel(3, 8, 2)).toBe(0)
+    expect(document.getVoxel(3, 6, 2)).toBe(5)
+  })
+
+  test('snapshots extrusion colors at different depths and restores overwritten chunks without changing other layers', () => {
+    const document = new VoxelDocument()
+    const layerId = document.activeLayerId
+    for (const [x, color] of [[14, 5], [16, 6], [17, 7], [18, 8]]) document.setVoxel(x, 1, 1, color)
+    const other = document.createLayer()
+    for (const x of [14, 16, 17, 18, 19, 31]) document.setVoxel(x, 1, 1, 9)
+    const before = [0, 1].map(id => document.copyChunk(id))
+    const cells = [14, 16, 15, 31].map(x => ({ x, y: 1, z: 1 }))
+    const normal = { x: 1, y: 0, z: 0 }
+    const session = new EditSession(document, layerId)
+
+    expect(pushPull(document, session, cells, normal, 3, layerId)).toBe(3)
+    expect([14, 15, 16, 17, 18, 19, 20].map(x => document.getLayerVoxel(x, 1, 1, layerId))).toEqual([5, 5, 6, 6, 6, 6, 0])
+    expect(pushPullGhostVoxels([cells[0], cells[1], cells[0]], normal, 3, false)).toEqual(
+      [15, 17, 18, 19].map(x => ({ x, y: 1, z: 1 })),
+    )
+    expect([14, 16, 17, 18, 19, 31].map(x => document.getLayerVoxel(x, 1, 1, other.id))).toEqual([9, 9, 9, 9, 9, 9])
+    expect(document.voxelCount).toBe(12)
+    const after = [0, 1].map(id => document.copyChunk(id))
+    const history = new History()
+    history.push(session.commit())
+    history.undo(document)
+    expect([0, 1].map(id => document.copyChunk(id))).toEqual(before)
+    expect(document.voxelCount).toBe(10)
+    const reversed = new EditSession(document, layerId)
+    pushPull(document, reversed, [...cells].reverse().concat(cells[0]), normal, 3, layerId)
+    expect([0, 1].map(id => document.copyChunk(id))).toEqual(after)
+    reversed.cancel()
+    history.redo(document)
+    expect([0, 1].map(id => document.copyChunk(id))).toEqual(after)
+    expect(document.voxelCount).toBe(12)
+
+    const empty = new EditSession(document, layerId)
+    expect(pushPull(document, empty, [{ x: 31, y: 1, z: 1 }], { x: -1, y: 0, z: 0 }, 3, layerId)).toBe(0)
+    expect(pushPull(document, empty, [], normal, -3, layerId)).toBe(0)
+    expect(empty.commit()).toBeUndefined()
+  })
+
+  test('clamps extrusion to every signed axis bound and inward removal to same-layer solid depth', () => {
+    for (const axis of ['x', 'y', 'z'] as const) for (const direction of [-1, 1]) {
+      const document = new VoxelDocument({ x: 17, y: 19, z: 21 })
+      const layerId = document.activeLayerId
+      const origin = direction > 0 ? document.dimensions[axis] - 4 : 3
+      const at = (offset: number) => ({ x: 4, y: 4, z: 4, [axis]: origin + direction * offset })
+      const normal = { x: 0, y: 0, z: 0, [axis]: direction }
+      for (const offset of [-3, -1, 0, 1, 2, 3]) {
+        const cell = at(offset)
+        document.setVoxel(cell.x, cell.y, cell.z, offset <= 0 ? 5 : 6)
+      }
+      const other = document.createLayer()
+      const gap = at(-2)
+      document.setVoxel(gap.x, gap.y, gap.z, 7)
+      expect(pushPullRange(document, [at(0)], normal, layerId)).toEqual({ pull: 3, push: 2 })
+      expect(pushPullRange(document, [at(0), at(3)], normal, layerId)).toEqual({ pull: 0, push: 2 })
+      const pull = new EditSession(document, layerId)
+      expect(pushPull(document, pull, [at(0)], normal, 100, layerId)).toBe(3)
+      for (const offset of [1, 2, 3, 4]) {
+        const cell = at(offset)
+        expect(document.getLayerVoxel(cell.x, cell.y, cell.z, layerId)).toBe(offset === 4 ? 0 : 5)
+      }
+      pull.cancel()
+      const push = new EditSession(document, layerId)
+      expect(pushPull(document, push, [at(0)], normal, -100, layerId)).toBe(-2)
+      for (const offset of [-3, -2, -1, 0, 1]) {
+        const cell = at(offset)
+        expect(document.getLayerVoxel(cell.x, cell.y, cell.z, layerId)).toBe(offset === -3 ? 5 : offset === 1 ? 6 : 0)
+      }
+      expect(document.getLayerVoxel(gap.x, gap.y, gap.z, other.id)).toBe(7)
+    }
+  })
+
+  test('pushes and pulls all selected steps from their own fronts on every signed axis', () => {
+    for (const axis of ['x', 'y', 'z'] as const) for (const sign of [-1, 1]) {
+      const document = new VoxelDocument({ x: 16, y: 16, z: 16 })
+      const tangent = axis === 'x' ? 'z' : 'x'
+      const normal = { x: 0, y: 0, z: 0, [axis]: sign }
+      const at = (column: number, depth: number) => ({ x: 2, y: 2, z: 2, [axis]: sign > 0 ? depth : 15 - depth, [tangent]: column + 2 })
+      const cells = []
+      for (const [column, top] of [[0, 2], [1, 4]]) for (let depth = 0; depth <= top; depth++) {
+        const cell = at(column, depth)
+        document.setVoxel(cell.x, cell.y, cell.z, column + 5)
+        cells.push(cell)
+      }
+      expect(pushPullRange(document, cells, normal)).toEqual({ pull: 11, push: 3 })
+      const added = [at(0, 3), at(0, 4), at(1, 5), at(1, 6)]
+      expect(pushPullGhostVoxels(cells, normal, 2, false)).toEqual(added)
+      const pull = new EditSession(document)
+      expect(pushPull(document, pull, cells, normal, 2)).toBe(2)
+      added.forEach((cell, index) => expect(document.getVoxel(cell.x, cell.y, cell.z)).toBe(index < 2 ? 5 : 6))
+      pull.cancel()
+
+      const removed = [at(0, 2), at(0, 1), at(1, 4), at(1, 3)]
+      expect(pushPullGhostVoxels(cells, normal, -2, false)).toEqual(removed)
+      const push = new EditSession(document)
+      expect(pushPull(document, push, cells, normal, -2)).toBe(-2)
+      removed.forEach(cell => expect(document.getVoxel(cell.x, cell.y, cell.z)).toBe(0))
+      for (const [column, depth] of [[0, 0], [1, 2]]) {
+        const cell = at(column, depth)
+        expect(document.getVoxel(cell.x, cell.y, cell.z)).toBe(column + 5)
+      }
+    }
+    const cells = [2, 4].map(y => ({ x: 1, y, z: 1 }))
+    expect(pushPullGhostVoxels(cells, { x: 0, y: 1, z: 0 }, -3, false)).toEqual(
+      [2, 1, 0, 4, 3].map(y => ({ x: 1, y, z: 1 })),
+    )
   })
 
   test('moves selected voxels without cloning them', () => {
@@ -195,6 +302,35 @@ describe('voxel document', () => {
 })
 
 describe('surface meshing and picking', () => {
+  test('composes named layer scopes in document order across chunk halos and partial bounds', () => {
+    const document = new VoxelDocument({ x: 33, y: 34, z: 35 })
+    const active = document.activeLayer
+    const other = document.createLayer()
+    const hidden = document.createLayer()
+    hidden.visible = false
+    active.locked = true
+    for (const z of [15, 16, 31, 32, 34]) for (const y of [15, 16, 31, 32, 33]) for (const x of [15, 16, 31, 32]) {
+      document.setVoxel(x, y, z, 5, active.id)
+      if ((x + y + z) % 2 === 0) document.setVoxel(x, y, z, 6, other.id)
+      if ((x + y + z) % 3 === 0) document.setVoxel(x, y, z, 7, hidden.id)
+    }
+    const scopes: (readonly number[] | undefined)[] = [undefined, [], [active.id], [other.id, hidden.id], [hidden.id], [other.id, active.id, other.id], [65535]]
+    for (const id of [0, chunkId(1, 1, 1), chunkId(2, 2, 2)]) for (const visibleOnly of [false, true]) for (const scope of scopes) {
+      const origin = chunkCoords(id)
+      const layers = document.layers.filter(layer => (!visibleOnly || layer.visible) && (scope === undefined || scope.includes(layer.id))).reverse()
+      const expected = new Uint8Array(PADDED_SIZE ** 3)
+      let index = 0
+      for (let z = -1; z <= CHUNK_SIZE; z++) for (let y = -1; y <= CHUNK_SIZE; y++) for (let x = -1; x <= CHUNK_SIZE; x++) {
+        for (const layer of layers) {
+          const color = document.getLayerVoxel(origin.x * CHUNK_SIZE + x, origin.y * CHUNK_SIZE + y, origin.z * CHUNK_SIZE + z, layer.id)
+          if (color) { expected[index] = color; break }
+        }
+        index++
+      }
+      expect(document.paddedChunk(id, visibleOnly, scope)).toEqual(expected)
+    }
+  })
+
   test('greedily merges a solid chunk and hides a neighboring face', () => {
     const document = new VoxelDocument({ x: 32, y: 16, z: 16 })
     const first = new EditSession(document)
@@ -305,6 +441,44 @@ describe('surface meshing and picking', () => {
     expect(surfaceVoxels(document, { x: 2, y: 0, z: 2 }, { x: 3, y: 0, z: 2 }, { x: 0, y: 1, z: 0 })).toEqual([{ x: 2, y: 0, z: 2 }])
   })
 
+  test('selects a visible layer through overlaps and exposes faces only against that layer', () => {
+    const document = new VoxelDocument()
+    const layer = document.activeLayer
+    for (const [x, color] of [[14, 5], [15, 5], [16, 6]]) document.setVoxel(x, 1, 1, color)
+    document.setVoxel(16, 2, 1, 6)
+    document.createLayer()
+    document.setVoxel(14, 1, 1, 7)
+    document.setVoxel(15, 2, 1, 7)
+    document.setVoxel(17, 1, 1, 5)
+    const hidden = document.createLayer()
+    document.setVoxel(15, 1, 1, 8)
+    hidden.visible = false
+    layer.locked = true
+    const at = (x: number) => ({ x, y: 1, z: 1 })
+    const normal = { x: 0, y: 1, z: 0 }
+
+    expect(occupiedVoxels(document, at(14), at(17), layer.id)).toEqual([14, 15, 16].map(at))
+    expect(occupiedVoxels(document, at(14), at(17))).toEqual([14, 15, 16, 17].map(at))
+    expect(surfaceVoxels(document, at(14), at(17), normal, layer.id)).toEqual([14, 15].map(at))
+    expect(surfaceVoxels(document, at(14), at(17), normal)).toEqual([14, 17].map(at))
+    expect(connectedSurfaceVoxels(document, at(14), normal, undefined, layer.id)).toEqual([14, 15].map(at))
+    expect(connectedSurfaceVoxels(document, at(14), normal, 5, layer.id)).toEqual([14, 15].map(at))
+    expect(connectedSurfaceVoxels(document, at(14), normal, 7, layer.id)).toEqual([])
+    expect(connectedSurfaceVoxels(document, at(14), normal)).toEqual([at(14)])
+    expect(connectedSurfaceVoxels(document, at(14), normal, 5)).toEqual([])
+    expect(connectedSurfaceVoxels(document, at(15), normal)).toEqual([])
+    document.setVoxel(16, 2, 1, 0, layer.id)
+    expect(connectedSurfaceVoxels(document, at(14), normal, undefined, layer.id)).toEqual([14, 15, 16].map(at))
+    expect(connectedSurfaceVoxels(document, at(14), normal, 5, layer.id)).toEqual([14, 15].map(at))
+
+    layer.visible = false
+    for (const layerId of [layer.id, hidden.id, 0, 65535]) {
+      expect(occupiedVoxels(document, at(14), at(17), layerId)).toEqual([])
+      expect(surfaceVoxels(document, at(14), at(17), normal, layerId)).toEqual([])
+      expect(connectedSurfaceVoxels(document, at(15), normal, undefined, layerId)).toEqual([])
+    }
+  })
+
   test('selects occupied voxels throughout a 3D point-drag box', () => {
     const document = new VoxelDocument()
     document.setVoxel(2, 1, 2, 5)
@@ -344,6 +518,38 @@ describe('surface meshing and picking', () => {
     expect(connectedSurfaceVoxels(document, { x: 2, y: 0, z: 1 }, { x: 0, y: 1, z: 0 }, 5).map(key).sort()).toEqual(['2,0,1'])
     expect(connectedBodyVoxels(document, { x: 2, y: 0, z: 1 }, 5).map(key).sort()).toEqual(['2,0,1', '2,0,2', '2,1,2'])
     expect(connectedBodyVoxels(document, { x: 2, y: 0, z: 1 }).map(key).sort()).toEqual(['1,0,1', '1,1,1', '2,0,1', '2,0,2', '2,1,2'])
+  })
+
+  test('keeps scoped body and texture connectivity layer-local through overlaps', () => {
+    const document = new VoxelDocument()
+    const layer = document.activeLayer
+    for (const [x, color] of [[14, 5], [15, 5], [16, 6], [17, 5], [19, 5]]) document.setVoxel(x, 1, 1, color)
+    document.setVoxel(17, 2, 1, 5)
+    document.createLayer()
+    document.setVoxel(14, 1, 1, 7)
+    document.setVoxel(18, 1, 1, 5)
+    const hidden = document.createLayer()
+    document.setVoxel(15, 1, 1, 8)
+    hidden.visible = false
+    layer.locked = true
+    const at = (x: number) => ({ x, y: 1, z: 1 })
+    const top = { x: 17, y: 2, z: 1 }
+
+    expect(connectedBodyVoxels(document, at(14), undefined, layer.id)).toEqual([...[14, 15, 16, 17].map(at), top])
+    expect(connectedBodyVoxels(document, at(14), 5, layer.id)).toEqual([14, 15].map(at))
+    expect(connectedBodyVoxels(document, at(17), 5, layer.id)).toEqual([at(17), top])
+    expect(connectedBodyVoxels(document, at(14), 7, layer.id)).toEqual([])
+    expect(connectedBodyVoxels(document, at(18), undefined, layer.id)).toEqual([])
+    expect(connectedBodyVoxels(document, at(14))).toEqual([at(14)])
+    expect(connectedBodyVoxels(document, at(14), 5)).toEqual([])
+    expect(connectedBodyVoxels(document, at(15))).toEqual([...[15, 16, 17].map(at), top])
+    expect(connectedBodyVoxels(document, at(15), 5)).toEqual([at(15)])
+
+    layer.visible = false
+    for (const layerId of [layer.id, hidden.id, 0, 65535]) {
+      expect(connectedBodyVoxels(document, at(15), undefined, layerId)).toEqual([])
+      expect(connectedBodyVoxels(document, at(15), layerId === hidden.id ? 8 : 5, layerId)).toEqual([])
+    }
   })
 
   test('builds the editing grid at the exact X and Z limits', () => {

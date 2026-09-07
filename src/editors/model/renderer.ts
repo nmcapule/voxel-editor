@@ -3,7 +3,7 @@ import { Viewport } from '../../shared/rendering/viewport'
 import { castsRealtimeShadow, realtimeEnvironmentIntensity } from '../../shared/rendering/stage'
 import type { CameraSnapshot, SceneContent } from '../../shared/rendering/contracts'
 import type { MeshData } from '../../shared/voxel/mesher'
-import { CHUNK_SIZE, chunkCoords, connectedBodyVoxels, connectedSurfaceVoxels, fillShapeVoxels, moveRange, occupiedVoxels, pushPullRange, surfaceVoxels, type FillShape, type Vec3, type VoxelDocument } from '../../shared/voxel/document'
+import { CHUNK_SIZE, chunkCoords, connectedBodyVoxels, connectedSurfaceVoxels, fillShapeVoxels, moveRange, occupiedVoxels, pushPullFaces, pushPullRange, surfaceVoxels, type FillShape, type Vec3, type VoxelDocument } from '../../shared/voxel/document'
 import type { AuxiliaryTool, PaintMode, PbrMap, SculptMode, SelectionMode, SelectionState, Tool } from './studio'
 import type { ViewSettings } from '../../shared/rendering/settings'
 import { faceViews, projectFaces, type FaceView } from '../../shared/voxel/projections'
@@ -28,9 +28,12 @@ export function isTouchTap(startX: number, startY: number, endX: number, endY: n
 interface MeshResult extends MeshData {
   id: number
   version: number
+  layerId?: number
+  active?: MeshData
+  context?: MeshData
 }
 
-interface GridResult { id: number; version: number; faceLines: Float32Array }
+interface GridResult { id: number; version: number; faceLines: Float32Array; activeFaceLines?: Float32Array }
 
 export interface RendererCallbacks {
   onSelectionChange: (selection: SelectionState) => void
@@ -84,7 +87,9 @@ function rayBounds(origin: Vec3, direction: Vec3, dimensions: Vec3) {
   return { enter, exit, enterNormal, exitNormal }
 }
 
-export function traceGridRay(document: VoxelDocument, origin: Vec3, direction: Vec3, maxDistance = Infinity): ToolTarget | undefined {
+export function traceGridRay(document: VoxelDocument, origin: Vec3, direction: Vec3, maxDistance = Infinity, layerId?: number): ToolTarget | undefined {
+  const voxel = layerId === undefined ? (x: number, y: number, z: number) => document.getVisibleVoxel(x, y, z)
+    : (x: number, y: number, z: number) => document.getLayer(layerId)?.visible ? document.getLayerVoxel(x, y, z, layerId) : 0
   if (!axisNames.every(axis => Number.isFinite(origin[axis]) && Number.isFinite(direction[axis]))
     || !axisNames.some(axis => direction[axis] !== 0)) return undefined
   const bounds = rayBounds(origin, direction, document.dimensions)
@@ -117,10 +122,10 @@ export function traceGridRay(document: VoxelDocument, origin: Vec3, direction: V
     z: direction.z ? ((step.z > 0 ? cell.z + 1 : cell.z) - origin.z) / direction.z : Infinity,
   }
   let normal = bounds.enter >= 0 ? bounds.enterNormal : { x: 0, y: 0, z: 0 }
-  let previous = bounds.enter < 0 ? document.getVisibleVoxel(cell.x, cell.y, cell.z) : 0
+  let previous = bounds.enter < 0 ? voxel(cell.x, cell.y, cell.z) : 0
 
   while (document.contains(cell.x, cell.y, cell.z)) {
-    const color = document.getVisibleVoxel(cell.x, cell.y, cell.z)
+    const color = voxel(cell.x, cell.y, cell.z)
     // A ray inside a solid must leave it before hitting a front-facing surface.
     const exposed = !previous || previous !== color && (document.materials[previous].opacity < 1 || document.materials[previous].transmission > 0)
     if (color && exposed && axisNames.some(axis => normal[axis])) return { cell: { ...cell }, normal, occupied: true, color }
@@ -186,19 +191,23 @@ export function tracePlaneRay(document: VoxelDocument, origin: Vec3, direction: 
 }
 
 export function pushPullGhostVoxels(cells: Vec3[], normal: Vec3, distance: number, move: boolean) {
-  if (move || !distance) return cells.map(cell => ({
+  if (!move && !distance) return pushPullFaces(cells, normal)
+  if (move) return cells.map(cell => ({
     x: cell.x + normal.x * distance,
     y: cell.y + normal.y * distance,
     z: cell.z + normal.z * distance,
   }))
-  const ghosts: Vec3[] = []
-  for (const cell of cells) {
+  const selected = new Set(cells.map(cell => `${cell.x},${cell.y},${cell.z}`))
+  const ghosts = new Map<string, Vec3>()
+  for (const cell of pushPullFaces(cells, normal)) {
     for (let step = 0; step < Math.abs(distance); step++) {
       const offset = distance > 0 ? step + 1 : -step
-      ghosts.push({ x: cell.x + normal.x * offset, y: cell.y + normal.y * offset, z: cell.z + normal.z * offset })
+      const ghost = { x: cell.x + normal.x * offset, y: cell.y + normal.y * offset, z: cell.z + normal.z * offset }
+      const key = `${ghost.x},${ghost.y},${ghost.z}`
+      if (distance < 0 || !selected.has(key)) ghosts.set(key, ghost)
     }
   }
-  return ghosts
+  return [...ghosts.values()]
 }
 
 interface PushPullDrag {
@@ -309,7 +318,7 @@ export class VoxelRenderer {
       this.hover.visible = false
       if (this.selectionPreview) this.selectionPreview.visible = !this.viewport.renderMode
     }
-    this.updateMeshOverlayVisibility()
+    this.refreshLayerScope()
     if (this.settings.faceGrid && !previous.faceGrid) {
       for (const [id, chunk] of this.chunkMeshes) if (!chunk.userData.faceGridReady && !this.queued.has(id)) this.queuedGrids.add(id)
       this.pump()
@@ -332,6 +341,7 @@ export class VoxelRenderer {
   private pointer = new THREE.Vector2()
 
   private materials: THREE.MeshPhysicalMaterial[]
+  private contextMaterial = new THREE.MeshBasicMaterial({ color: 0x87949d, transparent: true, opacity: 0.18, depthWrite: false, toneMapped: false })
   private faceGridMaterial = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.46, depthWrite: false, toneMapped: false })
 
   private meshVerticesMaterial = new THREE.PointsMaterial({ size: 5, sizeAttenuation: false, depthWrite: false, toneMapped: false })
@@ -410,6 +420,8 @@ export class VoxelRenderer {
 
   private modelSettings?: ViewSettings
   private modelRenderMode?: boolean
+  private layerState = ''
+  private meshLayerId?: number
 
   private bindWorker() {
     const worker = this.worker
@@ -607,7 +619,9 @@ export class VoxelRenderer {
     else if (event.key === 'PageDown') movement.y = -1
     else if (event.key === ' ' || event.key === 'Enter') {
       event.preventDefault()
-      const color = this.document.getVisibleVoxel(this.keyboardCell.x, this.keyboardCell.y, this.keyboardCell.z)
+      const { x, y, z } = this.keyboardCell
+      const color = this.isolatedLayerId() === undefined ? this.document.getVisibleVoxel(x, y, z)
+        : this.document.activeLayer.visible ? this.document.getLayerVoxel(x, y, z) : 0
       const target = { cell: { ...this.keyboardCell }, normal: { x: 0, y: 1, z: 0 }, occupied: color > 0 || this.floatingSelection && this.selectionContains(this.keyboardCell), color }
       if (this.auxiliary === 'pick') { if (color) this.callbacks.onPick(color); return }
        if (this.tool === 'layer') { if (color) this.callbacks.onLayerSelect(this.document.getVisibleVoxelLayer(target.cell.x, target.cell.y, target.cell.z)); return }
@@ -767,9 +781,9 @@ export class VoxelRenderer {
       return
     }
     const cells = this.selectionMode === 'point' ? [target.cell]
-      : this.selectionMode === 'surface' ? connectedSurfaceVoxels(this.document, target.cell, target.normal)
-      : this.selectionMode === 'texture' ? connectedBodyVoxels(this.document, target.cell, target.color)
-      : connectedBodyVoxels(this.document, target.cell)
+      : this.selectionMode === 'surface' ? connectedSurfaceVoxels(this.document, target.cell, target.normal, undefined, this.document.activeLayerId)
+      : this.selectionMode === 'texture' ? connectedBodyVoxels(this.document, target.cell, target.color, this.document.activeLayerId)
+      : connectedBodyVoxels(this.document, target.cell, undefined, this.document.activeLayerId)
     if (!additive) { this.setSelection(cells); return }
     const next = new Map(this.selection)
     const remove = cells.every(cell => next.has(this.selectionKey(cell)))
@@ -787,6 +801,9 @@ export class VoxelRenderer {
   }
 
   applySelection(selection: SelectionState, focus = true) {
+    this.cancelPaint()
+    this.cancelPushPull()
+    this.cancelMarquee()
     if (selection.cells[0] && selection.floating) this.keyboardCell = { ...selection.cells[0] }
     this.updateSelection(selection.cells, selection.floating === true, false, focus)
   }
@@ -795,7 +812,7 @@ export class VoxelRenderer {
     this.selection.clear()
     this.floatingSelection = floating
     for (const cell of cells) if (this.document.contains(cell.x, cell.y, cell.z) && (floating
-      || this.document.getVisibleVoxelLayer(cell.x, cell.y, cell.z) === this.document.activeLayerId)) this.selection.set(this.selectionKey(cell), { ...cell })
+      || this.document.activeLayer.visible && this.document.getLayerVoxel(cell.x, cell.y, cell.z))) this.selection.set(this.selectionKey(cell), { ...cell })
     this.clearSelectionPreview()
     const selected = [...this.selection.values()]
     if (selected.length && !this.modelSuspended) {
@@ -839,7 +856,36 @@ export class VoxelRenderer {
 
   private activeTarget(target: ToolTarget) {
     return this.floatingSelection && this.selectionContains(target.cell)
-      || this.document.getVisibleVoxelLayer(target.cell.x, target.cell.y, target.cell.z) === this.document.activeLayerId
+      || this.document.activeLayer.visible && Boolean(this.document.getLayerVoxel(target.cell.x, target.cell.y, target.cell.z))
+  }
+
+  private isolatedLayerId() {
+    return !this.modelSuspended && !this.viewport.renderMode && !this.auxiliary
+      && (this.tool === 'select' || this.tool === 'sculpt' || this.tool === 'paint' && this.paintMode === 'paint')
+      ? this.document.activeLayerId : undefined
+  }
+
+  refreshLayerScope() {
+    if (this.modelSuspended) return
+    const layer = this.document.activeLayer
+    const state = `${layer.id}:${layer.visible}:${layer.locked}`
+    if (state !== this.layerState) {
+      this.layerState = state
+      this.cancelPaint(); this.cancelPushPull(); this.cancelMarquee()
+      this.hover.visible = false
+    }
+    const isolated = this.isolatedLayerId()
+    // Retain the composited surface for normal viewing and clean inspection.
+    // Only build extra geometry while editing alongside other visible layers.
+    const meshLayerId = isolated !== undefined && this.document.layers.some(other => other.visible && other.id !== isolated)
+      ? isolated : undefined
+    const changed = meshLayerId !== this.meshLayerId
+    this.meshLayerId = meshLayerId
+    if (changed) {
+      this.viewport.renderer.shadowMap.needsUpdate = true
+      this.markDirty(this.document.chunks.keys())
+    }
+    this.updateMeshOverlayVisibility()
   }
 
   private activeLayerEditable() {
@@ -911,7 +957,7 @@ export class VoxelRenderer {
       screenY,
     }
 
-    this.pushPullPreview = this.createGhostPreview(cells.length, 0x2864dc)
+    this.pushPullPreview = this.createGhostPreview(move ? cells.length : pushPullFaces(cells, target.normal).length, 0x2864dc)
     this.updatePushPullPreview()
     if (this.selectionPreview) this.selectionPreview.visible = false
     this.root.add(this.pushPullPreview)
@@ -922,7 +968,7 @@ export class VoxelRenderer {
 
   private pushPullCells(target: ToolTarget) {
     if (!target.occupied || !this.selectionContains(target.cell)) return []
-    return connectedSurfaceVoxels(this.document, target.cell, target.normal).filter(cell => this.selectionContains(cell))
+    return [...this.selection.values()]
   }
 
   private pushPullOperation(target: ToolTarget) {
@@ -1053,7 +1099,7 @@ export class VoxelRenderer {
         color: 0,
       }
     }
-    return traceGridRay(this.document, ray.origin, ray.direction, this.raycaster.far)
+    return traceGridRay(this.document, ray.origin, ray.direction, this.raycaster.far, this.isolatedLayerId())
   }
 
   private planeTargetAt(event: PointerEvent, cell: Vec3, normal: Vec3): ToolTarget | undefined {
@@ -1095,44 +1141,33 @@ export class VoxelRenderer {
     for (const result of message.results) {
       if (this.versions.get(result.id) !== result.version || !this.document.chunks.has(result.id)) continue
       this.removeChunk(result.id)
-      if (!result.positions.length) continue
-      const chunkMesh = new THREE.Group()
-      // Draw the post-merge positions once each, without the surface's triangle indices.
-      const verticesGeometry = new THREE.BufferGeometry()
-      verticesGeometry.setAttribute('position', new THREE.BufferAttribute(result.positions, 3))
-      const vertices = new THREE.Points(verticesGeometry, this.meshVerticesMaterial)
-      vertices.userData.meshVertices = true
-      vertices.userData.editorOverlay = true
-      vertices.visible = this.settings.meshVertices && !this.viewport.renderMode
-      vertices.renderOrder = 2
-      chunkMesh.add(vertices)
-      for (const group of result.groups) {
-        const geometry = new THREE.BufferGeometry()
-        const start = group.vertexStart, end = start + group.vertexCount
-        geometry.setAttribute('position', new THREE.BufferAttribute(result.positions.subarray(start * 3, end * 3), 3))
-        geometry.setAttribute('normal', new THREE.BufferAttribute(result.normals.subarray(start * 3, end * 3), 3))
-        geometry.setAttribute('uv', new THREE.BufferAttribute(result.uvs.subarray(start * 2, end * 2), 2))
-        const indices = result.indices.subarray(group.start, group.start + group.count)
-        for (let index = 0; index < indices.length; index++) indices[index] -= start
-        geometry.setIndex(new THREE.BufferAttribute(indices, 1))
-        const bounds = new THREE.Box3(new THREE.Vector3(...group.bounds.slice(0, 3)), new THREE.Vector3(...group.bounds.slice(3)))
-        geometry.boundingBox = bounds
-        geometry.boundingSphere = bounds.getBoundingSphere(new THREE.Sphere())
-        const mesh = new THREE.Mesh(geometry, this.materials[group.materialIndex])
-        mesh.matrixAutoUpdate = false
-        mesh.castShadow = castsRealtimeShadow(this.document.materials[group.materialIndex])
-        mesh.receiveShadow = true
-        chunkMesh.add(mesh)
+      if (!result.positions.length && !result.active?.positions.length && !result.context?.positions.length) continue
+      const chunkMesh = this.createSurface(result)
+      if (result.active) {
+        const isolated = this.createSurface(result.active)
+        isolated.userData.layerIsolation = true
+        isolated.userData.layerId = result.layerId
+        if (result.context?.positions.length) {
+          const geometry = new THREE.BufferGeometry()
+          geometry.setAttribute('position', new THREE.BufferAttribute(result.context.positions, 3))
+          geometry.setIndex(new THREE.BufferAttribute(result.context.indices, 1))
+          geometry.computeBoundingSphere()
+          const context = new THREE.Mesh(geometry, this.contextMaterial)
+          context.userData.editorOverlay = true
+          context.userData.layerContext = true
+          isolated.add(context)
+        }
+        chunkMesh.add(isolated)
       }
       const chunk = chunkCoords(result.id)
       chunkMesh.position.set(chunk.x * CHUNK_SIZE - this.document.dimensions.x / 2, chunk.y * CHUNK_SIZE, chunk.z * CHUNK_SIZE - this.document.dimensions.z / 2)
       chunkMesh.updateMatrix()
       chunkMesh.matrixAutoUpdate = false
       this.chunkMeshes.set(result.id, chunkMesh)
-      this.chunkQuads.set(result.id, result.quads)
+      this.chunkQuads.set(result.id, result.quads + (result.active?.quads ?? 0) + (result.context?.quads ?? 0))
       this.model.add(chunkMesh)
       chunkMesh.updateWorldMatrix(true, true)
-      if (result.faceLines.length) this.receiveGrid(result)
+      if (result.faceLines.length || result.active?.faceLines.length) this.receiveGrid({ ...result, activeFaceLines: result.active?.faceLines })
       else if (this.settings.faceGrid) this.queuedGrids.add(result.id)
       this.updateMeshOverlayVisibility([chunkMesh])
     }
@@ -1142,17 +1177,55 @@ export class VoxelRenderer {
     this.viewport.render()
   }
 
+  private createSurface(data: MeshData) {
+    const surface = new THREE.Group()
+    // Draw the post-merge positions once each, without the surface's triangle indices.
+    const verticesGeometry = new THREE.BufferGeometry()
+    verticesGeometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3))
+    const vertices = new THREE.Points(verticesGeometry, this.meshVerticesMaterial)
+    vertices.userData.meshVertices = true
+    vertices.userData.editorOverlay = true
+    vertices.renderOrder = 2
+    surface.add(vertices)
+    for (const group of data.groups) {
+      const geometry = new THREE.BufferGeometry()
+      const start = group.vertexStart, end = start + group.vertexCount
+      geometry.setAttribute('position', new THREE.BufferAttribute(data.positions.subarray(start * 3, end * 3), 3))
+      geometry.setAttribute('normal', new THREE.BufferAttribute(data.normals.subarray(start * 3, end * 3), 3))
+      geometry.setAttribute('uv', new THREE.BufferAttribute(data.uvs.subarray(start * 2, end * 2), 2))
+      const indices = data.indices.subarray(group.start, group.start + group.count)
+      for (let index = 0; index < indices.length; index++) indices[index] -= start
+      geometry.setIndex(new THREE.BufferAttribute(indices, 1))
+      const bounds = new THREE.Box3(new THREE.Vector3(...group.bounds.slice(0, 3)), new THREE.Vector3(...group.bounds.slice(3)))
+      geometry.boundingBox = bounds
+      geometry.boundingSphere = bounds.getBoundingSphere(new THREE.Sphere())
+      const mesh = new THREE.Mesh(geometry, this.materials[group.materialIndex])
+      mesh.matrixAutoUpdate = false
+      mesh.castShadow = castsRealtimeShadow(this.document.materials[group.materialIndex])
+      mesh.receiveShadow = true
+      surface.add(mesh)
+    }
+    return surface
+  }
+
   private receiveGrid(result: GridResult) {
     const chunk = this.chunkMeshes.get(result.id)
     if (!chunk) return
+    this.installFaceGrid(chunk, result.faceLines)
+    const isolated = chunk.children.find(child => child.userData.layerIsolation)
+    if (isolated && result.activeFaceLines) this.installFaceGrid(isolated, result.activeFaceLines)
+    this.updateMeshOverlayVisibility([chunk])
+  }
+
+  private installFaceGrid(chunk: THREE.Object3D, faceLines: Float32Array) {
     for (const child of [...chunk.children]) if (child.userData.faceGrid) {
       (child as THREE.LineSegments).geometry.dispose()
       chunk.remove(child)
     }
     chunk.userData.faceGridReady = true
-    if (!result.faceLines.length) return
+    if (!faceLines.length) return
     const geometry = new THREE.BufferGeometry()
-    geometry.setAttribute('position', new THREE.BufferAttribute(result.faceLines, 3))
+    geometry.setAttribute('position', new THREE.BufferAttribute(faceLines, 3))
     geometry.computeBoundingSphere()
     const lines = new THREE.LineSegments(geometry, this.faceGridMaterial)
     lines.userData.faceGrid = true
@@ -1192,8 +1265,13 @@ export class VoxelRenderer {
       if (!this.document.chunks.has(id)) { this.removeChunk(id); continue }
       if (grid && this.chunkMeshes.get(id)?.userData.faceGridReady) continue
       const voxels = this.document.paddedChunk(id, true).buffer
+      const layerId = this.meshLayerId
+      const active = layerId === undefined ? undefined : this.document.paddedChunk(id, true, [layerId]).buffer
+      const context = layerId === undefined || grid ? undefined
+        : this.document.paddedChunk(id, true, this.document.layers.filter(layer => layer.id !== layerId).map(layer => layer.id)).buffer
+      const buffers = [voxels, ...(active ? [active] : []), ...(context ? [context] : [])]
       this.inFlight = 1
-      this.worker.postMessage({ type: grid ? 'grid' : 'mesh', jobs: [{ id, version: this.versions.get(id)!, voxels }], faceGrid: this.settings.faceGrid }, [voxels])
+      this.worker.postMessage({ type: grid ? 'grid' : 'mesh', jobs: [{ id, version: this.versions.get(id)!, voxels, layerId, active, context }], faceGrid: this.settings.faceGrid }, buffers)
       break
     }
     this.reportMeshStats()
@@ -1302,6 +1380,8 @@ export class VoxelRenderer {
     this.cancelPushPull()
     this.cancelMarquee()
     this.document = document
+    this.layerState = ''
+    this.meshLayerId = undefined
     this.applySelection({ cells: [], count: 0 }, false)
     this.queued.clear()
     this.queuedGrids.clear()
@@ -1330,6 +1410,7 @@ export class VoxelRenderer {
     this.cancelMarquee()
     this.tool = tool
     this.hover.visible = false
+    this.refreshLayerScope()
     this.viewport.render()
   }
 
@@ -1344,6 +1425,7 @@ export class VoxelRenderer {
     this.cancelPaint()
     this.cancelMarquee()
     this.paintMode = mode
+    this.refreshLayerScope()
     this.viewport.render()
   }
 
@@ -1361,6 +1443,7 @@ export class VoxelRenderer {
     this.cancelMarquee()
     this.auxiliary = tool
     this.hover.visible = false
+    this.refreshLayerScope()
     this.viewport.render()
   }
 
@@ -1423,20 +1506,28 @@ export class VoxelRenderer {
 
   private updateMeshOverlayVisibility(chunks: Iterable<THREE.Group> = this.chunkMeshes.values()) {
     const showTriangles = this.settings.meshTriangles && !this.viewport.renderMode
-    for (const chunk of chunks) for (const child of chunk.children) {
-      if (child.userData.faceGrid) child.visible = this.settings.faceGrid && !this.viewport.renderMode
-      if (child.userData.meshVertices) child.visible = this.settings.meshVertices && !this.viewport.renderMode
-      if (!(child instanceof THREE.Mesh)) continue
-      let triangles = child.children.find(overlay => overlay.userData.meshTriangles)
-      if (!triangles && showTriangles) {
-        triangles = new THREE.LineSegments(new THREE.WireframeGeometry(child.geometry), this.meshTrianglesMaterial)
-        triangles.userData.meshTriangles = true
-        triangles.userData.editorOverlay = true
-        triangles.renderOrder = 1
-        child.add(triangles)
-        triangles.updateWorldMatrix(true, false)
+    for (const chunk of chunks) {
+      const isolated = chunk.children.find(child => child.userData.layerIsolation)
+      const focused = !!isolated && this.isolatedLayerId() === isolated.userData.layerId
+      if (isolated) isolated.visible = focused
+      for (const surface of isolated ? [chunk, isolated] : [chunk]) for (const child of surface.children) {
+        if (child === isolated || child.userData.layerContext) continue
+        const visible = surface !== chunk || !focused
+        if (child.userData.faceGrid) child.visible = visible && this.settings.faceGrid && !this.viewport.renderMode
+        if (child.userData.meshVertices) child.visible = visible && this.settings.meshVertices && !this.viewport.renderMode
+        if (!(child instanceof THREE.Mesh)) continue
+        child.visible = visible
+        let triangles = child.children.find(overlay => overlay.userData.meshTriangles)
+        if (!triangles && showTriangles) {
+          triangles = new THREE.LineSegments(new THREE.WireframeGeometry(child.geometry), this.meshTrianglesMaterial)
+          triangles.userData.meshTriangles = true
+          triangles.userData.editorOverlay = true
+          triangles.renderOrder = 1
+          child.add(triangles)
+          triangles.updateWorldMatrix(true, false)
+        }
+        if (triangles) triangles.visible = showTriangles
       }
-      if (triangles) triangles.visible = showTriangles
     }
   }
 
@@ -1490,7 +1581,19 @@ export class VoxelRenderer {
       const offset = new THREE.Vector3(-this.document.dimensions.x / 2, 0, -this.document.dimensions.z / 2)
       const box = new THREE.Box3(new THREE.Vector3(bounds.min.x, bounds.min.y, bounds.min.z).add(offset), new THREE.Vector3(bounds.max.x, bounds.max.y, bounds.max.z).add(offset))
       const directions = isometric.map(name => new THREE.Vector3(name.endsWith('right') ? 1 : -1, 1, name.includes('front') ? 1 : -1))
-      const canvases = this.viewport.renderViews(box, directions)
+      let canvases: OffscreenCanvas[]
+      const visibility = new Map<THREE.Object3D, boolean>()
+      for (const chunk of this.chunkMeshes.values()) for (const child of chunk.children) {
+        if (!(child instanceof THREE.Mesh) && !child.userData.layerIsolation) continue
+        visibility.set(child, child.visible)
+        child.visible = !child.userData.layerIsolation
+      }
+      this.viewport.renderer.shadowMap.needsUpdate = true
+      try { canvases = this.viewport.renderViews(box, directions) }
+      finally {
+        for (const [object, visible] of visibility) object.visible = visible
+        this.viewport.renderer.shadowMap.needsUpdate = true
+      }
       isometric.forEach((name, index) => {
         const { x, z } = directions[index]
         images.push({ name, width: 512, height: 512, direction: `camera side (${x},1,${z}), orthographic, +Y up, raster materials`, canvas: canvases[index] })
@@ -1514,6 +1617,7 @@ export class VoxelRenderer {
     this.hover.geometry.dispose(); this.hover.material.dispose()
     for (const geometry of Object.values(this.fillPreviewGeometry)) geometry.dispose()
     this.marqueePreview.material.dispose()
+    this.contextMaterial.dispose()
     this.faceGridMaterial.dispose(); this.meshVerticesMaterial.dispose(); this.meshTrianglesMaterial.dispose()
     this.root.clear()
     if (this.ownsViewport) this.viewport.dispose()

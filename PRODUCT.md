@@ -65,7 +65,12 @@ to the composition without replacing the standalone model workspace.
   box and commit on release; clicking either operation within the current selection
   applies it to the full selection, while clicking elsewhere resolves a new scope.
   Push/Pull and Move first select an unselected target
-  and apply on the next drag. Move overwrites occupied destinations on the active
+  and apply on the next drag. Push/Pull reshapes the whole selection along the
+  clicked face normal, preserving staggered face depths rather than restricting
+  edits to one plane. It supports multiple voxel-depth steps per drag and pulls
+  through occupied destinations, replacing colors on the active
+  layer. Select, Paint, and Sculpt isolate the active layer for picking and show
+  other visible layers as faint, noninteractive context. Move overwrites occupied destinations on the active
   layer while preserving overlapping voxels on other layers. The Select popup and
   standard keyboard shortcuts provide Cut, Copy, and movable ghost Paste. The editor also includes a momentary eyedropper,
   undo and redo with matching selection and layer restoration, and

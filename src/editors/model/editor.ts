@@ -225,6 +225,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     if (disposed) return
     const effects = outcome.effects
     syncStudioState()
+    if (!effects.documentReplaced) renderer.refreshLayerScope()
     if (effects.documentReplaced && command.type !== 'document.resize') {
       libraryLink = undefined
       libraryGeneration++

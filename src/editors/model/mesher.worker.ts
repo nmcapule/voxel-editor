@@ -4,6 +4,9 @@ interface MeshJob {
   id: number
   version: number
   voxels: ArrayBuffer
+  layerId?: number
+  active?: ArrayBuffer
+  context?: ArrayBuffer
 }
 
 type WorkerRequest =
@@ -27,7 +30,8 @@ scope.onmessage = (event: MessageEvent<WorkerRequest>) => {
   const job = jobs[0]
   if (event.data.type === 'grid') {
     const faceLines = meshFaceGrid(new Uint8Array(job.voxels), transparent)
-    scope.postMessage({ type: 'gridded', results: [{ id: job.id, version: job.version, faceLines }] }, [faceLines.buffer])
+    const activeFaceLines = job.active ? meshFaceGrid(new Uint8Array(job.active), transparent) : undefined
+    scope.postMessage({ type: 'gridded', results: [{ id: job.id, version: job.version, faceLines, ...(activeFaceLines ? { activeFaceLines } : {}) }] }, [faceLines.buffer, ...(activeFaceLines ? [activeFaceLines.buffer] : [])])
     return
   }
   const result = {
@@ -35,7 +39,18 @@ scope.onmessage = (event: MessageEvent<WorkerRequest>) => {
     version: job.version,
     ...meshChunk(new Uint8Array(job.voxels), undefined, event.data.faceGrid, transparent),
   }
-  scope.postMessage({ type: 'meshed', results: [result] }, [result.positions.buffer, result.normals.buffer, result.uvs.buffer, result.indices.buffer, result.faceLines.buffer])
+  const active = job.active ? meshChunk(new Uint8Array(job.active), undefined, event.data.faceGrid, transparent) : undefined
+  let context
+  if (job.context && job.active) {
+    const voxels = new Uint8Array(job.context), selected = new Uint8Array(job.active)
+    // Never draw coincident context over the active layer, including chunk halos.
+    for (let index = 0; index < voxels.length; index++) voxels[index] = selected[index] ? 0 : Number(voxels[index] !== 0)
+    context = meshChunk(voxels)
+  }
+  const results = [{ ...result, ...(active ? { layerId: job.layerId, active, context } : {}) }]
+  const transfers = [result, ...(active ? [active] : []), ...(context ? [context] : [])]
+    .flatMap(mesh => [mesh.positions.buffer, mesh.normals.buffer, mesh.uvs.buffer, mesh.indices.buffer, mesh.faceLines.buffer])
+  scope.postMessage({ type: 'meshed', results }, transfers)
 }
 scope.postMessage({ type: 'ready' })
 

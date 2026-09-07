@@ -123,6 +123,12 @@ data uses tabular figures.
   shown or hidden, and locked or unlocked.
   Editing requires an active, visible, unlocked layer; selection targets the
   active visible layer. Hidden layers do not mesh, pick, or export.
+- Select, Paint, and Sculpt keep the active layer at its authored appearance and
+  render other visible layers as faint, neutral translucent context. Picking and
+  every selection scope pass through that context, including exact coordinate
+  overlaps. Layer, Eyedropper, Volume, Render mode, and model inspection retain
+  the normal visible composition. This is an editor-only treatment, not a change
+  to layer visibility or palette opacity.
 - Canvas resize offers Center and Origin anchors in the Model tab. Center is the
   default and shifts voxels by whole cells around the size change; Origin keeps
   existing voxel coordinates unchanged.
@@ -168,7 +174,16 @@ data uses tabular figures.
   the listed operation in popup order (Q 1-4, W 1-3, S 1-3). Selecting a primary
   category by keyboard opens its popup; L selects Layer and opens its manager.
 - Push/Pull previews every affected voxel in cobalt when pulling and red when
-  pushing; Move remains cobalt.
+  pushing; Move remains cobalt. The clicked face determines direction, not scope:
+  all selected regions reshape from their own directional fronts, retaining
+  offsets between stepped faces. Interior selected voxels do not cause extra
+  inward cuts. The resulting fronts stay selected for the next edit.
+  One drag can add or remove multiple depth steps.
+  Pulling overwrites occupied destinations on the active layer up to the canvas
+  bounds; pushing removes contiguous solid voxels without cutting through gaps.
+  Overlapping voxels on other named layers are preserved.
+  Pulling also preserves original selected colors; when extrusion paths overlap,
+  the front farther along the pull direction supplies the destination color.
 - Move translates the occupied selection along the dragged face normal, preserves
   palette colors, stops at document bounds, and overwrites destination voxels on
   the active layer without changing overlapping voxels on other layers.

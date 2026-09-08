@@ -256,7 +256,7 @@ export class Studio {
         if (this.paintMode === command.mode && !this.auxiliaryTool) return this.unchanged()
         this.paintMode = command.mode
         this.auxiliaryTool = undefined
-        return this.changed({ toolsChanged: true, announcement: `${command.mode === 'paint' ? 'Paint' : 'Volume'} operation selected` }, { mode: command.mode })
+        return this.changed({ toolsChanged: true, announcement: `${command.mode === 'paint' ? 'Paint' : 'Fill'} operation selected` }, { mode: command.mode })
       }
       case 'tool.sculptMode':
         return this.setSculptMode(command.mode)
@@ -272,7 +272,7 @@ export class Studio {
         if (shape === this.fillShape && depth === this.fillDepth) return this.unchanged()
         this.fillShape = shape
         this.fillDepth = depth
-        return this.changed({ toolsChanged: true, announcement: command.shape ? `${shape} volume shape selected` : undefined }, { shape, depth })
+        return this.changed({ toolsChanged: true, announcement: command.shape ? `${shape} fill shape selected` : undefined }, { shape, depth })
       }
       case 'settings.update': {
         const next = { ...this.settings, ...command.patch }
@@ -703,7 +703,7 @@ export class Studio {
     if (this.activeTool === tool && !this.auxiliaryTool && !selectionChanged) return this.unchanged()
     this.activeTool = tool
     this.auxiliaryTool = undefined
-    return this.changed({ toolsChanged: true, selectionChanged, selectionFocus: selectionChanged, announcement: `${tool === 'paint' ? 'Place' : tool[0].toUpperCase() + tool.slice(1)} tool selected` }, { tool })
+    return this.changed({ toolsChanged: true, selectionChanged, selectionFocus: selectionChanged, announcement: `${tool === 'paint' || tool === 'sculpt' && this.sculptMode === 'erase' ? 'Volume' : tool[0].toUpperCase() + tool.slice(1)} tool selected` }, { tool })
   }
 
   private setSculptMode(mode: SculptMode) {

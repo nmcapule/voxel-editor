@@ -60,11 +60,11 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
 
       <div id="context-dock" class="context-dock instrument">
         <div class="context-summary"><strong id="context-title">Select</strong><span id="context-copy">Click a connected surface.</span></div>
-        <div id="fill-options" class="tool-options fill-options" role="group" aria-label="Volume shape" hidden>
-          <button type="button" data-fill-shape="box" aria-label="Box volume" aria-pressed="true">${icon('box')}<span>Box</span></button>
-          <button type="button" data-fill-shape="sphere" aria-label="Sphere volume" aria-pressed="false">${icon('sphere')}<span>Sphere</span></button>
-          <button type="button" data-fill-shape="cylinder" aria-label="Cylinder volume" aria-pressed="false">${icon('cylinder')}<span>Cylinder</span></button>
-          <label class="fill-depth"><span>Depth</span><input id="fill-depth" type="number" min="1" max="256" value="1" inputmode="numeric"></label>
+        <div id="fill-options" class="tool-options fill-options" role="group" aria-label="Fill shape" hidden>
+          <button type="button" data-fill-shape="box" aria-label="Box fill" aria-pressed="true">${icon('box')}<span>Box</span></button>
+          <button type="button" data-fill-shape="sphere" aria-label="Sphere fill" aria-pressed="false">${icon('sphere')}<span>Sphere</span></button>
+          <button type="button" data-fill-shape="cylinder" aria-label="Cylinder fill" aria-pressed="false">${icon('cylinder')}<span>Cylinder</span></button>
+          <label class="fill-depth" title="Depth for Space or Enter fills; dragging uses two 3D corners"><span>Key depth</span><input id="fill-depth" type="number" min="1" max="256" value="1" inputmode="numeric" aria-label="Keyboard fill depth"></label>
         </div>
       </div>
 
@@ -87,11 +87,12 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
       </aside>
 
       <aside id="paint-tool-popup" class="tool-popup instrument" popover aria-labelledby="paint-popup-title">
-        <header><strong id="paint-popup-title">Place operation</strong><span>Uses the Select scope and active material</span></header>
-        <div class="tool-mode-list" role="group" aria-label="Place operation">
+        <header><strong id="paint-popup-title">Volume operation</strong><span>Paint, fill, or remove voxels</span></header>
+        <div class="tool-mode-list" role="group" aria-label="Volume operation">
           <button type="button" data-paint-mode="paint" aria-pressed="true">${icon('paint')}<span><strong>Paint</strong><small>Use the current Select scope</small></span><kbd>W 1</kbd></button>
-          <button type="button" data-paint-mode="fill" aria-pressed="false">${icon('fill')}<span><strong>Volume</strong><small>Create a solid voxel volume</small></span><kbd>W 2</kbd></button>
+          <button type="button" data-paint-mode="fill" aria-pressed="false">${icon('fill')}<span><strong>Fill</strong><small>Create a solid voxel volume</small></span><kbd>W 2</kbd></button>
           <button type="button" data-auxiliary="pick" aria-pressed="false">${icon('pick')}<span><strong>Eyedropper</strong><small>Pick material from a voxel</small></span><kbd>W 3</kbd></button>
+          <button type="button" data-sculpt-mode="erase" aria-pressed="false">${icon('erase')}<span><strong>Erase</strong><small>Remove the resolved selection</small></span><kbd>W 4</kbd></button>
         </div>
         <div class="popup-materials">
           <span class="popup-section-label">Material</span>
@@ -105,7 +106,6 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
         <div class="tool-mode-list" role="group" aria-label="Sculpt mode">
           <button type="button" data-sculpt-mode="push" aria-pressed="true">${icon('push')}<span><strong>Push/Pull</strong><small>Add or remove complete layers</small></span><kbd>S 1</kbd></button>
           <button type="button" data-sculpt-mode="move" aria-pressed="false">${icon('move')}<span><strong>Move</strong><small>Translate the current selection</small></span><kbd>S 2</kbd></button>
-          <button type="button" data-sculpt-mode="erase" aria-pressed="false">${icon('erase')}<span><strong>Erase</strong><small>Remove the resolved selection</small></span><kbd>S 3</kbd></button>
         </div>
       </aside>
 
@@ -115,8 +115,8 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
           <button type="button" data-tool="select" aria-pressed="false">${icon('select')}<span class="tool-label"><strong>Select</strong><small id="select-tool-mode">Point</small></span><kbd>Q</kbd></button>
         </div>
         <div class="tool-slot">
-          <button type="button" class="tool-expand" data-tool-popup="paint" popovertarget="paint-tool-popup" aria-label="Expand Place options" title="Place options">${icon('chevron')}</button>
-          <button type="button" data-tool="paint" aria-pressed="false">${icon('paint')}<span class="tool-label"><strong>Place</strong><small><i id="paint-tool-swatch"></i><span id="paint-tool-mode">Paint</span></small></span><kbd>W</kbd></button>
+          <button type="button" class="tool-expand" data-tool-popup="paint" popovertarget="paint-tool-popup" aria-label="Expand Volume options" title="Volume options">${icon('chevron')}</button>
+          <button type="button" data-tool="paint" aria-pressed="false">${icon('paint')}<span class="tool-label"><strong>Volume</strong><small><i id="paint-tool-swatch"></i><span id="paint-tool-mode">Paint</span></small></span><kbd>W</kbd></button>
         </div>
         <div class="tool-slot">
           <button type="button" class="tool-expand" data-tool-popup="sculpt" popovertarget="sculpt-tool-popup" aria-label="Expand Sculpt options" title="Sculpt options">${icon('chevron')}</button>

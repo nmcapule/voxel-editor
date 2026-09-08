@@ -5,6 +5,86 @@ import { DEFAULT_SETTINGS, type ViewSettings } from './settings'
 import { TiltShift } from './tilt-shift'
 import { createSkyTexture, skyColor, SKY_LIGHTING } from './sky'
 
+test('canceling a focus tween preserves the current camera and orbit target, including reduced motion', () => {
+  const request = globalThis.requestAnimationFrame, cancel = globalThis.cancelAnimationFrame, media = globalThis.matchMedia
+  const frames = new Map<number, FrameRequestCallback>()
+  let next = 0, reduced = false
+  globalThis.requestAnimationFrame = callback => { frames.set(++next, callback); return next }
+  globalThis.cancelAnimationFrame = id => { frames.delete(id) }
+  globalThis.matchMedia = (() => ({ matches: reduced })) as unknown as typeof matchMedia
+  const camera = new THREE.PerspectiveCamera(), target = new THREE.Vector3(1, 2, 3)
+  camera.position.set(20, 30, 40)
+  const activity = mock(), start = mock(), update = mock()
+  const probe = Object.assign(Object.create(Viewport.prototype), {
+    camera, controls: { target, update }, callbacks: { onViewStart: start }, setRasterInteraction: activity, render() {},
+  })
+  try {
+    probe.moveFocus(new THREE.Vector3(10, 10, 10))
+    const [id, frame] = frames.entries().next().value!
+    frames.delete(id); frame(performance.now() + 80)
+    expect(frames.size).toBe(1)
+    const position = camera.position.clone(), pivot = target.clone(), updates = update.mock.calls.length
+    probe.cancelFocusAnimation()
+    expect(frames.size).toBe(0)
+    expect(probe.focusAnimation).toBeUndefined()
+    expect(camera.position).toEqual(position)
+    expect(target).toEqual(pivot)
+    expect(update).toHaveBeenCalledTimes(updates)
+    expect(activity).toHaveBeenLastCalledWith('focus', false)
+    expect(start).toHaveBeenCalledTimes(1)
+    probe.moveFocus(pivot.clone())
+    expect(frames.size).toBe(0)
+    reduced = true
+    const offset = camera.position.clone().sub(target)
+    probe.moveFocus(new THREE.Vector3(-4, 5, 6))
+    expect(target.toArray()).toEqual([-4, 5, 6])
+    expect(camera.position.clone().sub(target).distanceTo(offset)).toBeLessThan(1e-10)
+    expect(frames.size).toBe(0)
+    const immediate = camera.position.clone()
+    probe.cancelFocusAnimation()
+    expect(camera.position).toEqual(immediate)
+  } finally {
+    globalThis.requestAnimationFrame = request; globalThis.cancelAnimationFrame = cancel; globalThis.matchMedia = media
+  }
+})
+
+test('content handoff resets only primary controls mappings, preserving right orbit, middle pan and two-finger navigation', () => {
+  const controls = { enabled: false, mouseButtons: { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE },
+    touches: { ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_ROTATE } }
+  const probe = Object.assign(Object.create(Viewport.prototype), {
+    controls, camera: new THREE.PerspectiveCamera(), scene: new THREE.Scene(),
+    renderer: { domElement: { setAttribute() {} }, shadowMap: {} },
+    clearRasterInteractions() {}, disposePathTracer() {}, releaseSceneDetail() {}, cancelFocusAnimation() {}, rebuildStage() {}, requestPathTraceRebuild() {},
+  })
+  for (const stage of ['bounded', 'world', undefined]) {
+    controls.mouseButtons.LEFT = THREE.MOUSE.PAN
+    controls.touches.ONE = THREE.TOUCH.PAN
+    probe.setSceneContent(stage ? { root: new THREE.Group(), stage } : undefined)
+    expect(controls.mouseButtons).toEqual({ LEFT: -1 as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE })
+    expect(controls.touches).toEqual({ ONE: -1 as THREE.TOUCH, TWO: THREE.TOUCH.DOLLY_ROTATE })
+    expect(controls.enabled).toBe(true)
+  }
+})
+
+test('projection switches resolve the retained or selected pivot before replacing controls', () => {
+  const pivot = new THREE.Vector3(7, 8, 9), selected = new THREE.Vector3(2, 3, 4)
+  const controls = () => ({ target: new THREE.Vector3(), dispose: mock(), update() {} })
+  const probe = Object.assign(Object.create(Viewport.prototype), {
+    camera: new THREE.PerspectiveCamera(), controls: controls(), cancelFocusAnimation() {}, setRasterInteraction() {}, resize() {}, createControls: controls,
+  })
+  for (const hasSelection of [false, true]) {
+    probe.camera.position.set(30, 40, 50)
+    probe.controls.target.copy(pivot)
+    const previous = probe.controls
+    probe.sceneContent = { stage: 'bounded', focusTarget: () => hasSelection ? selected.clone() : probe.controls.target.clone() }
+    probe.switchProjection(hasSelection ? 'perspective' : 'orthographic')
+    expect(previous.dispose).toHaveBeenCalledTimes(1)
+    expect(probe.controls).not.toBe(previous)
+    expect(probe.controls.target).toEqual(hasSelection ? selected : pivot)
+    expect(probe.camera.position.toArray()).toEqual([30, 40, 50])
+  }
+})
+
 test('viewport teardown cancels owned work, detaches borrowed content and disposes each GPU resource once', async () => {
   const cancel = globalThis.cancelAnimationFrame, cancelled: number[] = []
   globalThis.cancelAnimationFrame = id => { cancelled.push(id) }

@@ -255,7 +255,7 @@ export class Viewport {
     this.focusAnimation = requestAnimationFrame(step)
   }
 
-  private cancelFocusAnimation() {
+  cancelFocusAnimation() {
     if (this.focusAnimation !== undefined) cancelAnimationFrame(this.focusAnimation)
     this.focusAnimation = undefined
     this.setRasterInteraction('focus', false)
@@ -609,12 +609,12 @@ export class Viewport {
     this.cancelFocusAnimation()
     this.setRasterInteraction('controls', false)
     const position = this.camera.position.clone()
-    const target = this.controls.target.clone()
+    const target = this.sceneContent?.focusTarget?.() ?? this.controls.target.clone()
     this.controls.dispose()
     this.camera = this.createCamera(projection)
     this.camera.position.copy(position)
     this.controls = this.createControls(this.camera)
-    this.controls.target.copy(this.sceneContent?.focusTarget?.() ?? target)
+    this.controls.target.copy(target)
     this.controls.update()
     this.resize()
   }
@@ -714,6 +714,7 @@ export class Viewport {
     if (previous && previous !== content) this.scene.remove(previous.root)
     if (content) this.scene.add(content.root)
     this.controls.enabled = true
+    this.controls.mouseButtons.LEFT = -1 as THREE.MOUSE
     this.controls.touches.ONE = -1 as THREE.TOUCH
     this.controls.maxDistance = this.worldScale ? 65536 : 1200
     this.camera.near = this.camera instanceof THREE.PerspectiveCamera ? this.worldScale ? 0.5 : 0.1 : this.worldScale ? -65536 : -1000

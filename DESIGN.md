@@ -47,14 +47,16 @@ data uses tabular figures.
   Save model uses a separate compact dialog, never a form inside the gallery.
   The gallery expands on desktop and remains usable as a single-column overlay
   at 320 px, with close and search controls remaining visible while browsing.
-- Select, Place, Sculpt, and Layer sit bottom-center. Each tool shows its retained
+- Model tools Select, Volume, Sculpt, and Layer sit bottom-center. Each tool shows its retained
   state beneath its name. A compact, flat expand strip inside the bar above each
-  tool opens its popup without changing the active tool; the main tile only
-  activates it. Keep the chevrons integrated with the bar, not in floating buttons.
-  Place's popup contains Paint, Volume, Eyedropper, and material selection; Place
-  reuses the selection scope chosen under Select. Sculpt contains Push/Pull,
-  Move, and Erase; Layer opens the layer manager and activates the owner of a
-  clicked voxel.
+  tool opens its popup without changing the active tool; the main tile activates
+  it, and Select also clears the current selection, even when already active.
+  Keep the chevrons integrated with the bar, not in floating buttons.
+  Volume (formerly Place) contains Paint, Fill (formerly the Volume operation),
+  Eyedropper, Erase (moved from Sculpt), and material selection; Paint and Erase
+  reuse the selection scope chosen under Select. Sculpt contains Push/Pull and
+  Move; Layer opens the layer manager and activates a voxel's owner on tap/click
+  release, while dragging pans the viewport.
 - Coordinates and mesh facts sit bottom-left.
 - Stage settings enter from the right on desktop. Between 761 and 1100 px, the
   tool and context docks center within the remaining canvas area while the
@@ -63,7 +65,7 @@ data uses tabular figures.
   four-tool bar. Tool popups stay anchored above their trigger with touch-safe
   rows and internal scrolling on short screens. Project identity, undo, redo,
   framing, render mode, and stage settings share one compact top bar. The model
-  status sits below it on a slightly translucent surface. Place keeps its active and recent
+  status sits below it on a slightly translucent surface. Volume keeps its active and recent
   material cubes inside its popup, and the active cube opens the full Palette.
 
 ## Scene Workspace
@@ -94,9 +96,15 @@ data uses tabular figures.
 
 - Active tools use solid cobalt with white labels and icons.
 - Hover states use a quiet neutral fill; disabled actions lower opacity.
-- Model tool popups open from their expand strips, not from hovering or
-  tapping the main tool tiles. The strips span each tool's width, are 24 px tall, and use native
-  popover toggling and dismissal; tool keyboard shortcuts still activate and open.
+- Model tool popups open from explicit expand strips, hovering a tool slot, or an
+  upward swipe on that slot, without changing the active tool or clearing selection.
+  Choosing a selection mode also preserves the current selection. Hover opens
+  without moving focus; close 180 ms after leaving both the tool slot and popup,
+  unless focus is inside the popup. A downward swipe on the slot or popup closes
+  it; in a scrollable region this closes only at scroll-top, otherwise it scrolls.
+  Main-tile taps do not open popups. The strips span each tool's width, are 24 px
+  tall, and retain native keyboard activation, popover toggling, Escape, and light
+  dismissal; tool keyboard shortcuts still activate and open.
   Scene tools retain their existing click and fine-pointer hover popup behavior.
 - Keyboard focus uses a 3 px dark-cobalt outline with a 3 px offset.
 - Editing previews are spatial and transient. Render mode quiets editing
@@ -157,18 +165,22 @@ data uses tabular figures.
   outside direct highlights.
 - Keep named voxel layers in the Layer tool popover at the end of the tool bar,
   separate from stage settings. Each layer can hold a voxel at the same coordinate;
-  the highest visible layer wins, and the list shows that layer first. Clicking a
-  visible voxel with Layer makes its owner active. The active layer can be renamed,
+  the highest visible layer wins, and the list shows that layer first. A stationary
+  tap or click on a visible voxel with Layer makes its owner active on release.
+  Left-button, pen, and one-finger drags pan the viewport over voxels or background
+  without activating a layer. Right-button orbit, middle-button pan, and two-finger
+  navigation remain unchanged. The active layer can be renamed,
   shown or hidden, and locked or unlocked.
   Editing requires an active, visible, unlocked layer; selection targets the
   active visible layer. Hidden layers do not mesh, pick, or export.
-- Select, Paint, and Sculpt keep the active layer at its authored appearance
-  (opaque palette colors when realtime PBR materials is off) and
-  render other visible layers as faint, neutral translucent context. Picking and
-  every selection scope pass through that context, including exact coordinate
-  overlaps. Layer, Eyedropper, Volume, Render mode, and model inspection retain
-  the normal visible composition. This is an editor-only treatment, not a change
-  to layer visibility or palette opacity.
+- Select, Paint, Erase, and Sculpt keep the active layer at its authored appearance
+  (opaque palette colors when realtime PBR materials is off). Only while a selection
+  exists do they render other visible layers as faint, neutral translucent context.
+  Active-layer-only picking and every selection scope remain unchanged regardless
+  of selection, passing through other layers even at exact coordinate overlaps.
+  Without a selection, or during Fill, Layer, Eyedropper, Render mode, or model
+  inspection, show the normal full visible composition. This is an editor-only
+  visual treatment, not a change to picking, layer visibility, or palette opacity.
 - Canvas resize offers Center and Origin anchors in the Model tab. Center is the
   default and shifts voxels by whole cells around the size change; Origin keeps
   existing voxel coordinates unchanged.
@@ -183,24 +195,26 @@ data uses tabular figures.
   native controls alongside emissive intensity. Opaque interface faces remain visible through adjacent
   transparent materials. The Render tab is reserved for camera, lighting,
   presentation, and capture controls.
-- Selection is retained independently from the primary tool and defaults to
+- Selection mode is retained independently from the primary tool and defaults to
   Point. Point, connected surface, contiguous same-texture, and contiguous body are
-  chosen from the Select popup and reused by Place. Place retains Paint or Volume,
-  with Eyedropper as a momentary action; Sculpt retains Push/Pull, Move, or Erase.
+  chosen from the Select popup and reused by Volume's Paint and Erase. Volume retains
+  Paint, Fill, or Erase, with Eyedropper as a momentary action; Sculpt retains Push/Pull or Move.
   The selection mode and active/recent material choices persist across refreshes.
-- The Place Volume operation replaces selection modes with Box, Sphere, and Cylinder subtools plus a
-  native depth input. Dragging defines a footprint on the hit plane; depth extends
-  away from model surfaces or inward from the floor and visible side grids, and
+- Volume's Fill operation replaces selection modes with Box, Sphere, and Cylinder subtools plus a
+  native keyboard-fill depth input. Dragging defines opposite 3D corners snapped
+  just outside model faces or onto the floor and visible side grids. All three
+  axes come from the corners; depth applies only to Space/Enter fills, and
   voxel-aligned translucent ghost cubes preview the exact filled shape using the
   same spacing and depth treatment as Push/Pull.
-- A one-finger touch drag rotates the camera when the active operation cannot act
-  at its starting position. Touches on actionable voxels or Volume's guide planes keep
+- Outside Layer, a one-finger touch drag rotates the camera when the active operation
+  cannot act at its starting position. Touches on actionable voxels or Fill's guide planes keep
   editing behavior; a stationary tap outside actionable voxels clears selection,
   while two-finger dolly and rotate remain available everywhere.
 - Selected cells use a cobalt overlay and define the camera pivot. Paint fills
-  them with the active color on pointer release. Sculpt retains Push/Pull, Move,
-  or Erase as its current operation. Erase removes the resolved cells and clears
-  selection; right-drag remains dedicated to camera orbit.
+  them with the active color on pointer release. Volume's Erase removes the resolved
+  cells and clears selection; right-drag remains dedicated to camera orbit.
+  In the model editor, deselecting leaves both camera target and position unchanged
+  and stops any in-flight selection-focus animation.
 - In Point mode, Paint and Erase drags preview the occupied 3D box and commit
   only on release. A click within their existing selection applies to the full
   selection; a click or drag elsewhere resolves and applies to the new scope.
@@ -209,9 +223,10 @@ data uses tabular figures.
   while sculpting clears selection without leaving Sculpt.
 - Undo and redo restore the selection associated with each side of the edit;
   their controls update availability after every history change.
-- Tool shortcuts use compact two-step chords. Q, W, and S immediately select
-  the retained Select, Place, or Sculpt tool; a following number-row key chooses
-  the listed operation in popup order (Q 1-4, W 1-3, S 1-3). Selecting a primary
+- Model tool shortcuts use compact two-step chords. Q, W, and S immediately select
+  the retained Select, Volume, or Sculpt tool; a following number-row key chooses
+  Q 1-4 for Point, Surface, Texture, Body; W 1 Paint, W 2 Fill, W 3 Eyedropper,
+  W 4 Erase; S 1 Push/Pull, S 2 Move. Selecting a primary
   category by keyboard opens its popup; L selects Layer and opens its manager.
 - Push/Pull previews every affected voxel in cobalt when pulling and red when
   pushing; Move remains cobalt. The clicked face determines direction, not scope:

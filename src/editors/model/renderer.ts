@@ -262,7 +262,7 @@ export class VoxelRenderer {
       label: 'Voxel editing viewport. Arrow keys move the keyboard cursor, Page Up and Page Down change height, Space applies the active tool, and Shift Space reverses Push Pull or Move.',
       whenReady: () => this.whenMeshIdle(),
       isReady: () => !this.inFlight && !this.queued.size,
-      focusTarget: () => this.focusCenter(),
+      focusTarget: () => this.selection.size ? this.focusCenter() : this.viewport.controls.target.clone(),
       onViewportChange: () => this.syncViewport(),
       previewRendererId: previewPlugin?.id,
       prepareRaster: frame => { if (this.preview?.root.visible) this.preview.prepare({ ...frame, materials: this.materials }) },
@@ -281,11 +281,11 @@ export class VoxelRenderer {
       this.modelRenderMode = this.viewport.renderMode
       this.listeners.abort()
       const canvas = this.viewport.renderer.domElement
-      for (const id of new Set([this.activePointer, this.paintPointer, ...this.touchPointers])) if (id !== undefined && canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id)
+      for (const id of new Set([this.activePointer, this.paintPointer, this.layerClick?.pointerId, ...this.touchPointers])) if (id !== undefined && canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id)
       if (this.viewport.content === this.content) this.viewport.setSceneContent(undefined)
       this.cancelPaint(); this.cancelPushPull(); this.cancelMarquee()
       this.hover.visible = false
-      this.touchPointers.clear(); this.orbitTouch = undefined
+      this.touchPointers.clear(); this.orbitTouch = undefined; this.layerClick = undefined
       this.suspendModelMeshes()
     } else {
       if (this.viewport.content) throw new Error('Deactivate the current viewport adapter before activating the model')
@@ -311,6 +311,10 @@ export class VoxelRenderer {
   private syncViewport() {
     const previous = this.settings
     this.settings = { ...this.viewport.settings }
+    if (previous.projection !== this.settings.projection || previous.previewRenderer !== this.settings.previewRenderer) {
+      this.layerClick = undefined
+      this.orbitTouch = undefined
+    }
     const usePreview = !!this.previewPlugin && this.previewPlugin.id === this.settings.previewRenderer
     if (usePreview !== !!this.preview?.root.visible) this.viewport.renderer.shadowMap.needsUpdate = true
     if (usePreview && !this.preview) {
@@ -331,6 +335,8 @@ export class VoxelRenderer {
     }
     if (this.modelRenderMode !== this.viewport.renderMode) {
       this.modelRenderMode = this.viewport.renderMode
+      this.layerClick = undefined
+      this.orbitTouch = undefined
       this.cancelPaint(); this.cancelPushPull(); this.cancelMarquee()
       this.hover.visible = false
       if (this.selectionPreview) this.selectionPreview.visible = !this.viewport.renderMode
@@ -417,6 +423,7 @@ export class VoxelRenderer {
 
   private touchPointers = new Set<number>()
   private orbitTouch?: { pointerId: number; startX: number; startY: number }
+  private layerClick?: { pointerId: number; startX: number; startY: number; moved: boolean; layerId?: number }
 
   private selection = new Map<number, Vec3>()
   private floatingSelection = false
@@ -479,10 +486,15 @@ export class VoxelRenderer {
     const options = { signal: this.listeners.signal }
     canvas.addEventListener('pointerdown', event => {
       if (this.modelSuspended) return
+      this.layerClick = undefined
+      // Capture runs before OrbitControls; projection changes replace the controls object.
+      const controls = this.viewport.controls
+      const pan = !this.viewport.renderMode && this.tool === 'layer' && !this.auxiliary
+      controls.mouseButtons.LEFT = pan ? THREE.MOUSE.PAN : -1 as THREE.MOUSE
       if (event.pointerType !== 'touch') return
       const orbit = this.viewport.renderMode || shouldOrbitTouch(this.touchTargetActionable(this.targetAt(event)), this.touchPointers.size)
-      this.viewport.controls.touches.ONE = orbit ? THREE.TOUCH.ROTATE : -1 as THREE.TOUCH
-      this.orbitTouch = orbit ? { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY } : undefined
+      controls.touches.ONE = pan ? THREE.TOUCH.PAN : orbit ? THREE.TOUCH.ROTATE : -1 as THREE.TOUCH
+      this.orbitTouch = !pan && orbit ? { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY } : undefined
     }, { ...options, capture: true })
     canvas.addEventListener('pointerdown', event => {
       if (this.modelSuspended) return
@@ -499,15 +511,16 @@ export class VoxelRenderer {
       if (event.button !== 0) return
       if (this.viewport.renderMode) return
       const target = this.targetAt(event)
+      if (this.tool === 'layer' && !this.auxiliary) {
+        event.preventDefault()
+        this.layerClick = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, moved: false,
+          layerId: target?.occupied ? this.document.getVisibleVoxelLayer(target.cell.x, target.cell.y, target.cell.z) : undefined }
+        return
+      }
       if (event.pointerType === 'touch' && shouldOrbitTouch(this.touchTargetActionable(target), 0)) return
       if (this.auxiliary === 'pick') {
         event.preventDefault()
         if (target?.occupied) this.callbacks.onPick(target.color)
-        return
-      }
-      if (this.tool === 'layer') {
-        event.preventDefault()
-        if (target?.occupied) this.callbacks.onLayerSelect(this.document.getVisibleVoxelLayer(target.cell.x, target.cell.y, target.cell.z))
         return
       }
       if (this.tool === 'select') {
@@ -584,6 +597,15 @@ export class VoxelRenderer {
         && isTouchTap(this.orbitTouch.startX, this.orbitTouch.startY, event.clientX, event.clientY)
       if (this.orbitTouch?.pointerId === event.pointerId) this.orbitTouch = undefined
       this.touchPointers.delete(event.pointerId)
+      if (this.layerClick?.pointerId === event.pointerId) {
+        const click = this.layerClick
+        this.layerClick = undefined
+        if (!click.moved && isTouchTap(click.startX, click.startY, event.clientX, event.clientY)) {
+          if (click.layerId !== undefined) this.callbacks.onLayerSelect(click.layerId)
+          else if (event.pointerType === 'touch') this.setSelection([])
+        }
+        return
+      }
       if (deselect) {
         this.setSelection([])
         return
@@ -592,7 +614,7 @@ export class VoxelRenderer {
         const action = this.marqueeDrag.action
         try {
           if (action === 'fill') {
-            const { min, max } = boxBounds(this.marqueeDrag.target.cell, this.marqueeDrag.end, this.marqueeDrag.target.normal, this.fillDepth)
+            const { min, max } = boxBounds(this.marqueeDrag.target.cell, this.marqueeDrag.end, this.marqueeDrag.target.normal)
             this.callbacks.onFillCommit(min, max, this.marqueeDrag.target.normal, this.fillShape)
           } else if (this.marqueeDrag.moved) this.selectMarquee(this.marqueeDrag)
           else if (action) this.resolveActionTarget(this.marqueeDrag.target)
@@ -618,20 +640,27 @@ export class VoxelRenderer {
       if (this.modelSuspended) return
       this.touchPointers.delete(event.pointerId)
       if (this.orbitTouch?.pointerId === event.pointerId) this.orbitTouch = undefined
+      this.layerClick = undefined
       this.cancelPaint()
       this.cancelPushPull()
       this.cancelMarquee()
     }, options)
     const cancelAbandonedDrag = () => {
-      if (this.modelSuspended || this.paintPointer === undefined && !this.marqueeDrag && !this.pushPullDrag) return
-      this.touchPointers.clear(); this.orbitTouch = undefined
+      if (this.modelSuspended || this.paintPointer === undefined && !this.marqueeDrag && !this.pushPullDrag && !this.layerClick && !this.orbitTouch) return
+      this.touchPointers.clear(); this.orbitTouch = undefined; this.layerClick = undefined
       this.cancelPaint(); this.cancelPushPull(); this.cancelMarquee()
     }
     canvas.addEventListener('lostpointercapture', event => {
-      if (this.paintPointer === event.pointerId || this.activePointer === event.pointerId) cancelAbandonedDrag()
+      if (this.paintPointer === event.pointerId || this.activePointer === event.pointerId || this.layerClick?.pointerId === event.pointerId || this.orbitTouch?.pointerId === event.pointerId) cancelAbandonedDrag()
     }, options)
     canvas.addEventListener('webglcontextlost', cancelAbandonedDrag, options)
     const ownerDocument = canvas.ownerDocument
+    ownerDocument.addEventListener('pointermove', event => {
+      const click = this.layerClick
+      if (click?.pointerId === event.pointerId) click.moved ||= !isTouchTap(click.startX, click.startY, event.clientX, event.clientY)
+      const touch = this.orbitTouch
+      if (touch?.pointerId === event.pointerId && !isTouchTap(touch.startX, touch.startY, event.clientX, event.clientY)) this.orbitTouch = undefined
+    }, { ...options, capture: true })
     ownerDocument.defaultView?.addEventListener('blur', cancelAbandonedDrag, options)
     ownerDocument.addEventListener('visibilitychange', () => { if (ownerDocument.hidden) cancelAbandonedDrag() }, options)
     canvas.addEventListener('pointerleave', () => {
@@ -728,12 +757,13 @@ export class VoxelRenderer {
     if (!this.marqueeDrag.moved && Math.hypot(event.clientX - this.marqueeDrag.startX, event.clientY - this.marqueeDrag.startY) < 5) return
     const fill = this.marqueeDrag.action === 'fill'
     const pointBox = this.selectionMode === 'point' && !fill
-    const pointTarget = pointBox ? this.targetAt(event) : undefined
-    const end = pointBox ? pointTarget?.occupied ? pointTarget.cell : undefined : this.planeTargetAt(event, this.marqueeDrag.target.cell, this.marqueeDrag.target.normal)?.cell
+    const pointTarget = pointBox || fill ? this.targetAt(event) : undefined
+    const end = fill ? this.fillStartCell(pointTarget)
+      : pointBox ? pointTarget?.occupied ? pointTarget.cell : undefined : this.planeTargetAt(event, this.marqueeDrag.target.cell, this.marqueeDrag.target.normal)?.cell
     if (!end) return
     this.marqueeDrag.moved = true
     this.marqueeDrag.end = end
-    const { min, max } = boxBounds(this.marqueeDrag.target.cell, end, this.marqueeDrag.target.normal, fill ? this.fillDepth : undefined)
+    const { min, max } = boxBounds(this.marqueeDrag.target.cell, end, this.marqueeDrag.target.normal)
     const size = { x: max.x - min.x + 1, y: max.y - min.y + 1, z: max.z - min.z + 1 }
     const center = {
       x: (min.x + max.x + 1) / 2 - this.document.dimensions.x / 2,
@@ -843,6 +873,7 @@ export class VoxelRenderer {
   }
 
   applySelection(selection: SelectionState, focus = true) {
+    this.layerClick = undefined
     this.cancelPaint()
     this.cancelPushPull()
     this.cancelMarquee()
@@ -887,7 +918,11 @@ export class VoxelRenderer {
   }
 
   private finishSelection(selection: SelectionState, notify: boolean, focus: boolean) {
-    if (focus && !this.modelSuspended) this.viewport.moveFocus(this.focusCenter())
+    if (!this.modelSuspended) {
+      if (!selection.count) this.viewport.cancelFocusAnimation()
+      else if (focus) this.viewport.moveFocus(this.focusCenter())
+    }
+    this.refreshLayerScope()
     if (notify) this.callbacks.onSelectionChange(selection)
     this.viewport.render()
   }
@@ -913,10 +948,11 @@ export class VoxelRenderer {
     const state = `${layer.id}:${layer.visible}:${layer.locked}`
     if (state !== this.layerState) {
       this.layerState = state
+      this.layerClick = undefined
       this.cancelPaint(); this.cancelPushPull(); this.cancelMarquee()
       this.hover.visible = false
     }
-    const isolated = this.isolatedLayerId()
+    const isolated = this.selection.size ? this.isolatedLayerId() : undefined
     if (this.preview?.setLayerScope(isolated)) this.viewport.render()
     const meshLayerId = isolated !== undefined && this.document.layers.some(other => other.visible && other.id !== isolated)
       ? isolated : undefined
@@ -1524,6 +1560,12 @@ export class VoxelRenderer {
   }
 
   setToolState(tool: Tool, paintMode: PaintMode, auxiliary?: AuxiliaryTool) {
+    this.layerClick = undefined
+    this.orbitTouch = undefined
+    if (!this.modelSuspended) {
+      this.viewport.controls.mouseButtons.LEFT = -1 as THREE.MOUSE
+      this.viewport.controls.touches.ONE = -1 as THREE.TOUCH
+    }
     this.cancelPaint()
     this.cancelPushPull()
     this.cancelMarquee()
@@ -1723,7 +1765,7 @@ export class VoxelRenderer {
         canvases = this.viewport.renderViews(box, directions)
       }
       finally {
-        this.preview?.setLayerScope(this.isolatedLayerId())
+        this.preview?.setLayerScope(this.selection.size ? this.isolatedLayerId() : undefined)
         for (const [object, visible] of visibility) object.visible = visible
         this.viewport.renderer.shadowMap.needsUpdate = true
         if (this.preview?.root.visible) this.viewport.render()

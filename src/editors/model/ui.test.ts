@@ -25,3 +25,21 @@ test('Model tools activate separately from their accessible popup controls', () 
   expect(tools).toEqual(Object.keys(targets))
   expect(popups).toEqual(tools)
 })
+
+test('Volume groups Paint, Fill, Eyedropper and Erase; Sculpt retains only Push/Pull and Move', () => {
+  const volume: string[] = [], sculpt: string[] = [], labels: string[] = []
+  const markup = modelMarkup(false)
+  const operation = (button: { getAttribute(name: string): string | null }) => button.getAttribute('data-paint-mode') ?? button.getAttribute('data-sculpt-mode') ?? button.getAttribute('data-auxiliary')!
+  new HTMLRewriter()
+    .on('#paint-tool-popup .tool-mode-list > button', { element(button) { volume.push(operation(button)) } })
+    .on('#sculpt-tool-popup .tool-mode-list > button', { element(button) { sculpt.push(operation(button)) } })
+    .on('.tool-dock .tool-label > strong', { text(text) { if (text.text) labels.push(text.text) } })
+    .transform(markup)
+  expect(volume).toEqual(['paint', 'fill', 'pick', 'erase'])
+  expect(sculpt).toEqual(['push', 'move'])
+  expect(labels).toEqual(['Select', 'Volume', 'Sculpt', 'Layer'])
+  expect(markup).toContain('<strong>Fill</strong>')
+  expect(markup).toContain('<kbd>W 4</kbd>')
+  expect(markup).not.toContain('<kbd>S 3</kbd>')
+  expect(markup).toContain('aria-label="Expand Volume options"')
+})

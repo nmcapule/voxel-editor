@@ -1,7 +1,7 @@
 import { expect, mock, spyOn, test } from 'bun:test'
-import { Color, DirectionalLight, Group, LineBasicMaterial, LineSegments, Mesh, MeshPhysicalMaterial, OrthographicCamera, PerspectiveCamera, Points, PointsMaterial, Raycaster, Scene, Texture, TextureLoader, Vector2, Vector3 } from 'three'
+import { Color, DirectionalLight, Group, LineBasicMaterial, LineSegments, Mesh, MeshPhysicalMaterial, MOUSE, OrthographicCamera, PerspectiveCamera, Points, PointsMaterial, Raycaster, Scene, Texture, TextureLoader, TOUCH, Vector2, Vector3 } from 'three'
 import { PathTracingSceneGenerator } from 'three-gpu-pathtracer/src/index.js'
-import { VoxelDocument, chunkId } from '../../shared/voxel/document'
+import { VoxelDocument, chunkId, fillShapeVoxels } from '../../shared/voxel/document'
 import { VoxelRenderer, traceGridRay, type RendererCallbacks } from './renderer'
 import { Viewport } from '../../shared/rendering/viewport'
 import { DEFAULT_SETTINGS } from '../../shared/rendering/settings'
@@ -315,7 +315,7 @@ test('a model borrows one viewport, removes input hooks and jobs on unmount, and
     setSceneContent(content: any) { Reflect.set(this, 'sceneContent', content); content?.onViewportChange() },
     setSettings(value: unknown) { Reflect.set(this, 'settings', value); Reflect.get(this, 'sceneContent')?.onViewportChange() },
     setRenderMode(value: boolean) { this.renderMode = value; Reflect.get(this, 'sceneContent')?.onViewportChange() },
-    render() {}, requestPathTraceRebuild() {}, contentBecameReady() {},
+    render() {}, requestPathTraceRebuild() {}, contentBecameReady() {}, cancelFocusAnimation() {},
     setRasterInteraction(source: string, active: boolean) { expect(source).toBe('model'); interacting = active },
     dispose() { viewportDisposals++ },
   })
@@ -361,7 +361,9 @@ test('a model borrows one viewport, removes input hooks and jobs on unmount, and
     expect(hovers).toBe(1)
     const startDrag = () => Reflect.get(model, 'startMarquee').call(model, { pointerId: 0, clientX: 0, clientY: 0 }, { cell: { x: 0, y: 0, z: 0 } }, false)
     startDrag(); expect(interacting).toBe(true)
+    Reflect.set(model, 'layerClick', { pointerId: 0, startX: 0, startY: 0, moved: false, layerId: 1 })
     model.setActive(false)
+    expect(Reflect.get(model, 'layerClick')).toBeUndefined()
     expect(interacting).toBe(false)
     model.setActive(true)
     startDrag(); expect(interacting).toBe(true)
@@ -400,10 +402,13 @@ test('a model borrows one viewport, removes input hooks and jobs on unmount, and
 })
 
 function modelGestureProbe(fail = false) {
-  const events = new Map<string, ((event: any) => void)[]>()
-  const listen = (type: string, listener: (event: any) => void) => events.set(type, [...events.get(type) ?? [], listener])
-  const ownerDocument = { defaultView: { addEventListener: listen }, hidden: false, addEventListener: listen }
-  const canvas = { ownerDocument, addEventListener: listen, setPointerCapture() {}, getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) }
+  const events = new Map<string, { listener: (event: any) => void; capture: boolean }[]>()
+  const listen = (type: string, listener: (event: any) => void, options?: { capture?: boolean }) => events.set(type, [...events.get(type) ?? [], { listener, capture: options?.capture === true }])
+  const remove = (type: string, listener: (event: any) => void) => events.set(type, events.get(type)?.filter(entry => entry.listener !== listener) ?? [])
+  const ownerDocument = { defaultView: { addEventListener: listen }, hidden: false, addEventListener: listen, removeEventListener: remove }
+  const canvas = { ownerDocument, addEventListener: listen, removeEventListener: remove, style: {}, clientWidth: 100, clientHeight: 100,
+    getRootNode: () => ownerDocument, setPointerCapture() {}, releasePointerCapture() {}, hasPointerCapture: () => false,
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) }
   const document = new VoxelDocument({ x: 16, y: 16, z: 16 }), cell = { x: 2, y: 2, z: 2 }
   document.setVoxel(2, 2, 2, 1)
   const target = { cell, normal: { x: 0, y: 1, z: 0 }, occupied: true, color: 1 }
@@ -414,7 +419,9 @@ function modelGestureProbe(fail = false) {
     document, modelSuspended: false, listeners: new AbortController(), touchPointers: new Set(),
     root: new Group(), hover: new Mesh(), marqueePreview: new Mesh(), selection: new Map(), keyboardCell: cell,
     tool: 'select', selectionMode: 'point', paintMode: 'paint', sculptMode: 'push', fillShape: 'box', fillDepth: 1, activeColor: 1,
-    viewport: { camera: new PerspectiveCamera(), renderer: { domElement: canvas }, controls: { touches: {} }, render() {}, moveFocus() {},
+    viewport: { renderMode: false, camera: new PerspectiveCamera(), renderer: { domElement: canvas },
+      controls: { touches: { ONE: -1, TWO: TOUCH.DOLLY_ROTATE }, mouseButtons: { LEFT: -1, MIDDLE: MOUSE.PAN, RIGHT: MOUSE.ROTATE } },
+      render() {}, moveFocus() {}, cancelFocusAnimation() {},
       setRasterInteraction(source: string, active: boolean) { expect(source).toBe('model'); raster.push(active) } },
     callbacks: { onSelectionChange: commit, onPaint: commit, onErase: commit, onFillCommit: commit, onPushPullCommit: commit, onPushPullPreview() {}, onHover() {} },
     targetAt: () => target, refreshLayerScope() {},
@@ -423,10 +430,245 @@ function modelGestureProbe(fail = false) {
   probe.bindPointerEvents()
   const pointer = { pointerId: 0, pointerType: 'mouse', button: 0, clientX: 50, clientY: 50, preventDefault() {} }
   return { probe, raster, ownerDocument, target, pointer, commits: () => commits,
-    emit(type: string, patch = {}) { for (const listener of events.get(type) ?? []) listener({ ...pointer, ...patch }) },
+    emit(type: string, patch = {}) {
+      const event = { ...pointer, ...patch }
+      for (const { listener } of [...events.get(type) ?? []].sort((a, b) => Number(b.capture) - Number(a.capture))) listener({ ...event, pageX: event.clientX, pageY: event.clientY })
+    },
     dispose() { probe.cancelPaint(); probe.cancelPushPull(); probe.cancelMarquee(); probe.clearSelectionPreview(); probe.hover.geometry.dispose(); probe.hover.material.dispose(); probe.marqueePreview.geometry.dispose(); probe.marqueePreview.material.dispose() },
   }
 }
+
+test('empty selections cancel focus without retargeting; nonempty selections retain focus and notification policy', () => {
+  const gesture = modelGestureProbe(), { probe, target } = gesture
+  const focus = probe.viewport.moveFocus = mock(), cancel = probe.viewport.cancelFocusAnimation = mock()
+  const scope = probe.refreshLayerScope = mock(), changed = probe.callbacks.onSelectionChange = mock()
+  try {
+    probe.setSelection([target.cell])
+    expect(focus).toHaveBeenLastCalledWith(new Vector3(-5.5, 2.5, -5.5))
+    expect(changed).toHaveBeenCalledTimes(1)
+    probe.setFloatingSelection([{ x: 4, y: 4, z: 4 }])
+    expect(focus).toHaveBeenCalledTimes(2)
+    for (const clear of [
+      () => probe.clearSelection(),
+      () => probe.setSelection([{ x: 16, y: 2, z: 2 }]),
+      () => probe.applySelection({ cells: [], count: 0 }, true),
+      () => probe.applySelection({ cells: [], count: 0 }, false),
+    ]) clear()
+    expect(focus).toHaveBeenCalledTimes(2)
+    expect(cancel).toHaveBeenCalledTimes(4)
+    expect(changed).toHaveBeenCalledTimes(4)
+    probe.applySelection({ cells: [target.cell], count: 1 }, false)
+    expect(focus).toHaveBeenCalledTimes(2)
+    probe.selectTarget(target, true)
+    expect(probe.selection.size).toBe(0)
+    expect(cancel).toHaveBeenCalledTimes(5)
+    expect(scope).toHaveBeenCalledTimes(8)
+    probe.modelSuspended = true
+    probe.applySelection({ cells: [], count: 0 }, true)
+    expect(cancel).toHaveBeenCalledTimes(5)
+  } finally { gesture.dispose() }
+})
+
+test('Layer release activates the starting layer; primary drags use real screen-space controls and never become clicks', () => {
+  for (const camera of [new PerspectiveCamera(), new OrthographicCamera(-10, 10, 10, -10)]) {
+    const gesture = modelGestureProbe(), { probe, emit, target } = gesture
+    const selected = probe.callbacks.onLayerSelect = mock()
+    const cleared = probe.callbacks.onSelectionChange = mock()
+    const upper = probe.document.createLayer()
+    probe.document.setVoxel(target.cell.x, target.cell.y, target.cell.z, 2)
+    probe.document.setActiveLayer(1)
+    const diagnostics = new LineBasicMaterial()
+    Object.assign(probe, { settings: { ...DEFAULT_SETTINGS }, modelRenderMode: false, materials: [],
+      faceGridMaterial: diagnostics, meshVerticesMaterial: diagnostics, meshTrianglesMaterial: diagnostics })
+    Object.assign(probe.viewport, { camera, settings: probe.settings, callbacks: {},
+      cameraChanged() { camera.updateMatrixWorld(); probe.syncViewport() }, setRasterInteraction() {} })
+    camera.position.set(12, 8, 12)
+    const controls = Reflect.get(Viewport.prototype, 'createControls').call(probe.viewport, camera)
+    probe.viewport.controls = controls
+    try {
+      probe.setTool('layer')
+      for (const pointerType of ['mouse', 'pen', 'touch']) {
+        for (const occupied of [true, false]) {
+          probe.targetAt = () => occupied ? target : undefined
+          const calls = selected.mock.calls.length, clears = cleared.mock.calls.length
+          emit('pointerdown', { pointerType })
+          expect(controls.mouseButtons.LEFT).toBe(MOUSE.PAN)
+          if (pointerType === 'touch') expect(controls.touches.ONE).toBe(TOUCH.PAN)
+          expect(controls.touches.TWO).toBe(TOUCH.DOLLY_ROTATE)
+          expect(selected).toHaveBeenCalledTimes(calls)
+          emit('pointermove', { pointerType, clientX: 51 })
+          expect(probe.layerClick.moved).toBe(false)
+          emit('pointerup', { pointerType })
+          expect(selected).toHaveBeenCalledTimes(calls + Number(occupied))
+          if (occupied) expect(selected).toHaveBeenLastCalledWith(upper.id)
+          expect(cleared).toHaveBeenCalledTimes(clears + Number(!occupied && pointerType === 'touch'))
+
+          const before = camera.position.clone(), pivot = controls.target.clone(), orientation = camera.quaternion.clone()
+          emit('pointerdown', { pointerType })
+          emit('pointermove', { pointerType, clientX: 75 })
+          expect(camera.position.distanceTo(before)).toBeGreaterThan(0)
+          expect(camera.position.clone().sub(before).distanceTo(controls.target.clone().sub(pivot))).toBeLessThan(1e-10)
+          expect(camera.quaternion.angleTo(orientation)).toBeLessThan(1e-7)
+          emit('pointermove', { pointerType, clientX: 50 })
+          expect(probe.layerClick.moved).toBe(true)
+          emit('pointerup', { pointerType })
+          expect(selected).toHaveBeenCalledTimes(calls + Number(occupied))
+          expect(cleared).toHaveBeenCalledTimes(clears + Number(!occupied && pointerType === 'touch'))
+        }
+      }
+      for (const button of [1, 2]) {
+        const calls = selected.mock.calls.length, offset = camera.position.clone().sub(controls.target)
+        emit('pointerdown', { button }); emit('pointermove', { button, clientX: 70 }); emit('pointerup', { button, clientX: 70 })
+        expect(selected).toHaveBeenCalledTimes(calls)
+        expect(camera.position.clone().sub(controls.target).distanceTo(offset) > 1e-6).toBe(button === 2)
+      }
+      for (const tool of ['select', 'paint', 'sculpt']) {
+        probe.setTool(tool)
+        expect(controls.mouseButtons.LEFT).toBe(-1)
+        const before = camera.position.clone()
+        emit('pointerdown'); emit('pointermove', { clientX: 70 }); emit('pointerup', { clientX: 70 })
+        expect(camera.position.distanceTo(before)).toBeLessThan(1e-10)
+      }
+      probe.setTool('layer')
+      const distance = camera.position.distanceTo(controls.target), zoom = camera.zoom
+      emit('pointerdown', { pointerType: 'touch', pointerId: 1, clientX: 30 })
+      emit('pointerdown', { pointerType: 'touch', pointerId: 2, clientX: 70 })
+      expect(probe.layerClick).toBeUndefined()
+      expect(controls.touches.TWO).toBe(TOUCH.DOLLY_ROTATE)
+      emit('pointermove', { pointerType: 'touch', pointerId: 2, clientX: 90 })
+      expect(camera.zoom !== zoom || Math.abs(camera.position.distanceTo(controls.target) - distance) > 1e-6).toBe(true)
+      emit('pointerup', { pointerType: 'touch', pointerId: 2, clientX: 90 })
+      emit('pointerup', { pointerType: 'touch', pointerId: 1, clientX: 30 })
+      const calls = selected.mock.calls.length
+      for (const transition of [
+        () => { probe.viewport.renderMode = true },
+        () => { probe.viewport.settings = { ...probe.settings, projection: probe.settings.projection === 'orthographic' ? 'perspective' : 'orthographic' } },
+      ]) {
+        emit('pointerdown')
+        expect(probe.layerClick).toBeDefined()
+        transition(); probe.syncViewport()
+        expect(probe.layerClick).toBeUndefined()
+        emit('pointerup')
+        expect(selected).toHaveBeenCalledTimes(calls)
+        probe.viewport.renderMode = false; probe.syncViewport()
+      }
+    } finally { controls.dispose(); diagnostics.dispose(); gesture.dispose() }
+  }
+})
+
+test('Layer clicks cancel on abandonment and transitions; pointer mapping uses replacement controls', () => {
+  const gesture = modelGestureProbe(), { probe, emit, ownerDocument } = gesture
+  const selected = probe.callbacks.onLayerSelect = mock()
+  try {
+    for (const event of ['pointercancel', 'lostpointercapture', 'blur', 'visibilitychange', 'webglcontextlost']) {
+      probe.setTool('layer')
+      emit('pointerdown')
+      expect(probe.layerClick).toBeDefined()
+      ownerDocument.hidden = true
+      emit(event); emit('pointerup')
+      expect(probe.layerClick).toBeUndefined()
+      expect(selected).not.toHaveBeenCalled()
+    }
+    probe.setTool('layer'); emit('pointerdown'); probe.setTool('select'); emit('pointerup')
+    probe.setTool('layer'); emit('pointerdown'); probe.applySelection({ cells: [], count: 0 }, false); emit('pointerup')
+    probe.setTool('layer'); emit('pointerdown'); probe.setAuxiliary('pick'); emit('pointerup')
+    expect(probe.viewport.controls.mouseButtons.LEFT).toBe(-1)
+    probe.setAuxiliary()
+    expect(selected).not.toHaveBeenCalled()
+    const previous = probe.viewport.controls
+    probe.viewport.controls = { mouseButtons: { LEFT: -1, MIDDLE: MOUSE.PAN, RIGHT: MOUSE.ROTATE }, touches: { ONE: -1, TWO: TOUCH.DOLLY_ROTATE } }
+    probe.setTool('layer')
+    emit('pointerdown', { pointerType: 'touch' })
+    expect(probe.viewport.controls.mouseButtons.LEFT).toBe(MOUSE.PAN)
+    expect(probe.viewport.controls.touches.ONE).toBe(TOUCH.PAN)
+    expect(previous.touches.ONE).toBe(-1)
+    emit('pointerup', { pointerType: 'touch' })
+    expect(selected).toHaveBeenCalledTimes(1)
+    probe.viewport.renderMode = true
+    emit('pointerdown', { pointerType: 'touch' })
+    expect(probe.viewport.controls.mouseButtons.LEFT).toBe(-1)
+    expect(probe.viewport.controls.touches.ONE).toBe(TOUCH.ROTATE)
+    emit('pointerup', { pointerType: 'touch' })
+    expect(selected).toHaveBeenCalledTimes(1)
+    probe.modelSuspended = true
+    probe.viewport.controls.touches.ONE = TOUCH.ROTATE
+    probe.setTool('select')
+    expect(probe.viewport.controls.touches.ONE).toBe(TOUCH.ROTATE)
+  } finally { gesture.dispose() }
+})
+
+test('empty touch taps still deselect, but an orbit out and back does not', () => {
+  const gesture = modelGestureProbe(), { probe, emit } = gesture
+  const selected = probe.callbacks.onSelectionChange = mock()
+  probe.targetAt = () => undefined
+  try {
+    emit('pointerdown', { pointerType: 'touch' })
+    expect(probe.viewport.controls.touches.ONE).toBe(TOUCH.ROTATE)
+    emit('pointerup', { pointerType: 'touch' })
+    expect(selected).toHaveBeenCalledTimes(1)
+    emit('pointerdown', { pointerType: 'touch' })
+    emit('pointermove', { pointerType: 'touch', clientX: 70 })
+    emit('pointermove', { pointerType: 'touch', clientX: 50 })
+    emit('pointerup', { pointerType: 'touch' })
+    expect(selected).toHaveBeenCalledTimes(1)
+  } finally { gesture.dispose() }
+})
+
+test('volume drags use opposite 3D corners for both preview and commit, independent of depth and selection mode', () => {
+  for (const shape of ['box', 'sphere', 'cylinder'] as const) for (const reverse of [false, true]) for (const occupied of [false, true]) {
+    const gesture = modelGestureProbe(), { probe, emit } = gesture
+    const min = { x: 2, y: 3, z: 2 }, max = { x: 8, y: 10, z: 7 }
+    const start = reverse ? max : min, end = reverse ? min : max
+    const normal = { x: 0, y: reverse ? -1 : 1, z: 0 }
+    const preview = mock(() => {}), commit = mock(() => {})
+    Object.assign(probe, {
+      tool: 'paint', paintMode: 'fill', selectionMode: 'surface', fillDepth: 15, fillShape: shape,
+      updateFillPreview: preview,
+      targetAt: () => ({ cell: { ...start, y: start.y - normal.y }, normal, occupied: true, color: 1 }),
+      planeTargetAt() { throw new Error('Volume corners must not project onto the starting plane') },
+    })
+    probe.callbacks.onFillCommit = commit
+    try {
+      emit('pointerdown')
+      probe.targetAt = () => ({ cell: { ...end, x: end.x - (occupied ? 1 : 0) }, normal: { x: 1, y: 0, z: 0 }, occupied, color: 1 })
+      emit('pointermove', { clientX: 70 })
+      expect(probe.marqueeDrag.end).toEqual(end)
+      expect(preview).toHaveBeenLastCalledWith([...fillShapeVoxels(min, max, shape, 'y', probe.document.dimensions)])
+      expect(commit).not.toHaveBeenCalled()
+      emit('pointerup', { clientX: 70 })
+      expect(commit).toHaveBeenCalledTimes(1)
+      expect(commit).toHaveBeenCalledWith(min, max, normal, shape)
+      expect(probe.marqueeDrag).toBeUndefined()
+    } finally { gesture.dispose() }
+  }
+})
+
+test('volume drags ignore invalid corners, cancel without committing, and retain keyboard depth', () => {
+  const gesture = modelGestureProbe(), { probe, emit } = gesture
+  const commit = mock(() => {})
+  Object.assign(probe, { tool: 'paint', paintMode: 'fill', fillDepth: 5, updateFillPreview() {} })
+  probe.callbacks.onFillCommit = commit
+  try {
+    for (const event of ['pointercancel', 'lostpointercapture', 'blur']) {
+      emit('pointerdown')
+      const targetAt = probe.targetAt
+      probe.targetAt = () => undefined
+      emit('pointermove', { clientX: 70 })
+      expect(probe.marqueeDrag.end).toEqual({ x: 2, y: 3, z: 2 })
+      probe.targetAt = () => ({ cell: { x: 15, y: 8, z: 8 }, normal: { x: 1, y: 0, z: 0 }, occupied: true })
+      emit('pointermove', { clientX: 70 })
+      expect(probe.marqueeDrag.end).toEqual({ x: 2, y: 3, z: 2 })
+      probe.targetAt = targetAt
+      emit(event)
+      emit('pointerup')
+      expect(commit).not.toHaveBeenCalled()
+      expect(probe.marqueeDrag).toBeUndefined()
+    }
+    emit('keydown', { key: 'Enter' })
+    expect(commit).toHaveBeenCalledTimes(1)
+    expect(commit).toHaveBeenCalledWith({ x: 2, y: 3, z: 2 }, { x: 2, y: 7, z: 2 }, { x: 0, y: 1, z: 0 }, 'box')
+  } finally { gesture.dispose() }
+})
 
 test('model selection, paint, fill, erase and push/move drags release raster DPR even when commits throw', () => {
   for (const fail of [false, true]) for (const tool of [
@@ -500,7 +742,7 @@ test('model material creation, property refreshes and viewport sync bind the cur
   const probe = Object.assign(Object.create(VoxelRenderer.prototype), {
     document, viewport, settings, modelRenderMode: false, modelSuspended: false, tool: 'select',
     faceGridMaterial, meshVerticesMaterial, meshTrianglesMaterial: faceGridMaterial,
-    chunkMeshes: new Map(), textureLoads: new Map(), hover: new Group(), model: new Group(),
+    chunkMeshes: new Map(), textureLoads: new Map(), hover: new Group(), model: new Group(), selection: new Map(),
     cancelPaint() {}, cancelPushPull() {}, cancelMarquee() {},
     markDirty() { throw new Error('Environment and non-topology material changes must not remesh') },
   })

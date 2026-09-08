@@ -66,7 +66,7 @@ test('keyboard Point, Surface, Texture and Body selections and touch actions use
   const { document, active, cells } = layeredDocument()
   const probe = Object.assign(Object.create(VoxelRenderer.prototype), {
     document, modelSuspended: false, tool: 'select', paintMode: 'paint', sculptMode: 'erase', keyboardCell: cells[0],
-    selection: new Map(), root: new Group(), viewport: { renderMode: false, render() {}, moveFocus() {} },
+    selection: new Map(), root: new Group(), refreshLayerScope() {}, viewport: { renderMode: false, render() {}, moveFocus() {}, cancelFocusAnimation() {} },
     callbacks: { onSelectionChange() {} },
   })
   const space = { key: ' ', shiftKey: false, preventDefault() {} }
@@ -109,7 +109,7 @@ test('either staggered face previews and keyboard push-pulls the whole selection
   const fronts = [cells[1], cells[5]], normal = { x: 0, y: 1, z: 0 }
   const onPushPullCommit = mock(() => {}), updateGhostPreview = mock((_preview: unknown, _cells: unknown) => {})
   const probe = Object.assign(Object.create(VoxelRenderer.prototype), {
-    document, modelSuspended: false, tool: 'sculpt', sculptMode: 'push', selectionMode: 'body', selection: new Map(), root: new Group(),
+    document, modelSuspended: false, tool: 'sculpt', sculptMode: 'push', selectionMode: 'body', selection: new Map(), root: new Group(), refreshLayerScope() {},
     viewport: { renderMode: false, camera: new OrthographicCamera(), render() {}, moveFocus() {}, setRasterInteraction() {},
       renderer: { domElement: { getBoundingClientRect: () => ({ width: 320, height: 240 }) } } },
     callbacks: { onSelectionChange() {}, onPushPullPreview() {}, onPushPullCommit }, updateGhostPreview,
@@ -165,11 +165,16 @@ function meshProbe(document: VoxelDocument, faceGrid = true) {
     queued: new Set(), queuedGrids: new Set(), versions: new Map(), chunkMeshes: new Map(), chunkQuads: new Map(), meshWaiters: [],
     model: new Group(), root: new Group(), selection: new Map(), textureLoads: new Map(), hover: { visible: false }, marqueePreview: { visible: false },
     settings: { faceGrid, meshVertices: true, meshTriangles: true }, worker: { postMessage, terminate() {} },
-    callbacks: { onMeshStats() {}, onPushPullPreview() {} },
+    callbacks: { onMeshStats() {}, onPushPullPreview() {}, onSelectionChange() {} },
     contextMaterial: new MeshBasicMaterial({ transparent: true, opacity: 0.18, depthWrite: false }),
     meshVerticesMaterial: new PointsMaterial(), faceGridMaterial: new LineBasicMaterial(), meshTrianglesMaterial: new LineBasicMaterial(),
     viewport: { renderMode: false, renderer: { shadowMap: {} }, requestPathTraceRebuild() {}, contentBecameReady() {}, render() {},
+      controls: { mouseButtons: {}, touches: {} }, moveFocus() {}, cancelFocusAnimation() {},
       setRasterInteraction() {}, applyEnvironment() {}, updatePathTracing() {}, invalidateSceneContent() {}, frameLocalBounds() {} },
+  })
+  // Cache tests exercise an existing selection; selection transitions are tested separately.
+  document.forEachVoxel((x, y, z, _color, layerId) => {
+    if (layerId === document.activeLayerId) probe.selection.set(probe.selectionKey({ x, y, z }), { x, y, z })
   })
   probe.materials = probe.createMaterials()
   probe.bindWorker()
@@ -188,6 +193,7 @@ function meshProbe(document: VoxelDocument, faceGrid = true) {
     dispose() {
       probe.modelSuspended = true
       probe.worker.terminate()
+      probe.clearSelectionPreview()
       for (const id of [...probe.chunkMeshes.keys()]) probe.removeChunk(id)
       probe.disposeMaterials()
       for (const material of [probe.contextMaterial, probe.meshVerticesMaterial, probe.faceGridMaterial, probe.meshTrianglesMaterial]) material.dispose()
@@ -197,6 +203,97 @@ function meshProbe(document: VoxelDocument, faceGrid = true) {
 
 const isolation = (chunk: Object3D) => chunk.children.find(child => child.userData.layerIsolation)!
 const grid = (surface: Object3D) => surface.children.find(child => child.userData.faceGrid) as LineSegments | undefined
+
+test('selection alone toggles visual isolation, retaining normal and late cached surfaces for standard and sprites', async () => {
+  for (const sprites of [false, true]) {
+    const { document, active, cells } = layeredDocument()
+    document.materials[5].opacity = 0.4
+    const harness = meshProbe(document), { probe, postMessage } = harness
+    const preview = { root: new Group(), setLayerScope: mock((_id?: number) => true), markDirty() {} }
+    preview.root.visible = sprites
+    probe.preview = preview
+    try {
+      probe.applySelection({ cells: [], count: 0 }, false)
+      probe.setToolState('select', 'paint')
+      probe.markDirty(document.chunks.keys())
+      await harness.flush()
+      const chunk = probe.chunkMeshes.get(0) as Group, normal = [...chunk.children]
+      const version = chunk.userData.version
+      expect(probe.isolatedLayerId()).toBe(active.id)
+      expect(probe.meshLayerId).toBeUndefined()
+      expect(preview.setLayerScope).toHaveBeenLastCalledWith(undefined)
+      expect(isolation(chunk)).toBeUndefined()
+      expect(normal.every(child => child.visible)).toBe(true)
+
+      probe.applySelection({ cells: [cells[0]], count: 1 }, false)
+      expect(preview.setLayerScope).toHaveBeenLastCalledWith(active.id)
+      await Promise.resolve()
+      expect(harness.pending).toHaveLength(1)
+      probe.applySelection({ cells: [], count: 0 }, false)
+      expect(chunk.visible && normal.every(child => child.visible)).toBe(true)
+      expect(preview.setLayerScope).toHaveBeenLastCalledWith(undefined)
+      await harness.flush()
+      const cached = isolation(chunk)
+      expect(cached.visible).toBe(false)
+      postMessage.mockClear()
+      for (const selected of [true, false, true]) {
+        probe.applySelection({ cells: selected ? [cells[0]] : [], count: Number(selected) }, false)
+        await harness.flush()
+        expect(cached.visible).toBe(selected)
+        expect(normal.every(child => child.visible)).toBe(!selected)
+        expect(chunk.visible).toBe(true)
+        expect(preview.setLayerScope).toHaveBeenLastCalledWith(selected ? active.id : undefined)
+        for (const fail of [false, true]) {
+          probe.viewport.renderViews = () => {
+            expect(preview.setLayerScope).toHaveBeenLastCalledWith(undefined)
+            expect(cached.visible).toBe(false)
+            if (fail) throw new Error('Inspection failed')
+            return [{ convertToBlob: async () => new Blob(['png']) }]
+          }
+          const inspected = probe.inspect(['iso-front-left'])
+          if (fail) await expect(inspected).rejects.toThrow('Inspection failed')
+          else await inspected
+          expect(preview.setLayerScope).toHaveBeenLastCalledWith(selected ? active.id : undefined)
+          expect(cached.visible).toBe(selected)
+        }
+      }
+      expect(postMessage).not.toHaveBeenCalled()
+      expect(chunk.userData.version).toBe(version)
+      expect(chunk.children.filter(child => child !== cached)).toEqual(normal)
+      expect(probe.materials[5]).toMatchObject({ opacity: 0.4, transparent: true, depthWrite: false })
+      expect((cached.children.find(child => child.userData.layerContext) as Mesh).material).toBe(probe.contextMaterial)
+      expect(probe.contextMaterial.opacity).toBe(0.18)
+      active.locked = true
+      probe.applySelection({ cells: [cells[0]], count: 1 }, false)
+      expect(probe.selection.size).toBe(1)
+      active.visible = false
+      probe.applySelection({ cells: [cells[0]], count: 1 }, false)
+      expect(probe.selection.size).toBe(0)
+      expect(probe.meshLayerId).toBeUndefined()
+      expect(cached.visible).toBe(false)
+      expect(preview.setLayerScope).toHaveBeenLastCalledWith(undefined)
+    } finally { harness.dispose() }
+  }
+})
+
+test('floating selections scope empty active layers, while a sole visible layer needs no isolated mesh', async () => {
+  const { document, active, context } = layeredDocument(), harness = meshProbe(document), { probe } = harness
+  try {
+    probe.setTool('sculpt')
+    probe.applySelection({ cells: [{ x: 12, y: 12, z: 12 }], count: 1, floating: true }, false)
+    await harness.flush()
+    expect(probe.selection.size).toBe(1)
+    expect(probe.meshLayerId).toBe(active.id)
+    probe.applySelection({ cells: [{ x: 12, y: 12, z: 12 }], count: 1 }, false)
+    expect(probe.selection.size).toBe(0)
+    expect(probe.meshLayerId).toBeUndefined()
+    context.visible = false
+    probe.applySelection({ cells: [{ x: 2, y: 2, z: 2 }], count: 1 }, false)
+    expect(probe.selection.size).toBe(1)
+    expect(probe.meshLayerId).toBeUndefined()
+    expect(probe.isolatedLayerId()).toBe(active.id)
+  } finally { harness.dispose() }
+})
 
 test('live sprite scope retains fresh context and diagnostics without drawing the physical surfaces', async () => {
   const { document, active, context } = layeredDocument()
@@ -542,7 +639,9 @@ test('document replacement disposes isolation and ignores replies from the previ
     replacement.setVoxel(10, 10, 10, 5)
     probe.content = { bounds: new Box3() }
     probe.viewport.setSceneContent = () => probe.refreshLayerScope()
+    probe.layerClick = { pointerId: 0, startX: 0, startY: 0, moved: false, layerId: 1 }
     probe.setDocument(replacement, true)
+    expect(probe.layerClick).toBeUndefined()
     expect(disposed).toBe(geometries)
     expect(root.parent).toBeNull()
     late({ data: stale }); late({ data: { type: 'ready' } })
@@ -550,12 +649,15 @@ test('document replacement disposes isolation and ignores replies from the previ
     await probe.whenMeshIdle()
     const current = probe.chunkMeshes.get(0) as Group
     expect(current).not.toBe(root)
-    expect(current.children.filter(child => child.userData.layerIsolation)).toHaveLength(1)
-    expect(isolation(current).visible).toBe(true)
+    expect(probe.selection.size).toBe(0)
+    expect(current.children.filter(child => child.userData.layerIsolation)).toHaveLength(0)
     expect((current.children.find(child => child instanceof Points) as Points).geometry.attributes.position.array)
       .toEqual(meshChunk(replacement.paddedChunk(0, true)).positions)
     late({ data: stale })
     expect(probe.chunkMeshes.get(0)).toBe(current)
+    probe.applySelection({ cells: [{ x: 10, y: 10, z: 10 }], count: 1 }, false)
+    await probe.whenMeshIdle()
+    expect(isolation(current).visible).toBe(true)
   } finally { harness.dispose() }
 })
 
@@ -623,7 +725,7 @@ test('installed isolation uses ghost context and shared physical surfaces, resto
   const meshVerticesMaterial = new PointsMaterial(), faceGridMaterial = new LineBasicMaterial()
   const model = new Group()
   const probe = Object.assign(Object.create(VoxelRenderer.prototype), {
-    document, model, modelSuspended: false, tool: 'select', meshLayerId: active.id, materials, contextMaterial, meshVerticesMaterial, faceGridMaterial, meshTrianglesMaterial: faceGridMaterial,
+    document, model, modelSuspended: false, tool: 'select', selection: new Map([[0, { x: 2, y: 2, z: 2 }]]), meshLayerId: active.id, materials, contextMaterial, meshVerticesMaterial, faceGridMaterial, meshTrianglesMaterial: faceGridMaterial,
     settings: { faceGrid: true, meshVertices: true, meshTriangles: true }, versions: new Map([[0, 1]]),
     chunkMeshes: new Map(), chunkQuads: new Map(), queued: new Set(), queuedGrids: new Set(), inFlight: 0, pump() { this.queuedGrids.clear() },
     viewport: { renderMode: false, renderer: { shadowMap: {} }, requestPathTraceRebuild() {}, render() {} },

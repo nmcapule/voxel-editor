@@ -21,6 +21,7 @@ const cases = [
   'application teardown drains accepted commands and failed saves retain an editable UI',
   'model effects synchronize tools once and reuse layer counts for metadata only',
   'visibility saves reuse raw chunks without losing pending voxel edits',
+  'model palette retains regrouped operations and Select clicks clear selection',
 ] as const
 
 for (const name of cases) {
@@ -123,6 +124,7 @@ async function integration(name: typeof cases[number]) {
     listeners = new Map<string, ((event: unknown) => unknown)[]>()
     elements = { namedItem: (name: string) => this.querySelector(name) }
     readonly tag: string
+    get ownerDocument(): ElementStub { return dom }
     constructor(tag = '') { this.tag = tag }
     querySelector(selector: string): ElementStub {
       const child = this.children.find(child => child.tag === selector)
@@ -146,7 +148,7 @@ async function integration(name: typeof cases[number]) {
     replaceChildren(...children: ElementStub[]) { this.nodes.clear(); this.children = children }
     hidePopover() {}
   }
-  const dom = Object.assign(new ElementStub(), { activeElement: null, createElement: (tag: string) => new ElementStub(tag) })
+  const dom = Object.assign(new ElementStub(), { activeElement: null, defaultView: new ElementStub(), createElement: (tag: string) => new ElementStub(tag) })
   Object.assign(globalThis, {
     document: dom, window: new ElementStub(),
     HTMLElement: ElementStub, HTMLButtonElement: ElementStub, HTMLInputElement: ElementStub, HTMLSelectElement: ElementStub, HTMLTextAreaElement: ElementStub,
@@ -588,6 +590,80 @@ async function integration(name: typeof cases[number]) {
         expect(saved.getLayerVoxel(2, 1, 1)).toBe(6)
         expect(saved.activeLayer.visible).toBe(false)
       } finally { hashes.mockRestore() }
+    } else if (name === cases[11]) {
+      const root = dom.querySelector('.studio').querySelector('.model-root')
+      const click = async (selector: string, dataset: Record<string, string>) => {
+        const target = Object.assign(new ElementStub(), { dataset, closest: (query: string): ElementStub | null => query === selector ? target : null })
+        await root.emit('click', { target, detail: 1 })
+        await state() // Drain the real command queue before checking the control state.
+      }
+      const choose = (tool: Tool) => click('button[data-tool]', { tool })
+      const mode = (sculptMode: string) => click('[data-sculpt-mode]', { sculptMode })
+      const controller = currentModel().controller
+      const cells = [{ x: 1, y: 1, z: 1 }]
+      await dispatch({ type: 'selection.set', cells })
+      await mode('move')
+      await mode('erase')
+      expect(controller.activeTool).toBe('sculpt')
+      expect(controller.sculptMode).toBe('erase')
+      expect(modelNode('#context-title').textContent).toBe('Volume')
+      expect(modelNode('#paint-tool-mode').textContent).toBe('Erase')
+      expect(modelNode('#sculpt-tool-mode').textContent).toBe('Move')
+      await choose('sculpt')
+      expect(controller.sculptMode).toBe('move')
+      await choose('paint')
+      expect(controller.sculptMode).toBe('erase')
+      expect(controller.selection.count).toBe(1)
+      await click('[data-selection-mode]', { selectionMode: 'body' })
+      expect(controller.selection.count).toBe(1)
+      await choose('select')
+      expect(controller.selection.count).toBe(0)
+      expect(controller.selectionMode).toBe('body')
+      expect(controller.activeTool).toBe('select')
+      await choose('paint')
+      expect(controller.sculptMode).toBe('erase')
+      await click('[data-auxiliary]', { auxiliary: 'pick' })
+      expect(controller.auxiliaryTool).toBe('pick')
+      expect(modelNode('#paint-tool-mode').textContent).toBe('Eyedropper')
+      await dispatch({ type: 'tool.auxiliary' })
+      expect(modelNode('#paint-tool-mode').textContent).toBe('Erase')
+      await click('[data-paint-mode]', { paintMode: 'fill' })
+      expect(controller.activeTool).toBe('paint')
+      expect(controller.paintMode).toBe('fill')
+      expect(modelNode('#paint-tool-mode').textContent).toBe('Fill')
+      expect(modelNode('#fill-options').hidden).toBe(false)
+      await choose('sculpt')
+      await choose('paint')
+      expect(controller.activeTool).toBe('paint')
+      expect(controller.paintMode).toBe('fill')
+      const session = currentModel()
+      await workspace.start(true); await enter()
+      await mode('push')
+      await workspace.returnToScene(); await ui.leaveScene()
+      expect(currentModel().controller).toBe(session.controller)
+      await choose('sculpt')
+      expect(controller.sculptMode).toBe('move')
+      await dispatch({ type: 'selection.set', cells })
+      await dispatch({ type: 'clipboard.copy' })
+      await dispatch({ type: 'clipboard.paste.begin' })
+      expect(controller.selection.floating).toBe(true)
+      await choose('select')
+      expect(controller.selection.count).toBe(0)
+      expect(controller.pendingPaste).toBeUndefined()
+      expect(controller.document.voxelCount).toBe(1)
+      await dispatch({ type: 'tool.paintMode', mode: 'paint' })
+      expect(modelNode('#paint-tool-mode').textContent).toBe(controller.document.materials[controller.activeColor].name)
+      await dispatch({ type: 'tool.sculptMode', mode: 'erase' })
+      expect(modelNode('#paint-tool-mode').textContent).toBe('Erase')
+      await dispatch({ type: 'tool.paintMode', mode: 'paint' })
+      expect(modelNode('#paint-tool-mode').textContent).toBe(controller.document.materials[controller.activeColor].name)
+      await dispatch({ type: 'tool.sculptMode', mode: 'erase' })
+      expect(modelNode('#paint-tool-mode').textContent).toBe('Erase')
+      await dispatch({ type: 'tool.paintMode', mode: 'fill' })
+      expect(modelNode('#paint-tool-mode').textContent).toBe('Fill')
+      await choose('paint')
+      expect(controller.activeTool).toBe('paint')
+      expect(controller.paintMode).toBe('fill')
     } else {
       const shell = dom.querySelector('.studio'), nameInput = modelNode('#project-name')
       const captureGate = capturePause = gate()

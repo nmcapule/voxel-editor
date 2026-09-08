@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Model tool interaction checks</title>
+<link rel="stylesheet" href="/src/app/style.css">
+<body>
+<div id="app"></div>
+<script type="module">
+  import { mountModelEditor } from '/src/editors/model/editor.ts'
+  import { Studio } from '/src/editors/model/studio.ts'
+  import { VoxelDocument } from '/src/shared/voxel/document.ts'
+  import { DEFAULT_SETTINGS } from '/src/shared/rendering/settings.ts'
+  const model = new VoxelDocument({ x: 32, y: 32, z: 32 }, 'Tool interaction fixture')
+  for (let x = 6; x < 14; x++) for (let y = 1; y < 9; y++) for (let z = 10; z < 18; z++) model.setVoxel(x, y, z, 5)
+  model.createLayer()
+  for (let x = 18; x < 24; x++) for (let y = 1; y < 7; y++) for (let z = 10; z < 18; z++) model.setVoxel(x, y, z, 6)
+  model.activeLayerId = model.layers[0].id
+  const editor = await mountModelEditor(document.querySelector('#app'))
+  await editor.activateSession({ controller: new Studio(model, { ...DEFAULT_SETTINGS, pathTracing: false }), view: editor.renderer.getView() })
+  editor.renderer.frameModel()
+  await editor.renderer.whenMeshIdle()
+  window.modelTools = editor
+</script>
+</body>
+</html>

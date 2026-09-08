@@ -36,10 +36,12 @@ It should feel like drawing in space rather than operating a traditional desktop
 
 Creators work in one full-screen 3D viewport using a mouse and keyboard, pen, or
 touch. In the model editor they retain a point, surface, texture, or body selection
-mode while using four primary tools: Select, Place, Sculpt, and Layer. Place reuses the selection mode,
-with Paint and Volume operations plus a momentary Eyedropper; Layer activates
-the owner of a clicked voxel. Creators can also navigate the camera,
-adjust the palette and lighting, and import or export files.
+mode while using four primary tools: Select, Volume, Sculpt, and Layer. Volume
+(formerly Place) holds Paint, Fill (the former Volume operation), a momentary
+Eyedropper, and Erase (moved from Sculpt); Paint and Erase reuse the selection mode.
+Sculpt holds Push/Pull and Move. Layer activates the owner of a tapped or clicked
+voxel on release and pans the viewport on drag. Creators can also navigate the
+camera, adjust the palette and lighting, and import or export files.
 
 The separate scene editor places, selects, transforms, and layers model instances.
 Edit model enters the existing voxel editor for a shared scene asset; Done returns
@@ -57,11 +59,14 @@ to the composition without replacing the standalone model workspace.
   are copied into scene assets, not live-linked or updated by child editing.
 - Named voxel layers with one active layer, visibility and locking controls,
   overlapping per-layer voxels, and local persistence. The highest visible layer
-  wins at each coordinate; clicking a visible voxel with the Layer tool activates
-  its owner, and VOX export flattens visible layers into one model.
+  wins at each coordinate; a stationary tap or click on a visible voxel with the
+  Layer tool activates its owner on release. Left-button, pen, and one-finger drags
+  pan the viewport over voxels or background; right-button orbit, middle-button
+  pan, and two-finger navigation remain unchanged. VOX export flattens visible
+  layers into one model.
 - Point clicks and occupied 3D box drags, connected-surface, contiguous same-texture,
-  contiguous-body, and marquee selection with Paint plus Push/Pull, Move, and
-  Erase Sculpt operations. In Point mode, Paint and Erase preview the dragged
+  contiguous-body, and marquee selection with Volume's Paint and Erase plus
+  Sculpt's Push/Pull and Move. In Point mode, Paint and Erase preview the dragged
   box and commit on release; clicking either operation within the current selection
   applies it to the full selection, while clicking elsewhere resolves a new scope.
   Push/Pull and Move first select an unselected target
@@ -69,16 +74,21 @@ to the composition without replacing the standalone model workspace.
   clicked face normal, preserving staggered face depths rather than restricting
   edits to one plane. It supports multiple voxel-depth steps per drag and pulls
   through occupied destinations, replacing colors on the active
-  layer. Select, Paint, and Sculpt isolate the active layer for picking and show
-  other visible layers as faint, noninteractive context. Move overwrites occupied destinations on the active
+  layer. Select, Paint, Erase, and Sculpt retain active-layer-only picking, but show
+  other visible layers as faint, noninteractive context only while a selection
+  exists. Without a selection, or during Fill, Layer, Eyedropper, Render, or model
+  inspection, the full visible composition is shown. Move overwrites occupied destinations on the active
   layer while preserving overlapping voxels on other layers. The Select popup and
   standard keyboard shortcuts provide Cut, Copy, and movable ghost Paste. The editor also includes a momentary eyedropper,
   undo and redo with matching selection and layer restoration, and
-  selection-centered camera orbit. Right-drag remains dedicated to camera orbit.
-- The Place Volume operation provides box, sphere, and cylinder shapes with a
-  dragged footprint and explicit depth to create undoable volumes in the active
-  material and layer. Footprints can start on the model, floor, or visible side
-  grids of the guide volume.
+  selection-centered camera orbit. Deselecting leaves the camera target and
+  position unchanged and stops any in-flight selection-focus animation. The main
+  Select tile clears the current selection; expand, swipe, hover, and selection-mode
+  choice do not. Right-drag remains dedicated to camera orbit.
+- Volume's Fill operation provides box, sphere, and cylinder shapes with
+  two dragged 3D corners to create undoable volumes in the active material and
+  layer. Corners snap outside model faces or onto the floor and visible side
+  grids of the guide volume. Explicit depth remains available for keyboard fills.
 - Orthographic and perspective camera modes, editing-grid, voxel-face-grid, and
   shadow and ambient-occlusion controls, an FPS readout, palette-scoped
   roughness, metalness, emissive intensity, opacity, transmission, refraction, albedo, normal,

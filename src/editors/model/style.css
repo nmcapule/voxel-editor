@@ -98,7 +98,7 @@
 :where(.model-editor) #paint-tool-swatch { flex: 0 0 7px; width: 7px; height: 7px; border: 1px solid rgba(32, 38, 44, 0.2); border-radius: 50%; }
 :where(.model-editor) .tool-dock button[aria-pressed="true"] #paint-tool-swatch { border-color: rgba(255, 255, 255, 0.6); }
 :where(.model-editor) .tool-dock { bottom: var(--tool-dock-bottom); }
-:where(.model-editor) .tool-slot { flex: 1 1 0; min-width: 0; }
+:where(.model-editor) .tool-slot { flex: 1 1 0; min-width: 0; touch-action: pinch-zoom; user-select: none; }
 :where(.model-editor) .tool-slot > button[data-tool] { width: 100%; height: var(--tool-height); border-radius: 0 0 12px 12px; }
 :where(.model-editor) .tool-dock .tool-expand {
   width: 100%;
@@ -135,6 +135,7 @@
   color: var(--ink);
 }
 :where(.model-editor) .tool-popup::backdrop { background: transparent; }
+:where(.model-editor) :is(.tool-popup, .layer-panel, .layer-list) { overscroll-behavior-y: contain; }
 :where(.model-editor) .tool-popup > header { min-height: 52px; padding: 7px 9px 9px; display: grid; align-content: center; gap: 2px; border-bottom: 1px solid var(--line); }
 :where(.model-editor) .tool-popup > header strong { font-size: 0.84rem; }
 :where(.model-editor) .tool-popup > header span { color: var(--muted); font-size: 0.64rem; }

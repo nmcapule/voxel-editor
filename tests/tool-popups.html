@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Model tool popup checks</title>
+<link rel="stylesheet" href="/src/shared/ui/base.css">
+<link rel="stylesheet" href="/src/editors/model/style.css">
+<body class="editor-surface">
+<button id="outside" type="button">Outside action</button>
+<output id="actions" aria-live="polite">0 actions</output>
+<div id="fixture"></div>
+<script type="module">
+  import { modelMarkup } from '/src/editors/model/ui.ts'
+  import { bindToolPopups } from '/src/editors/model/tool-popups.ts'
+  const root = document.querySelector('#fixture')
+  root.innerHTML = modelMarkup(true)
+  for (const element of root.querySelectorAll('.model-editor > :not(.tool-dock, .tool-popup, .layer-panel)')) element.remove()
+  const list = root.querySelector('.layer-list')
+  for (let i = 0; i < 30; i++) {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.textContent = `Layer ${i + 1}`
+    button.style.minHeight = '44px'
+    list.append(button)
+  }
+  const controller = new AbortController()
+  let enabled = true, actions = 0
+  const reset = bindToolPopups(root, controller.signal, () => enabled)
+  document.addEventListener('click', event => {
+    if (!event.target.closest('button:not([data-tool-popup])')) return
+    document.querySelector('#actions').textContent = `${++actions} actions`
+  })
+  // Pass the URL from `agent-browser --session <name> stream status --json`.
+  // These are trusted browser touch events, not dispatchEvent approximations.
+  async function checkTouch(streamURL) {
+    const socket = new WebSocket(streamURL)
+    await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject })
+    const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
+    const check = (condition, message) => { if (!condition) throw new Error(message) }
+    const drag = async (element, dy = 0) => {
+      const box = element.getBoundingClientRect(), x = box.left + box.width / 2, y = box.top + box.height / 2
+      const send = (eventType, touchPoints) => socket.send(JSON.stringify({ type: 'input_touch', eventType, touchPoints }))
+      send('touchStart', [{ id: 1, x, y }])
+      await wait(40)
+      if (dy) for (const distance of [4, 12, 28, Math.abs(dy)]) {
+        send('touchMove', [{ id: 1, x, y: y + Math.sign(dy) * distance }])
+        await wait(40)
+      }
+      send('touchEnd', [])
+      await wait(300)
+    }
+    const results = []
+    try {
+      reset()
+      document.activeElement?.blur()
+      for (const popup of root.querySelectorAll(':popover-open')) popup.hidePopover()
+      const before = actions
+      for (const slot of root.querySelectorAll('.tool-slot')) {
+        const expand = slot.querySelector('[data-tool-popup]'), popup = expand.popoverTargetElement
+        await drag(slot.querySelector('[data-tool]'), -50)
+        check(popup.matches(':popover-open'), `${expand.dataset.toolPopup}: upward swipe must open`)
+        check(document.activeElement === document.body, 'Swipe opening must not focus the popup')
+        popup.scrollTop = 0
+        list.scrollTop = 0
+        await drag(popup.querySelector('button'), 50)
+        check(!popup.matches(':popover-open'), `${expand.dataset.toolPopup}: downward swipe inside must close`)
+        check(actions === before, 'Swipes must not execute any button action')
+        results.push(`${expand.dataset.toolPopup}: swipe open/close, no action or focus theft`)
+      }
+      const expand = root.querySelector('[data-tool-popup="layer"]'), popup = expand.popoverTargetElement
+      await drag(expand)
+      check(popup.matches(':popover-open'), 'The next genuine expand tap must work')
+      await drag(list, -70)
+      check(list.scrollTop > 0 && popup.matches(':popover-open'), 'Upward list scrolling must remain native')
+      list.scrollTop = 120
+      await drag(list, 55)
+      check(popup.matches(':popover-open'), 'Downward scrolling away from the top must not dismiss')
+      list.scrollTop = 0
+      await drag(list.querySelector('button'), 50)
+      check(!popup.matches(':popover-open'), 'Downward list pull at the top must dismiss')
+      check(actions === before, 'Scrolling/dismissal must not activate a layer')
+      await drag(expand)
+      await drag(list.querySelector('button'))
+      check(actions === before + 1, 'The next genuine action tap must execute exactly once')
+      results.push('Layer list: native scroll both directions, pull-to-close only at top, next taps work')
+      return results
+    } finally { socket.close() }
+  }
+  window.popupChecks = { reset, controller, checkTouch, setEnabled(value) { enabled = value }, get actions() { return actions } }
+</script>
+</body>
+</html>

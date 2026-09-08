@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import { Viewport } from '../../shared/rendering/viewport'
-import { castsRealtimeShadow, realtimeEnvironmentIntensity } from '../../shared/rendering/stage'
+import { castsRealtimeShadow } from '../../shared/rendering/stage'
 import type { CameraSnapshot, SceneContent } from '../../shared/rendering/contracts'
 import type { MeshData } from '../../shared/voxel/mesher'
 import { CHUNK_SIZE, chunkCoords, connectedBodyVoxels, connectedSurfaceVoxels, fillShapeVoxels, moveRange, occupiedVoxels, pushPullFaces, pushPullRange, surfaceVoxels, type FillShape, type Vec3, type VoxelDocument } from '../../shared/voxel/document'
@@ -310,7 +310,7 @@ export class VoxelRenderer {
     this.meshTrianglesMaterial.color.copy(this.faceGridMaterial.color)
     for (const material of this.materials) {
       Object.assign(material, { castShadow: this.settings.shadows })
-      if (material.envMap !== this.viewport.environment) { material.envMap = this.viewport.environment; material.needsUpdate = true }
+      this.viewport.applyEnvironment(material)
     }
     if (this.modelRenderMode !== this.viewport.renderMode) {
       this.modelRenderMode = this.viewport.renderMode
@@ -1307,8 +1307,6 @@ export class VoxelRenderer {
       const material = new THREE.MeshPhysicalMaterial({
         name,
         color: this.document.palette[index],
-        envMap: this.viewport.environment,
-        envMapIntensity: realtimeEnvironmentIntensity(metalness),
         roughness,
         metalness,
         emissive: this.document.palette[index],
@@ -1319,6 +1317,7 @@ export class VoxelRenderer {
         transparent: opacity < 1,
         depthWrite: opacity >= 1,
       })
+      this.viewport.applyEnvironment(material)
       Object.assign(material, { castShadow: this.settings.shadows })
       return material
     })
@@ -1336,6 +1335,7 @@ export class VoxelRenderer {
     this.materials.forEach((material, index) => {
       material.color.setHex(this.document.palette[index])
       material.emissive.copy(material.color)
+      this.viewport.applyEnvironment(material)
       material.needsUpdate = true
     })
     if (!this.modelSuspended) this.viewport.updatePathTracing('materials')
@@ -1355,7 +1355,6 @@ export class VoxelRenderer {
     material.name = preset.name
     material.roughness = preset.roughness
     material.metalness = preset.metalness
-    material.envMapIntensity = realtimeEnvironmentIntensity(preset.metalness)
     material.emissive.setHex(this.document.palette[index])
     material.emissiveIntensity = preset.emissiveIntensity
     material.opacity = preset.opacity
@@ -1363,6 +1362,7 @@ export class VoxelRenderer {
     material.ior = preset.ior
     material.transparent = preset.opacity < 1
     material.depthWrite = preset.opacity >= 1
+    this.viewport.applyEnvironment(material)
     material.needsUpdate = true
     if (wasTransparent !== (preset.opacity < 1 || preset.transmission > 0)) {
       this.updateWorkerPalette()
@@ -1486,6 +1486,7 @@ export class VoxelRenderer {
     const previous = material[map]
     if (previous) previous.dispose()
     material[map] = texture
+    this.viewport.applyEnvironment(material)
     material.needsUpdate = true
     if (!this.modelSuspended) this.viewport.updatePathTracing('materials')
     this.viewport.render()
@@ -1499,6 +1500,7 @@ export class VoxelRenderer {
       material[map]?.dispose()
       material[map] = null
     }
+    this.viewport.applyEnvironment(material)
     material.needsUpdate = true
     if (!this.modelSuspended) this.viewport.updatePathTracing('materials')
     this.viewport.render()

@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import { TransformControls } from 'three/addons/controls/TransformControls.js'
 import { chunkCoords, type Vec3 } from '../../shared/voxel/document'
 import type { MeshData } from '../../shared/voxel/mesher'
-import { castsRealtimeShadow, realtimeEnvironmentIntensity } from '../../shared/rendering/stage'
+import { castsRealtimeShadow } from '../../shared/rendering/stage'
 import type { CameraSnapshot, PreparedSceneContent, SceneContent } from '../../shared/rendering/contracts'
 import type { Viewport } from '../../shared/rendering/viewport'
 import type { ViewSettings } from '../../shared/rendering/settings'
@@ -250,6 +250,7 @@ export class SceneRenderer {
       label: 'Scene viewport. Select or place objects; right drag or two-finger drag orbits. Escape cancels a transform.',
       whenReady: () => this.whenReady(), prepareFullDetail: signal => this.prepareFullDetail(signal), onViewportChange: () => {
       this.pickGeneration++
+      for (const { material } of this.materials.values()) this.host.applyEnvironment(material)
       const viewport = this.host.getSceneViewport()
       this.gizmo.camera = viewport.camera
       viewport.controls.touches.ONE = viewport.renderMode ? THREE.TOUCH.ROTATE : -1 as THREE.TOUCH
@@ -284,7 +285,7 @@ export class SceneRenderer {
       if (this.drag || this.pointer) { event.preventDefault(); event.stopImmediatePropagation(); this.cancelInteraction() }
     }, options)
     viewport.canvas.addEventListener('webglcontextrestored', () => {
-      for (const { material } of this.materials.values()) { material.envMap = this.host.getSceneViewport().environment; material.needsUpdate = true }
+      for (const { material } of this.materials.values()) this.host.applyEnvironment(material)
       this.dirty = true
       this.schedule()
     }, { signal: this.listeners.signal })
@@ -357,7 +358,8 @@ export class SceneRenderer {
         if (key !== `${asset.id}:${index}`) continue
         const preset = asset.model.materials[index], material = cached.material
         material.setValues({ ...preset, color: asset.model.palette[index], emissive: asset.model.palette[index],
-          envMapIntensity: realtimeEnvironmentIntensity(preset.metalness), transparent: preset.opacity < 1, depthWrite: preset.opacity >= 1 })
+          transparent: preset.opacity < 1, depthWrite: preset.opacity >= 1 })
+        this.host.applyEnvironment(material)
         material.needsUpdate = true
       }
     }
@@ -781,8 +783,8 @@ export class SceneRenderer {
         const preset = demand.asset.asset.model.materials[group.materialIndex]
         const color = demand.asset.asset.model.palette[group.materialIndex]
         const material = new THREE.MeshPhysicalMaterial({ ...preset, color, emissive: color,
-          envMap: this.host.getSceneViewport().environment, envMapIntensity: realtimeEnvironmentIntensity(preset.metalness),
           transparent: preset.opacity < 1, depthWrite: preset.opacity >= 1 })
+        this.host.applyEnvironment(material)
         cached = { material, refs: 0 }; this.materials.set(materialKey, cached)
       }
       cached.refs++

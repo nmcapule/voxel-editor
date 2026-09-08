@@ -4,9 +4,10 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
 import type { WebGLPathTracer } from 'three-gpu-pathtracer'
 import { RasterPipeline } from './raster-pipeline'
 import { TiltShift } from './tilt-shift'
-import type { ViewSettings } from './settings'
+import type { SkyboxPreset, ViewSettings } from './settings'
+import { createSkyTexture, skyColor, SKY_LIGHTING } from './sky'
 import type { CameraSnapshot, SceneContent, PreparedSceneContent, ViewportCallbacks, Vector3Value as Vec3 } from './contracts'
-import { sceneShadowVolume, workspaceGridPositions, workspaceGridPlaneVisible } from './stage'
+import { realtimeEnvironmentIntensity, sceneShadowVolume, workspaceGridPositions, workspaceGridPlaneVisible } from './stage'
 
 export class Viewport {
   constructor(host: HTMLElement, settings: ViewSettings, callbacks: ViewportCallbacks = {}) {
@@ -18,9 +19,8 @@ export class Viewport {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping
     this.renderer.toneMappingExposure = 1.08
-    this.environmentTarget = this.createEnvironment()
     this.ambientEnvironment = this.createAmbientEnvironment()
-    this.scene.environment = this.ambientEnvironment
+    this.replaceEnvironment(settings.skybox)
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
     this.raster = new RasterPipeline(this.renderer, this.scene, { ambientOcclusion: settings.ambientOcclusion })
     this.renderer.shadowMap.enabled = true
@@ -46,17 +46,21 @@ export class Viewport {
       if (this.rasterFrame !== undefined) cancelAnimationFrame(this.rasterFrame)
       this.rasterFrame = undefined
       this.disposePathTracer()
+      this.raster.dispose()
       this.tiltShift?.dispose()
       this.tiltShift = undefined
+      // Release old-context handles before Three replaces its resource registries.
+      this.environmentTarget.dispose()
+      this.skyTexture?.dispose()
       this.releaseSceneDetail()
       this.callbacks.onPathTracingStatus?.('Graphics context lost')
     }, options)
     this.renderer.domElement.addEventListener('webglcontextrestored', () => {
       this.contextLost = false
-      this.environmentTarget.dispose()
-      this.environmentTarget = this.createEnvironment()
-      if (this.ground) (this.ground.material as THREE.MeshStandardMaterial).envMap = this.environmentTarget.texture
-      this.sceneContent?.onViewportChange()
+      this.raster = new RasterPipeline(this.renderer, this.scene, { ambientOcclusion: this.settings.ambientOcclusion })
+      this.raster.setSize(this.renderer.domElement.width, this.renderer.domElement.height)
+      this.environmentTarget = this.createEnvironment(this.skyTexture)
+      this.setSettings(this.settings)
       this.renderer.shadowMap.needsUpdate = true
       this.pathTracingFailed = false
       this.requestPathTraceRebuild()
@@ -80,8 +84,9 @@ export class Viewport {
   private presentationDirty = true
   private tiltShift?: TiltShift
   private tiltShiftDirty = false
-  private environmentTarget: THREE.WebGLRenderTarget
+  private environmentTarget!: THREE.WebGLRenderTarget
   private ambientEnvironment: THREE.DataTexture
+  private skyTexture?: THREE.DataTexture
   private grid?: THREE.Group
   private limits?: THREE.Box3Helper
   private ground?: THREE.Mesh
@@ -131,11 +136,37 @@ export class Viewport {
     return new THREE.OrthographicCamera(-20, 20, 20, -20, this.worldScale ? -65536 : -1000, this.worldScale ? 131072 : 2000)
   }
 
-  private createEnvironment() {
-    const room = new RoomEnvironment()
+  private createEnvironment(sky?: THREE.DataTexture) {
+    const room = sky ? undefined : new RoomEnvironment()
     const pmrem = new THREE.PMREMGenerator(this.renderer)
-    try { return pmrem.fromScene(room, 0.04, 0.1, 100, { size: 64 }) }
-    finally { room.dispose(); pmrem.dispose() }
+    try { return sky ? pmrem.fromEquirectangular(sky) : pmrem.fromScene(room!, 0.04, 0.1, 100, { size: 64 }) }
+    finally { room?.dispose(); pmrem.dispose() }
+  }
+
+  private replaceEnvironment(preset: SkyboxPreset) {
+    const sky = preset === 'solid' ? undefined : createSkyTexture(preset)
+    try {
+      if (!this.contextLost) {
+        const target = this.createEnvironment(sky)
+        this.environmentTarget?.dispose()
+        this.environmentTarget = target
+      }
+    } catch (error) { sky?.dispose(); throw error }
+    this.skyTexture?.dispose()
+    this.skyTexture = sky
+    this.scene.environment = sky ?? this.ambientEnvironment
+  }
+
+  /** Materials borrow the viewport-owned map; versions also invalidate transparency clones. */
+  applyEnvironment(material: THREE.MeshStandardMaterial, ground = false) {
+    const intensity = this.settings.skybox === 'solid' ? ground ? 0 : realtimeEnvironmentIntensity(material.metalness) : this.settings.ambient / Math.PI
+    const rotation = this.scene.environmentRotation
+    if (material.envMap !== this.environment || material.envMapIntensity !== intensity || !material.envMapRotation.equals(rotation)) {
+      material.envMap = this.environment
+      material.envMapIntensity = intensity
+      material.envMapRotation.copy(rotation)
+      material.needsUpdate = true
+    }
   }
 
   private createAmbientEnvironment() {
@@ -445,13 +476,19 @@ export class Viewport {
     this.tiltShiftDirty ||= (['tiltShift', 'tiltShiftStrength', 'tiltShiftFocus', 'tiltShiftWidth'] as const).some(key => settings[key] !== previous[key])
     const projectionChanged = settings.projection !== this.settings.projection
     const pathTracingChanged = settings.pathTracing !== this.settings.pathTracing
-    const sceneDependenciesChanged = this.worldScale && (['background', 'ambient', 'light', 'lightAzimuth', 'shadows'] as const).some(key => settings[key] !== previous[key])
+    const skyChanged = settings.skybox !== previous.skybox
+    const sceneDependenciesChanged = this.worldScale && (['skybox', 'background', 'ambient', 'light', 'lightAzimuth', 'shadows'] as const).some(key => settings[key] !== previous[key])
+    if (skyChanged) this.replaceEnvironment(settings.skybox)
     this.settings = { ...settings }
+    const sky = settings.skybox === 'solid' ? undefined : SKY_LIGHTING[settings.skybox]
     const background = new THREE.Color(settings.background)
-    this.scene.background = background
-    this.hemisphere.intensity = settings.ambient
+    this.scene.background = this.skyTexture ?? background
+    this.scene.environmentRotation.set(0, sky ? -THREE.MathUtils.degToRad(settings.lightAzimuth) : 0, 0)
+    this.scene.backgroundRotation.copy(this.scene.environmentRotation)
+    this.hemisphere.intensity = sky ? 0 : settings.ambient
     this.scene.environmentIntensity = settings.ambient / Math.PI
-    this.sunlight.intensity = settings.light
+    this.sunlight.intensity = settings.light * (sky?.keyStrength ?? 1)
+    this.sunlight.color.set(sky?.keyColor ?? '#ffffff')
     this.raster.ambientOcclusion.enabled = settings.ambientOcclusion
     this.renderer.shadowMap.enabled = settings.shadows
     this.updateWorkspaceGridVisibility()
@@ -460,14 +497,19 @@ export class Viewport {
       this.ground.visible = this.renderMode
       ;(this.ground.material as THREE.MeshStandardMaterial).color.set(settings.background).offsetHSL(0, -0.04, -0.035)
       ;(this.ground.material as THREE.Material).needsUpdate = true
+      this.applyEnvironment(this.ground.material as THREE.MeshStandardMaterial, true)
     }
     const stageSize = this.stageBounds.getSize(new THREE.Vector3())
     const center = this.stageBounds.getCenter(new THREE.Vector3())
     if (!this.worldScale) center.y = this.stageBounds.min.y
     const radius = Math.max(this.worldScale ? 32 : 0, stageSize.x, stageSize.y, stageSize.z)
     const radians = THREE.MathUtils.degToRad(settings.lightAzimuth)
-    this.sunlight.position.set(Math.cos(radians) * radius, radius * 1.7, Math.sin(radians) * radius).add(center)
-    if (settings.shadows !== previous.shadows || settings.lightAzimuth !== previous.lightAzimuth) this.renderer.shadowMap.needsUpdate = true
+    if (sky) {
+      const elevation = THREE.MathUtils.degToRad(sky.elevation)
+      this.sunlight.position.set(Math.cos(radians) * Math.cos(elevation), Math.sin(elevation), Math.sin(radians) * Math.cos(elevation))
+        .multiplyScalar(radius * 3).add(this.sunlightTarget.position)
+    } else this.sunlight.position.set(Math.cos(radians) * radius, radius * 1.7, Math.sin(radians) * radius).add(center)
+    if (skyChanged || settings.shadows !== previous.shadows || settings.lightAzimuth !== previous.lightAzimuth) this.renderer.shadowMap.needsUpdate = true
     this.fitShadowCamera()
     if (projectionChanged) this.switchProjection(settings.projection)
     this.sceneContent?.onViewportChange()
@@ -482,9 +524,9 @@ export class Viewport {
       this.callbacks.onPathTracingStatus?.(this.worldScale && this.renderMode && settings.pathTracing ? 'Scene raster fallback' : 'Ready')
     } else {
       const changes: ('materials' | 'lights' | 'environment' | 'camera')[] = []
-      if (settings.background !== previous.background || settings.shadows !== previous.shadows) changes.push('materials')
-      if (settings.background !== previous.background || settings.ambient !== previous.ambient) changes.push('environment')
-      if (settings.light !== previous.light || settings.lightAzimuth !== previous.lightAzimuth) changes.push('lights')
+      if (skyChanged || settings.background !== previous.background || settings.shadows !== previous.shadows) changes.push('materials')
+      if (skyChanged || settings.background !== previous.background || settings.ambient !== previous.ambient || sky && settings.lightAzimuth !== previous.lightAzimuth) changes.push('environment')
+      if (skyChanged || settings.light !== previous.light || settings.lightAzimuth !== previous.lightAzimuth) changes.push('lights')
       if (projectionChanged) changes.push('camera')
       if (changes.length) this.updatePathTracing(...changes)
     }
@@ -701,6 +743,8 @@ export class Viewport {
     scene.environment = this.scene.environment
     scene.environmentIntensity = this.scene.environmentIntensity
     scene.backgroundIntensity = this.scene.backgroundIntensity
+    scene.backgroundRotation.copy(this.scene.backgroundRotation)
+    scene.environmentRotation.copy(this.scene.environmentRotation)
     scene.add(prepared.root)
     const light = this.sunlight.clone()
     light.target = this.sunlightTarget.clone()
@@ -814,11 +858,19 @@ export class Viewport {
     // FXAA washes out pixel-wide triangle edges; keep the topology inspection view sharp.
     if (raster === this.raster) raster.antialias = !this.settings.meshTriangles || this.renderMode || this.worldScale
     const shadowMap = this.renderer.shadowMap
+    const background = this.scene.background
+    if (this.skyTexture && camera instanceof THREE.OrthographicCamera && this.settings.skybox !== 'solid') {
+      // An infinite sky has one direction for parallel rays. Three's unit sky cube
+      // does not cover orthographic views; a linear clear color also matches tracing.
+      const direction = camera.getWorldDirection(new THREE.Vector3()).applyAxisAngle(new THREE.Vector3(0, 1, 0), -this.scene.backgroundRotation.y)
+      this.scene.background = skyColor(this.settings.skybox, direction)
+    }
     const enabled = shadowMap.enabled, needsUpdate = shadowMap.needsUpdate, castShadow = this.sunlight.castShadow
     // Light shadow counts also switch shaders, preventing cached-map sampling in trace previews.
     shadowMap.enabled = this.sunlight.castShadow = this.settings.shadows && shadows
     try { raster.render(camera) }
     finally {
+      this.scene.background = background
       if (!shadowMap.enabled) shadowMap.needsUpdate = needsUpdate
       shadowMap.enabled = enabled
       this.sunlight.castShadow = castShadow
@@ -894,7 +946,7 @@ export class Viewport {
     }
     const parent = prepared?.root.parent
     const contentVisible = content?.root.visible
-    const environments = new Map<THREE.MeshStandardMaterial, THREE.Texture | null>()
+    const environments = new Map<THREE.MeshStandardMaterial, { map: THREE.Texture | null; intensity: number; rotation: THREE.Euler }>()
     try {
       for (const object of overlays) object.visible = false
       if (prepared && content) {
@@ -902,8 +954,8 @@ export class Viewport {
         prepared.root.traverse(object => {
           if (!(object instanceof THREE.Mesh)) return
           for (const material of Array.isArray(object.material) ? object.material : [object.material]) if (material instanceof THREE.MeshStandardMaterial && !environments.has(material)) {
-            environments.set(material, material.envMap)
-            material.envMap = this.environmentTarget.texture; material.needsUpdate = true
+            environments.set(material, { map: material.envMap, intensity: material.envMapIntensity, rotation: material.envMapRotation.clone() })
+            this.applyEnvironment(material)
           }
         })
         this.scene.add(prepared.root)
@@ -918,7 +970,10 @@ export class Viewport {
         this.scene.remove(prepared.root); parent?.add(prepared.root)
         content.root.visible = contentVisible!
         this.renderer.shadowMap.needsUpdate = true
-        for (const [material, environment] of environments) { material.envMap = environment; material.needsUpdate = true }
+        for (const [material, environment] of environments) {
+          material.envMap = environment.map; material.envMapIntensity = environment.intensity
+          material.envMapRotation.copy(environment.rotation); material.needsUpdate = true
+        }
       }
       for (const object of overlays) object.visible = true
       if (overlays.length) this.render()
@@ -1014,6 +1069,7 @@ export class Viewport {
     this.sunlight.shadow.dispose()
     this.environmentTarget.dispose()
     this.ambientEnvironment.dispose()
+    this.skyTexture?.dispose()
     this.scene.clear()
     this.sceneContent = undefined
     this.renderer.dispose()

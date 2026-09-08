@@ -33,6 +33,48 @@ function fixture(instances = [instance()], assets = [asset()]): SceneManifest {
 }
 
 describe('scene boundary', () => {
+  test('skybox presets round-trip in scenes and child models with legacy solid defaults', () => {
+    for (const skybox of ['solid', 'daylight', 'overcast', 'sunset', 'night', undefined] as const) {
+      const expected = { ...settings, skybox: skybox ?? 'solid', background: '#243648', ambient: 0.7, light: 3.1, lightAzimuth: -72, tiltShift: true, tiltShiftStrength: 0.8, tiltShiftFocus: 0.3, tiltShiftWidth: 0.1 }
+      const manifest = structuredClone(fixture())
+      manifest.settings = { ...expected }
+      manifest.assets[0].model.settings = { ...expected, skybox: skybox === undefined ? 'solid' : 'night' }
+      const childSettings = { ...manifest.assets[0].model.settings }
+      if (skybox === undefined) {
+        Reflect.deleteProperty(manifest.settings, 'skybox')
+        Reflect.deleteProperty(manifest.assets[0].model.settings, 'skybox')
+      }
+      const restored = new SceneDocument(JSON.parse(JSON.stringify(manifest))).snapshot()
+      expect(restored.settings).toEqual(expected)
+      expect(restored.assets[0].model.settings).toEqual(childSettings)
+      expect(new SceneDocument(JSON.parse(JSON.stringify(restored))).snapshot()).toEqual(restored)
+      expect(restored.version).toBe(1)
+    }
+  })
+
+  test('skybox commands reject invalid presets atomically and preserve settings through undo', () => {
+    const scene = new SceneDocument(fixture()), before = scene.snapshot()
+    for (const skybox of [null, false, 0, '', 'Daylight', 'unknown', 'toString', '__proto__', [], {}]) {
+      expect(() => scene.execute({ type: 'scene.settings', patch: { skybox, ambient: 0 } } as SceneCommand)).toThrow('skybox')
+      expect(() => parseSceneManifest({ ...before, settings: { ...settings, skybox } })).toThrow('skybox')
+      expect(() => parseSceneAsset({ ...before.assets[0], model: { ...header, settings: { ...settings, skybox } } })).toThrow('skybox')
+      expect(scene.snapshot()).toBe(before)
+      expect(scene.canUndo).toBe(false)
+    }
+    for (const skybox of ['daylight', 'overcast', 'sunset', 'night', 'solid'] as const) {
+      const previous = scene.data.settings
+      expect(scene.execute({ type: 'scene.settings', patch: { skybox } })).toMatchObject({ changed: true, instanceIds: [], assetIds: [] })
+      expect(scene.data.settings).toEqual({ ...settings, skybox })
+      expect(scene.data.assets).toBe(before.assets)
+      expect(scene.data.instances).toBe(before.instances)
+      scene.execute({ type: 'history.undo' })
+      expect(scene.data.settings).toEqual(previous)
+      scene.execute({ type: 'history.redo' })
+      expect(scene.data.settings).toEqual({ ...settings, skybox })
+      expect(scene.execute({ type: 'scene.settings', patch: { skybox } }).changed).toBe(false)
+    }
+  })
+
   test('miniature settings round-trip and legacy fields default without weakening required settings', () => {
     const enabled = { ...settings, tiltShift: true, tiltShiftStrength: 0.9, tiltShiftFocus: 1, tiltShiftWidth: 0 }
     const manifest = { ...fixture(), settings: enabled }
@@ -621,6 +663,16 @@ test('100M-voxel trusted autosaves visit no untouched chunk metadata and write o
     await saveSceneDocumentRecovery(scene)
     expect(writes).toEqual(['instances', 'scenes', 'meta'])
     for (const restore of restores.splice(0)) restore()
+
+    const sky = new SceneDocument(createScene({ ...settings, skybox: 'sunset', background: '#243648', ambient: 0.7, light: 3.1, lightAzimuth: -72, tiltShift: true }))
+    await saveSceneDocumentRecovery(sky)
+    expect((await loadSceneRecovery())!.scene.settings).toEqual(sky.data.settings)
+    const skyRow = stores.get('scenes')!.get(JSON.stringify(sky.data.id)) as SceneManifest
+    Reflect.deleteProperty(skyRow.settings, 'skybox')
+    const legacySky = new SceneDocument((await loadSceneRecovery())!.scene)
+    expect(legacySky.data.settings).toEqual({ ...sky.data.settings, skybox: 'solid' })
+    await saveSceneDocumentRecovery(legacySky)
+    expect((await loadSceneRecovery())!.scene.settings).toEqual(legacySky.data.settings)
 
     const miniature = new SceneDocument(createScene({ ...settings, tiltShift: true, tiltShiftStrength: 0.85, tiltShiftFocus: 0.7, tiltShiftWidth: 0.2 }))
     await saveSceneDocumentRecovery(miniature)

@@ -1,5 +1,6 @@
 import { icon } from '../../shared/ui/icons'
 import { escapeHtml } from '../../shared/ui/dom'
+import { SKYBOX_PRESETS } from '../../shared/rendering/settings'
 
 export const materialCube = `<svg class="material-cube" viewBox="0 0 64 64" aria-hidden="true"><path class="preview-top" d="m32 8 23 13-23 13L9 21 32 8Z"/><path class="preview-left" d="M9 21l23 13v26L9 47V21Z"/><path class="preview-right" d="m32 34 23-13v26L32 60V34Z"/></svg>`
 
@@ -203,10 +204,12 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
             ${([['tiltShiftStrength', 'Blur strength', 0.5], ['tiltShiftFocus', 'Focus position', 0.5], ['tiltShiftWidth', 'Sharp band width', 0.3]] as const).map(([key, label, value]) => `<label class="range-row"><span>${label}<output id="${key}-output" for="${key}">${Math.round(value * 100)}%</output></span><input id="${key}" aria-label="${label}" aria-describedby="tilt-shift-band-help" type="range" min="0" max="1" value="${value}" step="0.01"></label>`).join('')}
             <p id="tilt-shift-band-help" class="panel-note">Focus runs from 0% at the top to 100% at the bottom. Sharp band width is a percentage of image height.</p>
           </div>
-          <label class="color-row"><span>Backdrop</span><input id="background" type="color"></label>
+          <label class="select-row"><span>Skybox</span><select id="skybox">${Object.entries(SKYBOX_PRESETS).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}</select></label>
+          <label class="color-row"><span id="background-label">Backdrop</span><input id="background" type="color"></label>
           <label class="range-row"><span>Ambient <output id="ambient-output">1.2</output></span><input id="ambient" aria-label="Ambient light" type="range" min="0" max="3" value="1.2" step="0.1"></label>
           <label class="range-row"><span>Key light <output id="light-output">2.4</output></span><input id="light" aria-label="Key light" type="range" min="0" max="5" value="2.4" step="0.1"></label>
           <label class="range-row"><span>Light angle <output id="azimuth-output">42°</output></span><input id="azimuth" aria-label="Light angle" type="range" min="-180" max="180" value="42" step="1"></label>
+          <p id="skybox-help" class="panel-note" hidden>Ambient scales sky lighting and reflections. Key light controls the sun or moon. Light angle rotates the sky and light.</p>
           <label class="toggle-row"><span>Ambient occlusion</span><input id="ambient-occlusion" type="checkbox"></label>
           <label class="toggle-row"><span>Ground shadows</span><input id="shadows" type="checkbox"></label>
           <label class="toggle-row"><span>Editing grid</span><input id="grid" type="checkbox"></label>

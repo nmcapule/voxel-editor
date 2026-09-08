@@ -3,6 +3,7 @@ import * as THREE from 'three'
 import { Viewport } from './viewport'
 import { DEFAULT_SETTINGS, type ViewSettings } from './settings'
 import { TiltShift } from './tilt-shift'
+import { createSkyTexture, skyColor, SKY_LIGHTING } from './sky'
 
 test('viewport teardown cancels owned work, detaches borrowed content and disposes each GPU resource once', async () => {
   const cancel = globalThis.cancelAnimationFrame, cancelled: number[] = []
@@ -13,7 +14,7 @@ test('viewport teardown cancels owned work, detaches borrowed content and dispos
   const grid = new THREE.Group(), lines = new THREE.LineSegments(new THREE.BoxGeometry(), new THREE.LineBasicMaterial())
   grid.add(lines); scene.add(grid)
   const light = new THREE.DirectionalLight()
-  const resources = { raster: 0, tiltShift: 0, renderer: 0, controls: 0, environment: 0, ambient: 0, observer: 0, canvas: 0, worker: 0, tracer: 0, grid: 0, gridMaterial: 0, borrowed: 0, detail: 0 }
+  const resources = { raster: 0, tiltShift: 0, renderer: 0, controls: 0, environment: 0, ambient: 0, sky: 0, observer: 0, canvas: 0, worker: 0, tracer: 0, grid: 0, gridMaterial: 0, borrowed: 0, detail: 0 }
   lines.geometry.addEventListener('dispose', () => { resources.grid++ })
   ;(lines.material as THREE.Material).addEventListener('dispose', () => { resources.gridMaterial++ })
   mesh.geometry.addEventListener('dispose', () => { resources.borrowed++ })
@@ -28,6 +29,7 @@ test('viewport teardown cancels owned work, detaches borrowed content and dispos
     raster: { dispose() { resources.raster++ } }, controls: { dispose() { resources.controls++ } },
     tiltShift: { dispose() { resources.tiltShift++ } },
     environmentTarget: { dispose() { resources.environment++ } }, ambientEnvironment: { dispose() { resources.ambient++ } },
+    skyTexture: { dispose() { resources.sky++ } },
     pathTracingWorker: { dispose() { resources.worker++ } }, pathTracer: { dispose() { resources.tracer++ } },
   })
   try {
@@ -40,7 +42,7 @@ test('viewport teardown cancels owned work, detaches borrowed content and dispos
     expect(cancelled.sort()).toEqual([11, 12, 13])
     finish({ dispose() { resources.detail++ } })
     await expect(preparing).rejects.toMatchObject({ name: 'AbortError' })
-    expect(resources).toEqual({ raster: 1, tiltShift: 1, renderer: 1, controls: 1, environment: 1, ambient: 1, observer: 1, canvas: 1, worker: 1, tracer: 1, grid: 1, gridMaterial: 1, borrowed: 0, detail: 1 })
+    expect(resources).toEqual({ raster: 1, tiltShift: 1, renderer: 1, controls: 1, environment: 1, ambient: 1, sky: 1, observer: 1, canvas: 1, worker: 1, tracer: 1, grid: 1, gridMaterial: 1, borrowed: 0, detail: 1 })
     expect(probe.pathTracer).toBeUndefined()
     expect(probe.content).toBeUndefined()
     await expect(probe.capture()).rejects.toThrow('disposed')
@@ -262,17 +264,21 @@ test('capture rejects tracer and effect failures while restoring pause and keepi
 test('exact full-scene capture filters the raster snapshot then restores and filters the accumulated trace paused', async () => {
   const { probe, calls, pathTracer } = photoProbe()
   const geometry = new THREE.BoxGeometry(), environment = new THREE.Texture(), savedEnvironment = new THREE.Texture()
-  const material = new THREE.MeshStandardMaterial({ envMap: savedEnvironment })
+  const material = new THREE.MeshStandardMaterial({ envMap: savedEnvironment, envMapIntensity: 0.7, envMapRotation: new THREE.Euler(0, 0.3, 0) })
   const full = new THREE.Group(), parent = new THREE.Scene(), root = probe.sceneContent.root
   full.add(new THREE.Mesh(geometry, material)); parent.add(full); probe.scene.add(root)
   probe.sceneContent.stage = 'world'
   probe.sceneContent.prepareFullDetail = async () => ({ root: full, scope: 'full-scene', triangles: 14, peakBytes: 1024, dispose() {} })
   probe.environmentTarget = { texture: environment }
+  probe.settings.skybox = 'sunset'
+  probe.scene.environmentRotation.y = -0.8
   probe.raster.render = () => {
     calls.push('raster')
     expect(root.visible).toBe(false)
     expect(full.parent).toBe(probe.scene)
     expect(material.envMap).toBe(environment)
+    expect(material.envMapIntensity).toBeCloseTo(probe.settings.ambient / Math.PI)
+    expect(material.envMapRotation.y).toBe(-0.8)
     expect(probe.renderer.shadowMap.enabled).toBe(true)
     expect(probe.renderer.shadowMap.needsUpdate).toBe(true)
   }
@@ -282,6 +288,8 @@ test('exact full-scene capture filters the raster snapshot then restores and fil
     expect(root.visible).toBe(true)
     expect(full.parent).toBe(parent)
     expect(material.envMap).toBe(savedEnvironment)
+    expect(material.envMapIntensity).toBe(0.7)
+    expect(material.envMapRotation.y).toBe(0.3)
   })
   try {
     await probe.capture(true)
@@ -307,4 +315,130 @@ test('exact full-scene capture filters the raster snapshot then restores and fil
     expect(pathTracer.samples).toBe(128)
     expect(pathTracer.reset).not.toHaveBeenCalled()
   } finally { probe.releaseSceneDetail(); geometry.dispose(); material.dispose(); environment.dispose(); savedEnvironment.dispose() }
+})
+
+test('procedural skies are deterministic, linear, seam-safe and oriented +Y toward the top', () => {
+  for (const preset of Object.keys(SKY_LIGHTING) as (keyof typeof SKY_LIGHTING)[]) {
+    const texture = createSkyTexture(preset), duplicate = createSkyTexture(preset)
+    try {
+      expect(texture.image.data).toEqual(duplicate.image.data)
+      expect(texture.mapping).toBe(THREE.EquirectangularReflectionMapping)
+      expect(texture.colorSpace).toBe(THREE.LinearSRGBColorSpace)
+      expect(texture.type).toBe(THREE.HalfFloatType)
+      const { width, height } = texture.image
+      const data = Float32Array.from(texture.image.data!, THREE.DataUtils.fromHalfFloat)
+      expect(data.every(value => Number.isFinite(value) && value >= 0)).toBe(true)
+      const north = skyColor(preset, new THREE.Vector3(0, 1, 0))
+      expect(data[(height - 1) * width * 4]).toBeCloseTo(north.r, 2)
+      const south = skyColor(preset, new THREE.Vector3(0, -1, 0))
+      expect(data[0]).toBeCloseTo(south.r, 2)
+      for (let y = 0; y < height; y++) for (let channel = 0; channel < 3; channel++) {
+        expect(data[y * width * 4 + channel]).toBeCloseTo(data[(y * width + width - 1) * 4 + channel], 5)
+      }
+    } finally { texture.dispose(); duplicate.dispose() }
+  }
+})
+
+test('sky changes own resources, update tracing and preserve maps on intensity/rotation changes', () => {
+  const { probe } = photoProbe()
+  const changes: string[][] = [], targets: THREE.WebGLRenderTarget[] = []
+  Object.assign(probe, {
+    render() {}, updatePathTracing(...values: string[]) { changes.push(values) },
+    createEnvironment() { const target = new THREE.WebGLRenderTarget(16, 16); targets.push(target); return target },
+    ambientEnvironment: new THREE.Texture(), ground: new THREE.Mesh(new THREE.PlaneGeometry(), new THREE.MeshStandardMaterial()),
+  })
+  probe.replaceEnvironment('solid')
+  const room = probe.environmentTarget, roomDisposed = mock()
+  room.addEventListener('dispose', roomDisposed)
+  try {
+    probe.setSettings({ ...probe.settings, skybox: 'sunset' })
+    const source = probe.skyTexture, target = probe.environmentTarget
+    const sourceDisposed = mock(), targetDisposed = mock()
+    source.addEventListener('dispose', sourceDisposed); target.addEventListener('dispose', targetDisposed)
+    expect(roomDisposed).toHaveBeenCalledTimes(1)
+    expect(probe.scene.background).toBe(source)
+    expect(probe.scene.environment).toBe(source)
+    expect(probe.hemisphere.intensity).toBe(0)
+    expect(probe.sunlight.color.getHexString()).toBe('ffb66e')
+    const direction = probe.sunlight.position.clone().sub(probe.sunlightTarget.position).normalize()
+    expect(THREE.MathUtils.radToDeg(Math.asin(direction.y))).toBeCloseTo(10)
+    expect(changes.at(-1)).toEqual(['materials', 'environment', 'lights'])
+    probe.setSettings({ ...probe.settings, ambient: 0.5, lightAzimuth: 90 })
+    expect(probe.skyTexture).toBe(source)
+    expect(probe.environmentTarget).toBe(target)
+    expect(changes.at(-1)).toEqual(['environment', 'lights'])
+    expect(probe.scene.backgroundRotation.y).toBeCloseTo(-Math.PI / 2)
+    expect(probe.ground.material.envMapIntensity).toBeCloseTo(0.5 / Math.PI)
+    expect(probe.ground.material.envMapRotation.equals(probe.scene.environmentRotation)).toBe(true)
+    const trace = probe.createTraceScene({ root: new THREE.Group() })
+    expect(trace.background).toBe(source)
+    expect(trace.environmentRotation.equals(probe.scene.environmentRotation)).toBe(true)
+    expect(trace.backgroundRotation.equals(probe.scene.backgroundRotation)).toBe(true)
+    probe.setSettings({ ...probe.settings, skybox: 'solid' })
+    expect(sourceDisposed).toHaveBeenCalledTimes(1); expect(targetDisposed).toHaveBeenCalledTimes(1)
+    expect(probe.skyTexture).toBeUndefined()
+    expect(probe.scene.environment).toBe(probe.ambientEnvironment)
+    expect(probe.scene.background).toEqual(new THREE.Color(probe.settings.background))
+    expect(probe.hemisphere.intensity).toBe(0.5)
+    expect(probe.sunlight.color.getHex()).toBe(0xffffff)
+    expect(probe.ground.material.envMapIntensity).toBe(0)
+    expect(probe.scene.environmentRotation.y).toBe(0)
+    probe.contextLost = true
+    probe.setSettings({ ...probe.settings, skybox: 'night' })
+    expect(targets).toHaveLength(3)
+    expect(probe.skyTexture.name).toBe('night')
+    probe.contextLost = false
+    probe.replaceEnvironment(probe.settings.skybox)
+    probe.setSettings(probe.settings)
+    expect(targets).toHaveLength(4)
+    expect(probe.ground.material.envMap).toBe(probe.environment)
+    probe.sceneContent.stage = 'world'
+    probe.invalidateSceneContent = mock()
+    probe.setSettings({ ...probe.settings, skybox: 'daylight' })
+    expect(probe.invalidateSceneContent).toHaveBeenCalledTimes(1)
+  } finally {
+    probe.skyTexture?.dispose(); probe.environmentTarget.dispose(); probe.ambientEnvironment.dispose()
+    probe.ground.geometry.dispose(); probe.ground.material.dispose()
+    probe.traceGround?.geometry.dispose(); probe.traceGround?.material.dispose()
+  }
+})
+
+test('orthographic raster samples the rotated sky and restores the texture on rendering failure', () => {
+  const { probe } = photoProbe()
+  probe.settings = { ...probe.settings, skybox: 'sunset', pathTracing: false }
+  probe.skyTexture = createSkyTexture('sunset')
+  probe.scene.background = probe.skyTexture
+  probe.scene.backgroundRotation.y = -Math.PI / 2
+  probe.camera = new THREE.OrthographicCamera()
+  probe.camera.lookAt(0, 0, 1)
+  const expected = skyColor('sunset', new THREE.Vector3(1, 0, 0))
+  probe.raster.render = () => {
+    expect(probe.scene.background).toBeInstanceOf(THREE.Color)
+    expect(probe.scene.background.r).toBeCloseTo(expected.r)
+    throw new Error('raster failed')
+  }
+  try {
+    expect(() => probe.renderRaster()).toThrow('raster failed')
+    expect(probe.scene.background).toBe(probe.skyTexture)
+    expect(probe.scene.backgroundRotation.y).toBe(-Math.PI / 2)
+  } finally { probe.skyTexture.dispose() }
+})
+
+test('failed sky filtering disposes the tentative texture and preserves the previous environment and settings', () => {
+  const { probe } = photoProbe()
+  const environment = new THREE.WebGLRenderTarget(16, 16), source = createSkyTexture('daylight')
+  probe.settings.skybox = 'daylight'
+  probe.skyTexture = probe.scene.background = probe.scene.environment = source
+  probe.environmentTarget = environment
+  probe.createEnvironment = () => { throw new Error('PMREM failed') }
+  const dispose = spyOn(THREE.DataTexture.prototype, 'dispose')
+  try {
+    expect(() => probe.setSettings({ ...probe.settings, skybox: 'night' })).toThrow('PMREM failed')
+    expect(dispose).toHaveBeenCalledTimes(1)
+    expect(probe.settings.skybox).toBe('daylight')
+    expect(probe.skyTexture).toBe(source)
+    expect(probe.scene.background).toBe(source)
+    expect(probe.scene.environment).toBe(source)
+    expect(probe.environmentTarget).toBe(environment)
+  } finally { dispose.mockRestore(); environment.dispose(); source.dispose() }
 })

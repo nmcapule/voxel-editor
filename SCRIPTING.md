@@ -142,6 +142,13 @@ save.flush
 
 The runtime validator in `src/editors/model/protocol.ts` is the authoritative argument schema. Destructive resize, layer deletion, project replacement, and VOX replacement require their corresponding explicit approval flag.
 
+`settings.update` and `scene.settings` accept `skybox`: `solid` (default),
+`daylight`, `overcast`, `sunset`, or `night`. Older project snapshots, local recovery,
+scene manifests, and child-model settings default a missing `skybox` to `solid`.
+Changing the preset preserves `background`, lighting, camera, and tilt-shift values.
+With a sky active, `background` is the ground color; Ambient scales sky lighting
+and reflections, Key light controls the sun or moon, and Light angle rotates both.
+
 `settings.update` accepts the saved miniature-photography fields `tiltShift`
 (boolean, default `false`), `tiltShiftStrength` (default `0.5`), `tiltShiftFocus`
 (default `0.5`), and `tiltShiftWidth` (default `0.3`). The three numbers must be

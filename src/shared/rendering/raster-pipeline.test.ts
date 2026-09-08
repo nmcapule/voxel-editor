@@ -195,6 +195,7 @@ test('physical variants retain maps, opacity, IOR and dynamic transmission unifo
     source.transmission = 0.35
     source.roughness = 0.6
     source.envMapIntensity = 0.9
+    source.envMapRotation.set(0, 0.7, 0)
     source.color.setHex(0x123456)
     source.needsUpdate = true
     h.onScene(() => {
@@ -203,6 +204,7 @@ test('physical variants retain maps, opacity, IOR and dynamic transmission unifo
       expect(material.version).toBeGreaterThan(versions.get(material)!)
       expect(material.roughness).toBe(0.6)
       expect(material.envMapIntensity).toBe(0.9)
+      expect(material.envMapRotation.equals(source.envMapRotation)).toBe(true)
       expect(material.color.getHex()).toBe(0x123456)
     })
     h.pipeline.render(new THREE.OrthographicCamera())

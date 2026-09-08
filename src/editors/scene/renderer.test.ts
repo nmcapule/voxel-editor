@@ -6,7 +6,7 @@ import { coarse8, meshSceneChunk, sceneLod, type SceneLod, type SceneMeshJob } f
 import { SceneRenderer, expandSceneDetail, sceneDetailBudget, sceneGroupTransform, sceneInstanceMatrix, traceSceneChunk } from './renderer'
 import { VoxelRenderer } from '../model/renderer'
 import { Viewport } from '../../shared/rendering/viewport'
-import { sceneShadowVolume } from '../../shared/rendering/stage'
+import { realtimeEnvironmentIntensity, sceneShadowVolume } from '../../shared/rendering/stage'
 import { createScene, SceneDocument } from './document'
 import { encodeProjectSnapshot } from '../../shared/voxel/snapshot'
 import { DEFAULT_SETTINGS } from '../../shared/rendering/settings'
@@ -19,7 +19,7 @@ const defaultSettings = { ...DEFAULT_SETTINGS, pathTracing: false }
 function rendererProbe(document: SceneDocument) {
   const camera = new THREE.OrthographicCamera(-1000, 1000, 1000, -1000, 0.1, 10000)
   camera.position.set(0, 400, 1000); camera.lookAt(0, 0, 0); camera.updateMatrixWorld()
-  const viewport = { camera, canvas: { clientHeight: 800, width: 800, height: 600 }, renderer: { shadowMap: {} }, shadows: true, environment: new THREE.Texture(),
+  const viewport = { camera, scene: new THREE.Scene(), canvas: { clientHeight: 800, width: 800, height: 600 }, renderer: { shadowMap: {} }, shadows: true, environment: new THREE.Texture(),
     shadowMatrix: new THREE.Matrix4().makeRotationX(Math.PI / 2), groundY: undefined as number | undefined }
   return Object.assign(Object.create(SceneRenderer.prototype), {
     document, active: true, disposed: false, clock: 0, generation: 0, pickGeneration: 0, pressureLod: 1, uploadBytes: 0,
@@ -28,6 +28,7 @@ function rendererProbe(document: SceneDocument) {
     bounds: new THREE.Box3(), queue: [], geometryBytes: 0, matrixBytes: 0, transientBytes: 0, detailReservationBytes: 0, detailGeometryBytes: 0,
     diagnostics: { meshJobs: 0, chunkReads: 0, uploads: 0, staleResults: 0, matrixUpdates: 0 },
     host: { getSceneViewport: () => viewport, getSceneShadowVolume: (receivers: THREE.Box3[], bounds: THREE.Box3) => sceneShadowVolume(viewport.camera, bounds, receivers, viewport.shadowMatrix, viewport.groundY),
+      applyEnvironment(material: THREE.MeshStandardMaterial) { Viewport.prototype.applyEnvironment.call({ environment: viewport.environment, scene: viewport.scene, settings: document.data.settings } as Viewport, material) },
       setSceneContent() {}, setSettings() {}, invalidateSceneContent() {}, setSceneInteraction() {} },
     callbacks: { onError(message: string) { throw new Error(message) }, onStats() {} }, updateGizmo() {}, schedule() {},
   })
@@ -283,6 +284,92 @@ test('editing one of three distant chunks only meshes that chunk; RGB/PBR update
   }
 })
 
+test('scene skies rebind cached, refreshed and streamed materials and restore context without remeshing', () => {
+  const model = new VoxelDocument({ x: 80, y: 16, z: 16 })
+  model.setVoxel(0, 0, 0, 1); model.setVoxel(64, 0, 0, 2)
+  const { chunks: _chunks, ...header } = encodeProjectSnapshot(model, { ...defaultSettings, skybox: 'sunset', ambient: 3 })
+  const chunks = [...model.chunks].map(([id, layers], i) => describeSceneChunk(id, 1, layers.get(1)!, 'ab'[i].repeat(64))!)
+  const asset: SceneAsset = { id: 'sky', revision: 0, model: header, chunks, pivot: { x: 0, y: 0, z: 0 }, voxelCount: 2,
+    bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 65, y: 1, z: 1 } } }
+  const doc = new SceneDocument(createScene(defaultSettings))
+  doc.execute({ type: 'asset.add', asset }); doc.execute({ type: 'instance.place', assetId: asset.id, position: { x: 0, y: 0, z: 0 } }); doc.execute({ type: 'selection.set', ids: [] })
+  const canvas = Object.assign(new EventTarget(), { clientHeight: 800, width: 800, height: 600, style: {} })
+  const camera = new THREE.OrthographicCamera(-1000, 1000, 1000, -1000, 0.1, 10000)
+  camera.position.set(0, 400, 1000); camera.lookAt(0, 0, 0); camera.updateMatrixWorld()
+  const environments = [new THREE.Texture()]
+  const host = Object.assign(Object.create(Viewport.prototype), {
+    camera, scene: new THREE.Scene(), settings: doc.data.settings, renderMode: false,
+    renderer: { domElement: canvas, shadowMap: {} }, controls: { enabled: true, touches: {} }, environmentTarget: { texture: environments[0] },
+    render() {}, getView() { return {} }, frameSceneBounds() {}, getSceneShadowVolume() {}, invalidateSceneContent() {}, setSceneInteraction() {},
+    setSceneContent(content: unknown) { Reflect.set(this, 'sceneContent', content); Reflect.get(this, 'sceneContent')?.onViewportChange() },
+    setSettings(settings: unknown) { Reflect.set(this, 'settings', settings); Reflect.get(this, 'sceneContent')?.onViewportChange() },
+    setRenderMode(enabled: boolean) { this.renderMode = enabled; Reflect.get(this, 'sceneContent')?.onViewportChange() },
+  })
+  const renderer = new SceneRenderer(host, doc, {
+    onSelect() {}, onPlace() {}, onTransform() {}, onLayer() {}, onStats() {}, onError(message) { throw new Error(message) },
+  })
+  const schedule = spyOn(renderer as any, 'schedule').mockImplementation(() => {})
+  const probe = renderer as any
+  const upload = (id: number, color: number) => {
+    const demand = [...probe.desired.values()].find((d: any) => d.id === id) as any
+    const input = job(8); input.chunks[0].voxels.fill(color)
+    probe.busy = demand; probe.completed = { key: demand.key, generation: probe.generation, mesh: meshSceneChunk(input) }
+    probe.uploadBytes = 0; probe.upload(); probe.reconcile()
+  }
+  const expectBound = () => {
+    for (const { material } of probe.materials.values()) {
+      expect(material.envMap).toBe(host.environment)
+      expect(material.envMapIntensity).toBe(host.settings.skybox === 'solid' ? realtimeEnvironmentIntensity(material.metalness) : host.settings.ambient / Math.PI)
+      expect(material.envMapRotation.equals(host.scene.environmentRotation)).toBe(true)
+    }
+  }
+  try {
+    renderer.setActive(true); probe.reconcile(); upload(0, 1); expectBound()
+    probe.clearBatches()
+    renderer.refresh(doc.execute({ type: 'scene.settings', patch: { skybox: 'daylight', ambient: 0.6 } }))
+    expectBound()
+    upload(4, 2); expectBound()
+    expect(probe.materials.size).toBe(2)
+    const surfaces = [...probe.surfaces.values()], batches = [...probe.batches.values()]
+    const geometry = surfaces.map((surface: any) => surface.parts[0].geometry), diagnostics = { ...renderer.diagnostics }
+    const unchangedGeometry = () => {
+      probe.reconcile()
+      expect(probe.queue).toHaveLength(0)
+      expect([...probe.surfaces.values()]).toEqual(surfaces)
+      expect([...probe.batches.values()]).toEqual(batches)
+      expect(surfaces.map((surface: any) => surface.parts[0].geometry)).toEqual(geometry)
+      expect(renderer.diagnostics).toEqual(diagnostics)
+    }
+    for (const skybox of ['overcast', 'sunset', 'night', 'solid'] as const) {
+      environments.push(new THREE.Texture()); host.environmentTarget.texture = environments.at(-1)
+      renderer.refresh(doc.execute({ type: 'scene.settings', patch: { skybox } }))
+      expectBound(); unchangedGeometry()
+      const versions = [...probe.materials.values()].map(({ material }: any) => material.version)
+      host.content.onViewportChange()
+      expect([...probe.materials.values()].map(({ material }: any) => material.version)).toEqual(versions)
+    }
+    renderer.refresh(doc.execute({ type: 'scene.settings', patch: { skybox: 'night' } }))
+    const material = probe.materials.get('sky:1').material as THREE.MeshPhysicalMaterial
+    const version = material.version
+    renderer.refresh(doc.execute({ type: 'scene.settings', patch: { ambient: 0.2 } }))
+    expectBound(); unchangedGeometry()
+    expect(material.version).toBeGreaterThan(version)
+    const ambientVersion = material.version
+    host.scene.environmentRotation.y = 1.1
+    host.content.onViewportChange(); expectBound(); unchangedGeometry()
+    expect(material.version).toBeGreaterThan(ambientVersion)
+    const current = doc.data.assets[0]
+    renderer.refresh(doc.execute({ type: 'asset.update', asset: { ...current, revision: 1,
+      model: { ...current.model, materials: current.model.materials.map(m => ({ ...m, metalness: 0.8 })) } } }))
+    expect(material.metalness).toBe(0.8)
+    expectBound(); unchangedGeometry()
+    environments.push(new THREE.Texture()); host.environmentTarget.texture = environments.at(-1)
+    host.scene.environmentRotation.y = -0.4
+    canvas.dispatchEvent(new Event('webglcontextrestored'))
+    expectBound(); unchangedGeometry()
+  } finally { renderer.dispose(); schedule.mockRestore(); environments.forEach(environment => environment.dispose()) }
+})
+
 test('mesh fingerprints include six neighbors, visible layer ownership and only used transparency classes', () => {
   const model = new VoxelDocument({ x: 160, y: 16, z: 16 }); model.setVoxel(15, 0, 0, 1); model.setVoxel(16, 0, 0, 1); model.setVoxel(128, 0, 0, 2)
   const { chunks: _chunks, ...header } = encodeProjectSnapshot(model, defaultSettings)
@@ -302,7 +389,8 @@ test('mesh fingerprints include six neighbors, visible layer ownership and only 
 
 test('expanded full detail includes distant contributors, uses independent materials and ordinary traceable meshes', async () => {
   const { PathTracingSceneGenerator } = await import('three-gpu-pathtracer/src/index.js')
-  const geometry = new THREE.BoxGeometry(1, 1, 1), material = new THREE.MeshPhysicalMaterial({ color: 0xabcdef })
+  const environment = new THREE.Texture()
+  const geometry = new THREE.BoxGeometry(1, 1, 1), material = new THREE.MeshPhysicalMaterial({ color: 0xabcdef, envMap: environment })
   const detail = expandSceneDetail([{ geometry, material, matrix: new THREE.Matrix4() }, { geometry, material, matrix: new THREE.Matrix4().makeTranslation(8000, 10, 0) }], 320 * 240)
   const generator = new PathTracingSceneGenerator(detail.root)
   try {
@@ -311,13 +399,15 @@ test('expanded full detail includes distant contributors, uses independent mater
     const mesh = detail.root.children[0] as THREE.Mesh
     expect((mesh as THREE.InstancedMesh).isInstancedMesh).toBeUndefined()
     expect(mesh.material).not.toBe(material)
+    expect((mesh.material as THREE.MeshPhysicalMaterial).envMap).toBeNull()
+    expect(material.envMap).toBe(environment)
     expect(mesh.geometry.boundingBox!.max.x).toBe(8000.5)
     expect(mesh.geometry.getAttribute('position').count).toBe(72)
     expect(generator.generate().geometry.getAttribute('position').count).toBe(72)
     material.color.setHex(0xff0000)
     expect((mesh.material as THREE.MeshPhysicalMaterial).color.getHex()).toBe(0xabcdef)
     expect(detail.peakBytes).toBeLessThan(96 * 1024 * 1024)
-  } finally { generator.dispose(); detail.dispose(); detail.dispose(); geometry.dispose(); material.dispose() }
+  } finally { generator.dispose(); detail.dispose(); detail.dispose(); geometry.dispose(); material.dispose(); environment.dispose() }
 })
 
 test('full-detail preflight enforces triangle, 16-bit material and peak-memory limits before expansion', () => {

@@ -4,11 +4,46 @@ import { inspectionViews } from './inspection'
 import { PROTOCOL, SerialCommandQueue, parseRequest } from './protocol'
 import { decodeProjectSnapshot, encodeProjectSnapshot, parseProjectSnapshot } from '../../shared/voxel/snapshot'
 import { restoreProjectSnapshot, snapshotProject } from './storage'
-import { DEFAULT_SETTINGS } from '../../shared/rendering/settings'
+import { DEFAULT_SETTINGS, SKYBOX_PRESETS, type SkyboxPreset } from '../../shared/rendering/settings'
 
 const settings = { ...DEFAULT_SETTINGS }
 
 describe('scripting protocol', () => {
+  test('skybox settings accept only preset keys at command and persistence boundaries', () => {
+    expect(SKYBOX_PRESETS).toEqual({ solid: 'Solid color', daylight: 'Daylight', overcast: 'Overcast', sunset: 'Sunset', night: 'Night' })
+    const parse = (skybox: unknown) => parseRequest({ protocol: PROTOCOL, id: 'skybox', command: { type: 'settings.update', patch: { skybox } } }).command
+    for (const skybox of Object.keys(SKYBOX_PRESETS) as SkyboxPreset[]) expect(parse(skybox)).toEqual({ type: 'settings.update', patch: { skybox } })
+    const document = new VoxelDocument(), snapshot = encodeProjectSnapshot(document, settings), stored = snapshotProject(document, settings)
+    for (const skybox of [null, false, 0, NaN, '', 'Daylight', 'daylight ', 'unknown', 'toString', '__proto__', [], {}]) {
+      expect(() => parse(skybox)).toThrow('command.patch.skybox must be one of')
+      expect(() => parseProjectSnapshot({ ...snapshot, settings: { ...settings, skybox } })).toThrow('skybox')
+      expect(() => restoreProjectSnapshot({ ...stored, settings: { ...settings, skybox } } as typeof stored)).toThrow('skybox')
+    }
+    expect(() => parse(undefined)).toThrow('must change at least one setting')
+  })
+
+  test('skybox presets and legacy solid defaults round-trip without resetting model settings', () => {
+    expect(DEFAULT_SETTINGS.skybox).toBe('solid')
+    const document = new VoxelDocument()
+    document.setVoxel(1, 2, 3, 5)
+    for (const skybox of ['solid', 'daylight', 'overcast', 'sunset', 'night', undefined] as const) {
+      const expected = { ...settings, skybox: skybox ?? 'solid', background: '#243648', ambient: 0.7, light: 3.1, lightAzimuth: -72, tiltShift: true, tiltShiftStrength: 0.8, tiltShiftFocus: 0.3, tiltShiftWidth: 0.1 }
+      const snapshot = encodeProjectSnapshot(document, expected), stored = snapshotProject(document, expected)
+      if (skybox === undefined) {
+        Reflect.deleteProperty(snapshot.settings, 'skybox')
+        Reflect.deleteProperty(stored.settings, 'skybox')
+      }
+      const decoded = decodeProjectSnapshot(JSON.parse(JSON.stringify(snapshot)))
+      expect(decoded.settings).toEqual(expected)
+      expect(encodeProjectSnapshot(decoded.document, decoded.settings)).toEqual({ ...snapshot, settings: expected })
+      for (const version of [1, 2, 3] as const) {
+        const recovered = restoreProjectSnapshot(structuredClone({ ...stored, version }))!
+        expect(recovered.settings).toEqual(expected)
+        expect(snapshotProject(recovered.document, recovered.settings)).toEqual({ ...stored, settings: expected })
+      }
+    }
+  })
+
   test('miniature photography patches accept only booleans and finite fractions', () => {
     const parse = (patch: unknown) => parseRequest({ protocol: PROTOCOL, id: 'miniature', command: { type: 'settings.update', patch } }).command
     for (const value of [false, true]) expect(parse({ tiltShift: value })).toEqual({ type: 'settings.update', patch: { tiltShift: value } })

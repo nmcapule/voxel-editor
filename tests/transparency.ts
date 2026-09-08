@@ -7,6 +7,7 @@ import { inspectionViews, type InspectionView } from '../src/editors/model/inspe
 import { VoxelRenderer, type RendererCallbacks } from '../src/editors/model/renderer'
 import { DEFAULT_SETTINGS, type ViewSettings } from '../src/shared/rendering/settings'
 import { runRenderingChecks, runRendererStateChecks, runPathTracingChecks, runTiltShiftChecks } from './rendering'
+import { runSkyboxChecks } from './skybox'
 
 const host = document.createElement('div')
 host.style.cssText = 'width:100vw;height:100vh'
@@ -240,6 +241,7 @@ Object.assign(window, { transparencyTest: {
   runRendererStateChecks: () => runRendererStateChecks(renderer),
   runPathTracingChecks: (samples = 16) => runPathTracingChecks(renderer, settings, errors, samples),
   runTiltShiftChecks: () => runTiltShiftChecks(renderer, settings, errors),
+  runSkyboxChecks: (samples = 8) => runSkyboxChecks(renderer, settings, errors, samples),
   get status() { return status },
 } })
 await scene('pool')

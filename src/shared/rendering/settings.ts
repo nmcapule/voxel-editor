@@ -1,6 +1,17 @@
 import { record, invalid, stringValue, numberValue, booleanValue, oneOf } from '../validation'
 
+export const SKYBOX_PRESETS = {
+  solid: 'Solid color',
+  daylight: 'Daylight',
+  overcast: 'Overcast',
+  sunset: 'Sunset',
+  night: 'Night',
+} as const
+
+export type SkyboxPreset = keyof typeof SKYBOX_PRESETS
+
 export interface ViewSettings {
+  skybox: SkyboxPreset
   background: string
   ambient: number
   light: number
@@ -20,7 +31,7 @@ export interface ViewSettings {
 }
 
 export const DEFAULT_SETTINGS: ViewSettings = {
-  background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42,
+  skybox: 'solid', background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42,
   ambientOcclusion: true, shadows: true, grid: true, faceGrid: false,
   meshVertices: false, meshTriangles: false, projection: 'orthographic', pathTracing: true,
   tiltShift: false, tiltShiftStrength: 0.5, tiltShiftFocus: 0.5, tiltShiftWidth: 0.3,
@@ -31,6 +42,7 @@ export function settingsPatch(value: unknown): Partial<ViewSettings> {
   const patch: Partial<ViewSettings> = {}
   const allowed = new Set(Object.keys(DEFAULT_SETTINGS))
   for (const key of Object.keys(input)) if (!allowed.has(key)) throw invalid(`Unknown setting: ${key}.`)
+  if (input.skybox !== undefined) patch.skybox = oneOf(input.skybox, 'command.patch.skybox', Object.keys(SKYBOX_PRESETS) as SkyboxPreset[])
   if (input.background !== undefined) {
     const background = stringValue(input.background, 'command.patch.background', 7)
     if (!/^#[0-9a-f]{6}$/i.test(background)) throw invalid('command.patch.background must be a six-digit hex color.')

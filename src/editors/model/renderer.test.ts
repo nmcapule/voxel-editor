@@ -1,10 +1,11 @@
 import { expect, spyOn, test } from 'bun:test'
-import { Color, Group, LineBasicMaterial, LineSegments, Mesh, MeshPhysicalMaterial, OrthographicCamera, PerspectiveCamera, Points, PointsMaterial, Raycaster, Texture, TextureLoader, Vector2, Vector3 } from 'three'
+import { Color, Group, LineBasicMaterial, LineSegments, Mesh, MeshPhysicalMaterial, OrthographicCamera, PerspectiveCamera, Points, PointsMaterial, Raycaster, Scene, Texture, TextureLoader, Vector2, Vector3 } from 'three'
 import { PathTracingSceneGenerator } from 'three-gpu-pathtracer/src/index.js'
 import { VoxelDocument, chunkId } from '../../shared/voxel/document'
 import { VoxelRenderer, traceGridRay, type RendererCallbacks } from './renderer'
 import { Viewport } from '../../shared/rendering/viewport'
 import { DEFAULT_SETTINGS } from '../../shared/rendering/settings'
+import { realtimeEnvironmentIntensity } from '../../shared/rendering/stage'
 import { meshChunk } from '../../shared/voxel/mesher'
 
 test('inside-solid rays never expose an invalid action normal', () => {
@@ -91,7 +92,7 @@ test('progressive raster previews suppress maps and preserve pending updates and
     if (fail) throw new Error('draw failed')
   } }
   const probe = Object.assign(Object.create(Viewport.prototype), {
-    renderer: { shadowMap }, sunlight, raster, settings: { pathTracing: true, shadows: true }, renderMode: true,
+    renderer: { shadowMap }, scene: new Scene(), sunlight, raster, settings: { pathTracing: true, shadows: true }, renderMode: true,
     sceneContent: { stage: 'bounded' },
     recordFrame() { frames++ },
   })
@@ -300,7 +301,7 @@ test('a model borrows one viewport, removes input hooks and jobs on unmount, and
   const settings = { ...DEFAULT_SETTINGS, pathTracing: false }
   const view = { projection: 'orthographic' as const, position: { x: 4, y: 8, z: 12 }, target: { x: 0, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, orthographicSpan: 24, viewport: { width: 320, height: 240 } }
   const viewport = Object.assign(Object.create(Viewport.prototype), {
-    renderer: { domElement: canvas, shadowMap: {} }, settings, renderMode: false,
+    renderer: { domElement: canvas, shadowMap: {} }, scene: new Scene(), settings, renderMode: false,
     environmentTarget: { texture: new Texture() }, frameLocalBounds() {},
     getView: () => structuredClone(view), setView(value: unknown) { Reflect.set(this, 'savedView', value) },
     setSceneContent(content: any) { Reflect.set(this, 'sceneContent', content); content?.onViewportChange() },
@@ -318,6 +319,7 @@ test('a model borrows one viewport, removes input hooks and jobs on unmount, and
   const worker = Reflect.get(model, 'worker') as Worker
   const late = worker.onmessage!
   const materials = Reflect.get(model, 'materials') as MeshPhysicalMaterial[]
+  const restoredEnvironment = new Texture()
   materials.forEach(material => material.addEventListener('dispose', () => { materialDisposals++ }))
   try {
     expect(model.viewport).toBe(viewport)
@@ -333,10 +335,18 @@ test('a model borrows one viewport, removes input hooks and jobs on unmount, and
     late.call(worker, { data: { type: 'ready' } } as MessageEvent)
     expect(Reflect.get(model, 'workerReady')).toBe(false)
     expect(model.meshState().pending).toBe(0)
+    viewport.environment.dispose()
+    viewport.environmentTarget.texture = restoredEnvironment
+    viewport.scene.environmentRotation.y = 0.7
     model.setActive(true)
     expect(Reflect.get(model, 'worker')).not.toBe(worker)
     expect(viewport.savedView).toEqual(view)
     expect(viewport.renderMode).toBe(true)
+    for (const material of materials) {
+      expect(material.envMap).toBe(restoredEnvironment)
+      expect(material.envMapIntensity).toBe(realtimeEnvironmentIntensity(material.metalness))
+      expect(material.envMapRotation.equals(viewport.scene.environmentRotation)).toBe(true)
+    }
     canvas.dispatchEvent(new Event('pointerleave'))
     expect(hovers).toBe(2)
     model.dispose(); model.dispose()
@@ -348,6 +358,81 @@ test('a model borrows one viewport, removes input hooks and jobs on unmount, and
   } finally { model.dispose(); viewport.environment.dispose() }
 })
 
+test('model material creation, property refreshes and viewport sync bind the current sky without remeshing', async () => {
+  const document = new VoxelDocument(); document.setVoxel(0, 0, 0, 1)
+  const settings = { ...DEFAULT_SETTINGS, skybox: 'daylight' as const, ambient: 1.8 }
+  const environments = [new Texture()]
+  const viewport = Object.assign(Object.create(Viewport.prototype), {
+    settings, scene: new Scene(), environmentTarget: { texture: environments[0] }, renderMode: false,
+    renderer: { capabilities: { getMaxAnisotropy: () => 1 } }, render() {}, updatePathTracing() {},
+  })
+  viewport.scene.environmentRotation.set(0, 0.4, 0)
+  const faceGridMaterial = new LineBasicMaterial(), meshVerticesMaterial = new PointsMaterial()
+  const probe = Object.assign(Object.create(VoxelRenderer.prototype), {
+    document, viewport, settings, modelRenderMode: false, modelSuspended: false, tool: 'select',
+    faceGridMaterial, meshVerticesMaterial, meshTrianglesMaterial: faceGridMaterial,
+    chunkMeshes: new Map(), textureLoads: new Map(), hover: new Group(),
+    cancelPaint() {}, cancelPushPull() {}, cancelMarquee() {},
+    markDirty() { throw new Error('Environment and non-topology material changes must not remesh') },
+  })
+  const texture = new Texture<HTMLImageElement>()
+  probe.materials = probe.createMaterials()
+  const materials = probe.materials as MeshPhysicalMaterial[], material = materials[1]
+  const surface = probe.createSurface(meshChunk(document.paddedChunk(0))) as Group
+  probe.chunkMeshes.set(0, surface)
+  const mesh = surface.children.find(child => child instanceof Mesh)!, geometry = mesh.geometry
+  const expectBound = () => {
+    for (const material of materials) {
+      expect(material.envMap).toBe(viewport.environment)
+      expect(material.envMapIntensity).toBe(viewport.settings.skybox === 'solid' ? realtimeEnvironmentIntensity(material.metalness) : viewport.settings.ambient / Math.PI)
+      expect(material.envMapRotation.equals(viewport.scene.environmentRotation)).toBe(true)
+    }
+    expect(probe.chunkMeshes.get(0)).toBe(surface)
+    expect(mesh.geometry).toBe(geometry)
+  }
+  const load = spyOn(TextureLoader.prototype, 'loadAsync').mockResolvedValue(texture)
+  try {
+    expectBound()
+    for (const skybox of ['solid', 'daylight', 'overcast', 'sunset', 'night', 'solid'] as const) {
+      viewport.settings = { ...viewport.settings, skybox }
+      environments.push(new Texture())
+      viewport.environmentTarget.texture = environments.at(-1)
+      const version = material.version
+      probe.syncViewport(); expectBound()
+      expect(material.version).toBeGreaterThan(version)
+      const syncedVersion = material.version
+      probe.syncViewport()
+      expect(material.version).toBe(syncedVersion)
+      document.materials[1].metalness = material.metalness === 0.8 ? 0.2 : 0.8
+      probe.updatePaletteMaterial(1); expectBound()
+    }
+    viewport.settings = { ...viewport.settings, skybox: 'night' }
+    probe.syncViewport()
+    const version = material.version
+    viewport.settings = { ...viewport.settings, ambient: 0.3 }
+    probe.syncViewport(); expectBound()
+    expect(material.version).toBeGreaterThan(version)
+    const ambientVersion = material.version
+    viewport.scene.environmentRotation.y += 0.5
+    probe.syncViewport(); expectBound()
+    expect(material.version).toBeGreaterThan(ambientVersion)
+
+    material.envMap = null
+    probe.updatePalette(); expectBound()
+    material.envMap = null
+    await probe.setPbrMap(1, 'metalnessMap', new Blob()); expectBound()
+    expect(material.metalnessMap).toBe(texture)
+    material.envMap = null
+    probe.clearPbrMaps(1); expectBound()
+    expect(material.metalnessMap).toBeNull()
+  } finally {
+    load.mockRestore(); probe.disposeMaterials()
+    surface.traverse(child => { if (child instanceof Mesh || child instanceof Points) child.geometry.dispose() })
+    faceGridMaterial.dispose(); meshVerticesMaterial.dispose(); texture.dispose()
+    environments.forEach(environment => environment.dispose())
+  }
+})
+
 test('late texture loads cannot attach to a replaced material or overwrite a newer map request', async () => {
   const material = new MeshPhysicalMaterial(), first = new Texture<HTMLImageElement>(), second = new Texture<HTMLImageElement>()
   let disposed = 0
@@ -356,7 +441,7 @@ test('late texture loads cannot attach to a replaced material or overwrite a new
   const load = spyOn(TextureLoader.prototype, 'loadAsync').mockImplementation(() => new Promise(resolve => completions.push(resolve)))
   const probe = Object.assign(Object.create(VoxelRenderer.prototype), {
     materials: [material], textureLoads: new Map(), modelSuspended: true,
-    viewport: { renderer: { capabilities: { getMaxAnisotropy: () => 1 } }, render() {},
+    viewport: { renderer: { capabilities: { getMaxAnisotropy: () => 1 } }, render() {}, applyEnvironment() {},
       updatePathTracing() { throw new Error('Inactive material edits must not reset scene tracing') } },
   })
   try {

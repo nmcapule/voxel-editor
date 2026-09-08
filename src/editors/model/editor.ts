@@ -703,6 +703,9 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
 
   function renderSettings() {
     app.querySelector<HTMLSelectElement>('#projection')!.value = settings.projection
+    app.querySelector<HTMLSelectElement>('#skybox')!.value = settings.skybox
+    app.querySelector('#background-label')!.textContent = settings.skybox === 'solid' ? 'Backdrop' : 'Ground color'
+    app.querySelector<HTMLElement>('#skybox-help')!.hidden = settings.skybox === 'solid'
     app.querySelector<HTMLInputElement>('#background')!.value = settings.background
     app.querySelector<HTMLInputElement>('#ambient')!.value = String(settings.ambient)
     app.querySelector<HTMLInputElement>('#light')!.value = String(settings.light)
@@ -1253,6 +1256,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     const target = event.target as HTMLInputElement | HTMLSelectElement
     const patch: Partial<ViewSettings> = {}
     if (target.id === 'projection') patch.projection = target.value as ViewSettings['projection']
+    if (target.id === 'skybox') patch.skybox = target.value as ViewSettings['skybox']
     if (target.id === 'background') patch.background = target.value
     if (target.id === 'ambient') patch.ambient = Number(target.value)
     if (target.id === 'light') patch.light = Number(target.value)

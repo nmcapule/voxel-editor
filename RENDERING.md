@@ -51,6 +51,21 @@ composited linear background, preserving material maps, transmission and roughne
 Source materials and scene visibility are restored before returning, including failures.
 Inspection uses its own offscreen pipeline without changing the live camera or canvas.
 
+Skybox presets generate a 256x128 linear equirectangular texture for the background
+and traced environment, with a 64-pixel-face PMREM for realtime materials. Ambient
+scales sky illumination and reflections; the hemisphere is disabled in sky mode.
+Preset sun/moon color, elevation and strength combine with the existing Key light
+and Light angle controls. The latter rotates the background, environment and key
+together without regenerating textures. Solid color retains the original room and
+hemisphere lighting. The viewport owns and replaces both sky resources on preset
+changes; model, scene and capture materials only borrow them. Context loss releases
+GPU handles before restoration rebuilds PMREM and reuploads the retained CPU sky.
+Orthographic raster backgrounds sample the parallel viewing direction, matching
+tracing instead of Three's small unit sky cube. Perspective cameras show the panorama.
+Both PNG capture qualities include the selected sky; VOX and CPU library thumbnails
+remain unchanged. Run `transparencyTest.runSkyboxChecks()` in the browser harness for
+preset, material, projection, capture and context-recovery regressions.
+
 Miniature photography is an optional Render-mode finishing effect shared by raster and
 PBR, including low-resolution previews and PNG captures. `tilt-shift.ts` copies the
 completed canvas on the GPU and applies two nine-tap blur passes outside a horizontal

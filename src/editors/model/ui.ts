@@ -232,6 +232,8 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
           <label class="toggle-row"><span>Voxel face grid</span><input id="face-grid" type="checkbox"></label>
           <label class="toggle-row" title="Show the merged mesh's vertices in edit mode"><span>Mesh vertices</span><input id="mesh-vertices" type="checkbox"></label>
           <label class="toggle-row" title="Show the merged mesh's triangle edges in edit mode"><span>Mesh triangles</span><input id="mesh-triangles" type="checkbox"></label>
+          <label class="toggle-row"><span>Performance monitor</span><input type="checkbox" data-performance-monitor aria-describedby="model-performance-help"></label>
+          <p id="model-performance-help" class="panel-note">FPS, main-thread render time, and JS heap where available. Remembered in this browser; not included in PNG captures.</p>
           <button type="button" class="primary full" data-action="capture">${icon('camera')} Capture PNG</button>
         </section>
       </aside>

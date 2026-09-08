@@ -83,6 +83,7 @@ export class Viewport {
   readonly scene = new THREE.Scene()
   camera: THREE.OrthographicCamera | THREE.PerspectiveCamera
   controls: OrbitControls
+  performanceMonitor?: { onFps(fps?: number): void; onRender(milliseconds: number): void }
   private raster: RasterPipeline
   private rasterFrame?: number
   private rasterInteractions = new Set<'controls' | 'focus' | 'model' | 'scene'>()
@@ -332,7 +333,9 @@ export class Viewport {
       if (!this.pathTracer || !this.pathTracingEnabled() || !this.pathTracingReady) return
       try {
         const previousSamples = Math.floor(this.pathTracer.samples)
+        const monitor = this.performanceMonitor, started = monitor ? performance.now() : 0
         this.renderPathTrace()
+        monitor?.onRender(performance.now() - started)
         const samples = Math.floor(this.pathTracer.samples)
         if (this.pathTracer.samples > 0) this.presentationDirty = false
         if (samples > previousSamples) this.recordFrame(samples - previousSamples)
@@ -869,6 +872,7 @@ export class Viewport {
     this.fpsFrames = 0
     this.fpsStarted = performance.now()
     this.callbacks.onFps?.()
+    this.performanceMonitor?.onFps()
   }
 
   private recordFrame(frames = 1) {
@@ -876,17 +880,15 @@ export class Viewport {
     this.fpsFrames += frames
     const elapsed = now - this.fpsStarted
     if (elapsed < 500) return
-    const fps = this.fpsFrames * 1000 / elapsed
-    this.callbacks.onFps?.(fps >= 10 ? Math.round(fps) : Number(fps.toFixed(fps < 1 ? 2 : 1)))
+    const measured = this.fpsFrames * 1000 / elapsed
+    const fps = measured >= 10 ? Math.round(measured) : Number(measured.toFixed(measured < 1 ? 2 : 1))
+    this.callbacks.onFps?.(fps)
+    this.performanceMonitor?.onFps(fps)
     this.fpsFrames = 0
     this.fpsStarted = now
     if (this.pathTracingEnabled()) return
     if (this.fpsIdleTimer) clearTimeout(this.fpsIdleTimer)
-    this.fpsIdleTimer = setTimeout(() => {
-      this.fpsFrames = 0
-      this.fpsStarted = performance.now()
-      this.callbacks.onFps?.()
-    }, 750)
+    this.fpsIdleTimer = setTimeout(() => this.resetFps(), 750)
   }
 
   private renderRaster(camera = this.camera, raster = this.raster, shadows = !this.pathTracingEnabled()) {
@@ -959,8 +961,10 @@ export class Viewport {
       const traced = this.pathTracingEnabled() && this.pathTracingReady
       if (traced && !this.tiltShiftDirty) return
       try {
+        const monitor = this.performanceMonitor, started = monitor ? performance.now() : 0
         if (traced && !this.presentationDirty) this.renderPathTrace(true)
         else { this.renderRaster(); this.applyTiltShift() }
+        monitor?.onRender(performance.now() - started)
       }
       catch (error) {
         if (this.renderer.getContext().isContextLost()) return
@@ -1114,6 +1118,7 @@ export class Viewport {
     if (this.rasterFrame !== undefined) cancelAnimationFrame(this.rasterFrame)
     this.rasterFrame = undefined
     this.resetFps()
+    this.performanceMonitor = undefined
     this.disposePathTracer()
     this.releaseSceneDetail()
     this.controls.dispose()

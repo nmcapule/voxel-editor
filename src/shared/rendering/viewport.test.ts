@@ -118,6 +118,68 @@ function photoProbe() {
   return { probe, calls, pathTracer }
 }
 
+test('performance monitoring times live render work without extra frames and counts full PBR samples', async () => {
+  const { probe, pathTracer } = photoProbe()
+  const request = globalThis.requestAnimationFrame, cancel = globalThis.cancelAnimationFrame
+  const frames = new Map<number, FrameRequestCallback>()
+  let id = 0, now = 0
+  globalThis.requestAnimationFrame = callback => { frames.set(++id, callback); return id }
+  globalThis.cancelAnimationFrame = id => { frames.delete(id) }
+  const clock = spyOn(performance, 'now').mockImplementation(() => now)
+  const onFps = mock(), onRender = mock(), status = mock()
+  const frame = () => {
+    const [id, callback] = frames.entries().next().value!
+    frames.delete(id); callback(now)
+  }
+  Object.assign(probe, {
+    performanceMonitor: { onFps, onRender }, callbacks: { onFps: status }, fpsFrames: 0, fpsStarted: 0,
+    resetFps: Reflect.get(Viewport.prototype, 'resetFps'), recordFrame: Reflect.get(Viewport.prototype, 'recordFrame'),
+    settings: { ...DEFAULT_SETTINGS, pathTracing: false, tiltShift: true },
+  })
+  probe.raster.render = () => { now += 3 }
+  probe.tiltShift.render = () => { now += 2 }
+  try {
+    for (let i = 0; i < 20; i++) probe.render()
+    expect(frames.size).toBe(1)
+    frame()
+    expect(onRender.mock.calls).toEqual([[5]])
+    expect(frames.size).toBe(0)
+    now = 500; probe.render(); frame()
+    expect(onFps.mock.calls).toEqual(status.mock.calls)
+    expect(onFps).toHaveBeenLastCalledWith(4)
+    await probe.capture()
+    expect(onRender).toHaveBeenCalledTimes(2)
+    probe.resetFps()
+    expect(onFps).toHaveBeenLastCalledWith()
+
+    onFps.mockClear(); onRender.mockClear()
+    probe.settings.pathTracing = true
+    pathTracer.reset.mockImplementation(() => { pathTracer.samples = 0 })
+    pathTracer.renderSample.mockImplementation(() => { pathTracer.samples += 0.25; now += 4 })
+    now = 1000; probe.startPathTracingSamples()
+    onFps.mockClear()
+    for (let tile = 1; tile <= 4; tile++) {
+      now = 1000 + tile * 250; frame()
+      expect(onFps).toHaveBeenCalledTimes(tile === 4 ? 1 : 0)
+    }
+    expect(onFps).toHaveBeenLastCalledWith(0.99)
+    expect(onRender.mock.calls).toEqual([[6], [6], [6], [6]])
+    pathTracer.samples = 127.75; frame()
+    expect(frames.size).toBe(0)
+    expect(onFps).toHaveBeenLastCalledWith()
+
+    probe.performanceMonitor = undefined
+    probe.settings.pathTracing = false
+    probe.render(); frame()
+    expect(onRender).toHaveBeenCalledTimes(5)
+    expect(frames.size).toBe(0)
+  } finally {
+    clearTimeout(probe.fpsIdleTimer)
+    clock.mockRestore()
+    globalThis.requestAnimationFrame = request; globalThis.cancelAnimationFrame = cancel
+  }
+})
+
 test('render mode, stage rebuilds and captures never add a floor to either workspace', async () => {
   const { probe } = photoProbe()
   const mesh = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial())

@@ -137,6 +137,13 @@ data uses tabular figures.
   viewport and raster fallback, using half-resolution effect buffers to preserve
   interaction speed. Progressive PBR relies on physically traced occlusion
   instead; its FPS readout counts completed full samples rather than tile passes.
+- Both Render tabs offer a default-off **Performance monitor**, remembered only in
+  browser storage and shared across editors. Three classic stats graphs show FPS,
+  average synchronous **Render ms** per pass, and **JS heap MiB** where available.
+  These are not system CPU utilization, GPU time, or total RAM. Show idle and
+  unavailable states explicitly, do not announce updates, never force extra frames,
+  and exclude the overlay from PNG captures. Keep it below the top-left chrome on
+  desktop and above the tool dock on mobile, behind inspectors and popups.
 - During raster camera gestures, animated focus, and model/scene editing drags,
   temporarily cap viewport DPR at 1 and restore the normal DPR cap of 2 after a
   150 ms settling delay. Only the canvas becomes softer; interface controls remain

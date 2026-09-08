@@ -1,11 +1,14 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
-import type { WebGLPathTracer } from 'three-gpu-pathtracer'
+import type { FogVolumeMaterial, WebGLPathTracer } from 'three-gpu-pathtracer'
 import { RasterPipeline } from './raster-pipeline'
 import { TiltShift } from './tilt-shift'
+import { volumetricRegion } from './volumetric-lighting'
+import { KeyLightIndicator } from './key-light-indicator'
 import type { SkyboxPreset, ViewSettings } from './settings'
 import { createSkyTexture, skyColor, SKY_LIGHTING } from './sky'
+import { installSkyBackground } from './sky-background'
 import type { CameraSnapshot, SceneContent, PreparedSceneContent, ViewportCallbacks, Vector3Value as Vec3 } from './contracts'
 import { realtimeEnvironmentIntensity, sceneShadowVolume, workspaceGridPositions, workspaceGridPlaneVisible } from './stage'
 
@@ -30,6 +33,7 @@ export class Viewport {
     this.renderer.domElement.tabIndex = 0
     this.renderer.domElement.setAttribute('aria-label', '3D viewport. Right drag or two-finger drag orbits.')
     this.host.append(this.renderer.domElement)
+    this.keyLightIndicator = new KeyLightIndicator(this.host)
 
     this.scene.add(this.hemisphere, this.sunlight, this.sunlightTarget)
     this.sunlight.castShadow = true
@@ -101,6 +105,7 @@ export class Viewport {
   private environmentTarget!: THREE.WebGLRenderTarget
   private ambientEnvironment: THREE.DataTexture
   private skyTexture?: THREE.DataTexture
+  private keyLightIndicator?: KeyLightIndicator
   private grid?: THREE.Group
   private limits?: THREE.Box3Helper
   private hemisphere = new THREE.HemisphereLight(0xffffff, 0x8c91a0, 1.2)
@@ -110,6 +115,8 @@ export class Viewport {
   renderMode = false
   private focusAnimation?: number
   private pathTracer?: WebGLPathTracer
+  private traceSky?: THREE.IUniform<boolean>
+  private traceFog?: THREE.Mesh<THREE.BoxGeometry, FogVolumeMaterial>
   private pathTracingWorker?: { dispose: () => void }
   private pathTracingRevision = 0
   private pathTracingFrame?: number
@@ -385,13 +392,20 @@ export class Viewport {
   }
 
   private async ensurePathTracer() {
-    if (this.pathTracer) return this.pathTracer
-    const [{ WebGLPathTracer }, { GenerateMeshBVHWorker }] = await Promise.all([
+    if (this.pathTracer && (!this.settings.volumetricLighting || this.traceFog)) return this.pathTracer
+    const [{ WebGLPathTracer, FogVolumeMaterial }, { GenerateMeshBVHWorker }] = await Promise.all([
       import('three-gpu-pathtracer'),
       import('three-mesh-bvh/worker'),
     ])
     if (!this.pathTracingEnabled()) return undefined
+    if (this.settings.volumetricLighting && !this.traceFog) {
+      this.traceFog = new THREE.Mesh(new THREE.BoxGeometry(), new FogVolumeMaterial({ color: new THREE.Color(this.settings.fogColor) }))
+      this.traceFog.name = 'Viewport atmosphere'
+    }
+    if (this.pathTracer) return this.pathTracer
     const tracer = new WebGLPathTracer(this.renderer)
+    try { this.traceSky = installSkyBackground(tracer, this.settings.skybox !== 'solid') }
+    catch (error) { tracer.dispose(); throw error }
     const worker = new GenerateMeshBVHWorker()
     this.pathTracingWorker = worker
     tracer.setBVHWorker(worker)
@@ -405,6 +419,16 @@ export class Viewport {
     tracer.rasterizeSceneCallback = () => this.renderRaster()
     this.pathTracer = tracer
     return tracer
+  }
+
+  private updateTraceFog() {
+    const fog = this.traceFog
+    if (!fog) return
+    const { bounds, density } = volumetricRegion(this.stageBounds, this.settings.fogDensity, this.settings.fogSpread)
+    bounds.getCenter(fog.position)
+    bounds.getSize(fog.scale)
+    fog.material.density = density
+    fog.material.color.set(this.settings.fogColor)
   }
 
   requestPathTraceRebuild() {
@@ -459,16 +483,31 @@ export class Viewport {
         let progressStep = -1
         this.callbacks.onPathTracingStatus?.('Preparing')
         const traceScene = prepared ? this.createTraceScene(prepared) : this.scene
-        await tracer.setSceneAsync(traceScene, this.camera, {
-          onProgress: progress => {
-            if (!this.pathTracingEnabled() || revision !== this.pathTracingRevision) return
-            const step = Math.floor(progress * 10)
-            if (step !== progressStep) {
-              progressStep = step
-              this.callbacks.onPathTracingStatus?.(`Preparing ${Math.round(progress * 100)}%`)
-            }
-          },
-        })
+        const fog = this.settings.volumetricLighting ? this.traceFog : undefined
+        // Preserve the ten glass traversals: four bounces can each cross the air box twice.
+        tracer.transmissiveBounces = fog ? 18 : 10
+        if (fog) {
+          this.updateTraceFog()
+          traceScene.add(fog)
+        }
+        let building: Promise<void>
+        try {
+          building = tracer.setSceneAsync(traceScene, this.camera, {
+            onProgress: progress => {
+              if (!this.pathTracingEnabled() || revision !== this.pathTracingRevision) return
+              const step = Math.floor(progress * 10)
+              if (step !== progressStep) {
+                progressStep = step
+                this.callbacks.onPathTracingStatus?.(`Preparing ${Math.round(progress * 100)}%`)
+              }
+            },
+          })
+        } finally {
+          // This pinned generator bakes geometry synchronously before its worker await.
+          // Never leave the fog mesh in the live scene for raster, picking or captures.
+          fog?.removeFromParent()
+        }
+        await building
         this.pathTracingReady = this.pathTracingEnabled() && revision === this.pathTracingRevision
           && !this.pathTracingBuildRequested && this.contentReady()
         if (this.pathTracingReady) { tracer.setCamera(this.camera); this.sceneCameraDirty = false }
@@ -487,8 +526,13 @@ export class Viewport {
     this.pathTracingWorker = undefined
     this.pathTracer?.dispose()
     this.pathTracer = undefined
+    this.traceSky = undefined
     this.traceScene?.clear()
     this.traceScene = undefined
+    this.traceFog?.removeFromParent()
+    this.traceFog?.geometry.dispose()
+    this.traceFog?.material.dispose()
+    this.traceFog = undefined
   }
 
   private failPathTracing(error: unknown) {
@@ -575,11 +619,15 @@ export class Viewport {
     const projectionChanged = settings.projection !== this.settings.projection
     const previewChanged = this.previewSelected(settings) !== this.previewSelected(previous)
     const pathTracingChanged = settings.pathTracing !== this.settings.pathTracing || previewChanged
+    const volumetricChanged = settings.volumetricLighting !== previous.volumetricLighting || settings.fogSpread !== previous.fogSpread
+    const fogMaterialChanged = settings.fogDensity !== previous.fogDensity || settings.fogColor !== previous.fogColor
     if (previewChanged) { this.pathTracingRevision++; this.disposePathTracer() }
     const skyChanged = settings.skybox !== previous.skybox
-    const sceneDependenciesChanged = this.worldScale && (['skybox', 'background', 'ambient', 'light', 'lightAzimuth', 'shadows'] as const).some(key => settings[key] !== previous[key])
+    const sceneDependenciesChanged = this.worldScale && (['skybox', 'background', 'ambient', 'light', 'lightAzimuth', 'shadows', 'volumetricLighting', 'fogSpread'] as const).some(key => settings[key] !== previous[key])
     if (skyChanged) this.replaceEnvironment(settings.skybox)
     this.settings = { ...settings }
+    if (fogMaterialChanged) this.updateTraceFog()
+    if (this.traceSky) this.traceSky.value = settings.skybox !== 'solid'
     const sky = settings.skybox === 'solid' ? undefined : SKY_LIGHTING[settings.skybox]
     const background = new THREE.Color(settings.background)
     this.scene.background = this.skyTexture ?? background
@@ -603,14 +651,14 @@ export class Viewport {
       this.sunlight.position.set(Math.cos(radians) * Math.cos(elevation), Math.sin(elevation), Math.sin(radians) * Math.cos(elevation))
         .multiplyScalar(radius * 3).add(this.sunlightTarget.position)
     } else this.sunlight.position.set(Math.cos(radians) * radius, radius * 1.7, Math.sin(radians) * radius).add(center)
-    if (skyChanged || previewChanged || settings.pbrMaterials !== previous.pbrMaterials || settings.shadows !== previous.shadows || settings.lightAzimuth !== previous.lightAzimuth) this.renderer.shadowMap.needsUpdate = true
+    if (skyChanged || previewChanged || volumetricChanged || settings.pbrMaterials !== previous.pbrMaterials || settings.shadows !== previous.shadows || settings.lightAzimuth !== previous.lightAzimuth) this.renderer.shadowMap.needsUpdate = true
     this.fitShadowCamera()
     if (projectionChanged) this.switchProjection(settings.projection)
     this.sceneContent?.onViewportChange()
     if (pathTracingChanged && settings.pathTracing) this.pathTracingFailed = false
     if (pathTracingChanged) this.resetFps()
     if (sceneDependenciesChanged) this.invalidateSceneContent()
-    else if (pathTracingChanged && this.pathTracingEnabled()) this.requestPathTraceRebuild()
+    else if ((pathTracingChanged || volumetricChanged) && this.pathTracingEnabled()) this.requestPathTraceRebuild()
     else if (!this.pathTracingEnabled()) {
       if (pathTracingChanged) this.pathTracingRevision++
       this.pathTracingReady = false
@@ -618,7 +666,7 @@ export class Viewport {
       this.callbacks.onPathTracingStatus?.(this.renderMode && this.previewSelected() ? 'Cube sprites' : this.worldScale && this.renderMode && settings.pathTracing ? 'Scene raster fallback' : 'Ready')
     } else {
       const changes: ('materials' | 'lights' | 'environment' | 'camera')[] = []
-      if (skyChanged || settings.background !== previous.background || settings.shadows !== previous.shadows) changes.push('materials')
+      if (skyChanged || settings.background !== previous.background || settings.shadows !== previous.shadows || fogMaterialChanged && settings.volumetricLighting) changes.push('materials')
       if (skyChanged || settings.background !== previous.background || settings.ambient !== previous.ambient || sky && settings.lightAzimuth !== previous.lightAzimuth) changes.push('environment')
       if (skyChanged || settings.light !== previous.light || settings.lightAzimuth !== previous.lightAzimuth) changes.push('lights')
       if (projectionChanged) changes.push('camera')
@@ -711,7 +759,9 @@ export class Viewport {
     const { x, y, z } = this.stageBounds.getSize(new THREE.Vector3())
     const size = Math.max(32, x, z)
     const center = this.stageBounds.getCenter(new THREE.Vector3()).setY(this.stageBounds.min.y)
-    const bounds = (this.worldScale ? this.stageBounds.clone() : new THREE.Box3(new THREE.Vector3(-size, -0.03, -size), new THREE.Vector3(size, y, size)).translate(center)).applyMatrix4(camera.matrixWorldInverse)
+    const bounds = this.worldScale ? this.stageBounds.clone() : new THREE.Box3(new THREE.Vector3(-size, -0.03, -size), new THREE.Vector3(size, y, size)).translate(center)
+    if (this.settings.volumetricLighting) bounds.union(volumetricRegion(this.stageBounds, this.settings.fogDensity, this.settings.fogSpread).bounds)
+    bounds.applyMatrix4(camera.matrixWorldInverse)
     const values = [bounds.min.x - 1, bounds.max.x + 1, bounds.max.y + 1, bounds.min.y - 1, Math.max(0.1, -bounds.max.z - 1), -bounds.min.z + 1]
     if (values.some((value, index) => value !== [camera.left, camera.right, camera.top, camera.bottom, camera.near, camera.far][index])) this.renderer.shadowMap.needsUpdate = true
     ;[camera.left, camera.right, camera.top, camera.bottom, camera.near, camera.far] = values
@@ -731,6 +781,7 @@ export class Viewport {
     if (!this.settings.shadows) return
     const shadow = this.sunlight.shadow, camera = shadow.camera
     const texel = Math.max((camera.right - camera.left) / shadow.mapSize.x, (camera.top - camera.bottom) / shadow.mapSize.y)
+    if (this.settings.volumetricLighting) receivers = [...receivers, volumetricRegion(this.stageBounds, this.settings.fogDensity, this.settings.fogSpread).bounds]
     return sceneShadowVolume(this.camera, occupied, receivers, camera.matrixWorldInverse,
       undefined, texel * (Math.abs(shadow.radius) + 1) + Math.abs(shadow.normalBias))
   }
@@ -808,6 +859,7 @@ export class Viewport {
           }
         })
         if (triangles > prepared.triangles || materials.size > 65534) throw new Error('Full-scene adapter understated its triangle/material count.')
+        if (this.settings.volumetricLighting && (triangles + 12 > 1_000_000 || materials.size + 1 > 65534)) throw new Error('Full scene plus atmosphere exceeds the tracing budget.')
       } catch (error) { prepared.dispose(); throw error }
       this.fullContent = prepared
       return prepared
@@ -927,24 +979,24 @@ export class Viewport {
   private renderRaster(camera = this.camera, raster = this.raster, shadows = !this.pathTracingEnabled() || this.pathTracingPaused, live = false) {
     if (this.contextLost) return
     const reduced = live && camera === this.camera && raster === this.raster && !this.captures && this.simplifyRendering
+    const volumetric = raster === this.raster && this.settings.volumetricLighting && this.settings.fogDensity > 0 && !reduced
+    raster.volumetricLighting = volumetric ? {
+      ...volumetricRegion(this.stageBounds, this.settings.fogDensity, this.settings.fogSpread), light: this.sunlight,
+      color: new THREE.Color(this.settings.fogColor),
+      ambient: (this.settings.skybox === 'solid' ? this.hemisphere.color.clone().lerp(this.hemisphere.groundColor, 0.5)
+        : skyColor(this.settings.skybox, new THREE.Vector3(0, 1, 0))).multiplyScalar(this.settings.ambient / Math.PI),
+    } : undefined
     const pbr = raster.pbrMaterials, ao = raster.ambientOcclusion.enabled
     raster.pbrMaterials = this.previewSelected() || this.settings.pbrMaterials && !reduced
     raster.ambientOcclusion.enabled = this.settings.ambientOcclusion && !reduced
     // FXAA washes out pixel-wide triangle edges; keep the topology inspection view sharp.
     if (raster === this.raster) raster.antialias = !this.settings.meshTriangles || this.renderMode || this.worldScale
     const shadowMap = this.renderer.shadowMap
-    const background = this.scene.background
-    if (this.skyTexture && camera instanceof THREE.OrthographicCamera && this.settings.skybox !== 'solid') {
-      // An infinite sky has one direction for parallel rays. Three's unit sky cube
-      // does not cover orthographic views; a linear clear color also matches tracing.
-      const direction = camera.getWorldDirection(new THREE.Vector3()).applyAxisAngle(new THREE.Vector3(0, 1, 0), -this.scene.backgroundRotation.y)
-      this.scene.background = skyColor(this.settings.skybox, direction)
-    }
     const enabled = shadowMap.enabled, castShadow = this.sunlight.castShadow
     let needsUpdate = shadowMap.needsUpdate
     const ambient = this.hemisphere.intensity
     // Light shadow counts also switch shaders, preventing cached-map sampling in trace previews.
-    shadowMap.enabled = this.sunlight.castShadow = this.settings.shadows && shadows && !reduced
+    shadowMap.enabled = this.sunlight.castShadow = this.settings.shadows && (shadows || volumetric) && !reduced
     // Lambert materials do not sample the sky environment. Keep this raster-only light out of tracing.
     if (!raster.pbrMaterials) this.hemisphere.intensity = this.settings.ambient
     try {
@@ -962,7 +1014,6 @@ export class Viewport {
       raster.pbrMaterials = pbr
       raster.ambientOcclusion.enabled = ao
       this.hemisphere.intensity = ambient
-      this.scene.background = background
       if (!shadowMap.enabled) shadowMap.needsUpdate ||= needsUpdate
       shadowMap.enabled = enabled
       this.sunlight.castShadow = castShadow
@@ -996,6 +1047,7 @@ export class Viewport {
 
   render() {
     if (this.disposed || this.contextLost) return
+    this.keyLightIndicator?.update(this.camera, this.sunlight, this.settings.skybox, this.settings.showSun)
     this.syncRasterResolution()
     if (this.pathTracingPaused && this.pathTracingEnabled()) { this.stopPathTracingSamples(); this.traceHidden = true }
     const traced = this.pathTracingEnabled() && this.pathTracingReady && !this.pathTracingPaused
@@ -1044,11 +1096,15 @@ export class Viewport {
     if (this.disposed) throw new Error('Viewport is disposed')
     const content = this.sceneContent
     const viewBefore = exact ? JSON.stringify(this.getView()) : undefined
+    const settingsBefore = this.settings
     const epoch = this.fullEpoch
     const prepared = exact && content && this.worldScale ? await this.prepareSceneContent() : undefined
     if (!prepared) await content?.whenReady()
     if (this.disposed || content !== this.sceneContent) throw new Error('Viewport changed during capture. Try again.')
-    if (exact && (epoch !== this.fullEpoch || viewBefore !== JSON.stringify(this.getView()))) throw new Error('Scene or camera changed during exact capture. Try again.')
+    if (exact && (epoch !== this.fullEpoch || viewBefore !== JSON.stringify(this.getView())
+      || (['volumetricLighting', 'fogDensity', 'fogSpread', 'fogColor'] as const).some(key => settingsBefore[key] !== this.settings[key]))) {
+      throw new Error('Scene or camera changed during exact capture. Try again.')
+    }
     if (this.contextLost || this.renderer.getContext().isContextLost()) throw new Error('Cannot capture while the graphics context is lost.')
     if (this.rasterFrame !== undefined) cancelAnimationFrame(this.rasterFrame)
     this.rasterFrame = undefined
@@ -1176,6 +1232,7 @@ export class Viewport {
     this.controls.dispose()
     this.raster.dispose()
     this.tiltShift?.dispose()
+    this.keyLightIndicator?.dispose()
     for (const object of [this.grid, this.limits]) object?.traverse(child => {
       if (!(child instanceof THREE.Mesh || child instanceof THREE.Line)) return
       child.geometry.dispose()

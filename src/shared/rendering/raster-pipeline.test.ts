@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from 'bun:test'
 import * as THREE from 'three'
 import { RasterPipeline, transparentTriangleBound } from './raster-pipeline'
+import { VolumetricLighting, volumetricRegion } from './volumetric-lighting'
 
 // A render-state double, not a rasterizer. Pixel ordering, shader compilation and AA
 // still require the parent's WebGL browser audit; these checks exercise the real driver loop.
@@ -12,7 +13,7 @@ function harness(scene: THREE.Scene, occupancy: number[] = [0]) {
     clearColor: new THREE.Color(0x123456), clearAlpha: 0.7, clearDepth: 0.9,
     face: 2, mip: 1, lost: false, reads: 0,
   }
-  const draws: { object: THREE.Object3D; target: THREE.WebGLRenderTarget | null }[] = []
+  const draws: { object: THREE.Object3D; target: THREE.WebGLRenderTarget | null; material?: THREE.Material | THREE.Material[] }[] = []
   let onScene: () => void = () => {}
   let onRead: () => void = () => {}
   const renderer = {
@@ -43,7 +44,7 @@ function harness(scene: THREE.Scene, occupancy: number[] = [0]) {
     setClearAlpha: (value: number) => { state.clearAlpha = value },
     clear() {},
     render(object: THREE.Object3D) {
-      draws.push({ object, target: state.target })
+      draws.push({ object, target: state.target, material: (object as THREE.Mesh).material })
       if (object === scene) onScene()
     },
     readRenderTargetPixels(target: THREE.WebGLRenderTarget, _x: number, _y: number, width: number, height: number, pixels: Uint8Array) {
@@ -857,5 +858,145 @@ test('patched GTAO materials are disposed once by their owner', () => {
   } finally {
     gtao.mockRestore()
     blend.mockRestore()
+  }
+})
+
+test('volumetrics are lazy, bracket peeling, update borrowed inputs, and resize/dispose without feedback', () => {
+  const scene = new THREE.Scene(), light = new THREE.DirectionalLight(0xffffff, 2.4)
+  const opaque = new THREE.Mesh(triangles(1), new THREE.MeshBasicMaterial())
+  const glass = new THREE.Mesh(triangles(2), new THREE.MeshPhysicalMaterial({ transmission: 1 }))
+  scene.add(opaque, glass, light, light.target)
+  const h = harness(scene, [0, 255, 0])
+  const camera = new THREE.OrthographicCamera(-2, 2, 2, -2, -1000, 2000)
+  const config = { ...volumetricRegion(new THREE.Box3(new THREE.Vector3(-1, -1, -2), new THREE.Vector3(1, 1, 0))),
+    light, ambient: new THREE.Color(0.5, 0.6, 0.7) }
+  const shadow = new THREE.WebGLRenderTarget(8, 8, { depthTexture: new THREE.DepthTexture(8, 8) })
+  shadow.depthTexture!.compareFunction = THREE.LessEqualCompare
+  const find = (name: string) => h.draws.findIndex(draw => (draw.material as THREE.Material)?.name === name)
+  let borrowedDisposals = 0
+  shadow.addEventListener('dispose', () => borrowedDisposals++)
+  shadow.depthTexture!.addEventListener('dispose', () => borrowedDisposals++)
+  try {
+    expect(h.pipeline.volumetricLighting).toBeUndefined()
+    h.pipeline.setSize(5, 7)
+    h.pipeline.render(camera)
+    expect(Reflect.get(h.pipeline, 'volumetrics')).toBeUndefined()
+    expect(find('VolumetricScattering')).toBe(-1)
+    expect(find('VolumetricComposite')).toBe(-1)
+    h.draws.length = 0
+    h.pipeline.ambientOcclusion.enabled = true
+    h.pipeline.volumetricLighting = config
+    h.renderer.shadowMap.enabled = light.castShadow = true
+    // The opaque draw, not pass construction, makes the current shadow map available.
+    h.onScene(() => {
+      if (opaque.material.visible) { light.shadow.map = shadow; light.shadow.updateMatrices(light) }
+    })
+    h.pipeline.render(camera)
+    const effect = Reflect.get(h.pipeline, 'volumetrics') as VolumetricLighting
+    const scatterIndex = find('VolumetricScattering'), compositeIndex = find('VolumetricComposite')
+    const scatter = h.draws[scatterIndex].material as THREE.ShaderMaterial
+    const composite = h.draws[compositeIndex].material as THREE.ShaderMaterial
+    const scenes = h.draws.flatMap((draw, index) => draw.object === scene ? [index] : [])
+    const beauty = h.draws[scenes[0]].target!
+    expect(h.pipeline.lastFrame.layers).toBe(1)
+    expect(scenes).toHaveLength(5) // opaque, peel, shade, empty peel, overlay
+    expect(scatterIndex).toBeGreaterThan(1) // AO and its blit precede scattering.
+    expect(h.draws[scatterIndex - 1].target).toBe(beauty)
+    expect(scatterIndex).toBeLessThan(scenes[1])
+    expect(compositeIndex).toBeGreaterThan(scenes[3])
+    expect(compositeIndex + 2).toBe(scenes[4]) // scratch composite, beauty blit, overlay
+    expect(h.draws.at(-2)!.material).not.toBe(composite) // AA then OutputPass
+    expect(h.draws.at(-1)!.target).toBe(h.pipeline.readBuffer)
+    expect(scatter.uniforms.opaqueDepth.value).toBe(beauty.depthTexture)
+    expect(h.draws[scatterIndex].target).toBe(effect.target)
+    expect(effect.target).toMatchObject({ width: 5, height: 7, depthBuffer: false })
+    expect(effect.target.texture.type).toBe(THREE.HalfFloatType)
+    expect(effect.target.texture.colorSpace).toBe(THREE.NoColorSpace)
+    expect(composite.uniforms.beauty.value).toBe(beauty.texture)
+    expect(composite.uniforms.volume.value).toBe(effect.target.texture)
+    expect(h.draws[compositeIndex].target).not.toBe(beauty)
+    expect(h.draws[compositeIndex + 1].target).toBe(beauty)
+    expect(composite.fragmentShader).toContain('color.rgb * atmosphere.a + atmosphere.rgb')
+    for (const material of [scatter, composite]) expect(material).toMatchObject({ depthTest: false, depthWrite: false, blending: THREE.NoBlending, toneMapped: false })
+    expect(scatter.uniforms.projectionInverse.value.equals(camera.projectionMatrixInverse)).toBe(true)
+    expect(scatter.defines.VOLUMETRIC_SHADOW).toBe(2)
+    expect(scatter.uniforms.sunShadow.value).toBe(shadow.depthTexture)
+    expect(scatter.uniforms.sunShadowMatrix.value.equals(light.shadow.matrix)).toBe(true)
+    expect(scatter.fragmentShader).toContain('uniform highp sampler2DShadow sunShadow;')
+
+    const version = scatter.version
+    h.pipeline.render(camera)
+    expect(scatter.version).toBe(version)
+    const perspective = new THREE.PerspectiveCamera(45, 2, 0.2, 4000)
+    perspective.position.set(3, 4, 5)
+    light.position.set(8, 4, 2)
+    light.target.position.set(2, 1, 0)
+    light.color.setRGB(0.8, 0.4, 0.2)
+    light.intensity = 3
+    light.shadow.bias = -0.001
+    light.shadow.intensity = 0.7
+    config.ambient.setRGB(0.2, 0.1, 0.3)
+    config.bounds.translate(new THREE.Vector3(2, 3, 4))
+    config.density *= 2
+    h.renderer.shadowMap.enabled = false
+    h.pipeline.render(perspective)
+    expect(scatter.defines.VOLUMETRIC_SHADOW).toBe(0)
+    expect(scatter.uniforms.sunShadow.value).toBeNull()
+    expect(scatter.uniforms.projectionInverse.value.equals(perspective.projectionMatrixInverse)).toBe(true)
+    expect(scatter.uniforms.cameraWorld.value.equals(perspective.matrixWorld)).toBe(true)
+    expect(scatter.uniforms.boundsMin.value.equals(config.bounds.min)).toBe(true)
+    expect(scatter.uniforms.boundsMax.value.equals(config.bounds.max)).toBe(true)
+    expect(scatter.uniforms.density.value).toBe(config.density)
+    expect(scatter.uniforms.ambientRadiance.value.equals(config.ambient)).toBe(true)
+    expect(scatter.uniforms.sunRadiance.value.equals(light.color.clone().multiplyScalar(3))).toBe(true)
+    expect(scatter.uniforms.sunDirection.value.equals(new THREE.Vector3(6, 3, 2).normalize())).toBe(true)
+    expect(scatter.uniforms.sunShadowBias.value).toBe(-0.001)
+    expect(scatter.uniforms.sunShadowIntensity.value).toBe(0.7)
+    h.renderer.shadowMap.enabled = true
+    light.castShadow = false
+    h.pipeline.render(camera)
+    expect(scatter.defines.VOLUMETRIC_SHADOW).toBe(0)
+    h.onScene(() => {})
+    light.castShadow = true
+    light.shadow.map = null
+    h.pipeline.render(camera)
+    expect(scatter.defines.VOLUMETRIC_SHADOW).toBe(0)
+    light.shadow.map = shadow
+    shadow.depthTexture!.compareFunction = null
+    h.pipeline.render(camera)
+    expect(scatter.defines.VOLUMETRIC_SHADOW).toBe(1)
+
+    h.pipeline.setSize(9, 11)
+    expect([effect.target.width, effect.target.height]).toEqual([9, 11])
+    const resize = spyOn(effect.target, 'setSize')
+    try {
+      h.pipeline.setSize(9, 11)
+      h.pipeline.volumetricLighting = undefined
+      h.draws.length = 0
+      h.pipeline.setSize(1, 1)
+      h.pipeline.render(camera)
+      expect(resize).not.toHaveBeenCalled()
+      expect(find('VolumetricScattering')).toBe(-1)
+      expect(find('VolumetricComposite')).toBe(-1)
+      h.pipeline.volumetricLighting = config
+      h.pipeline.render(camera)
+      expect(Reflect.get(h.pipeline, 'volumetrics')).toBe(effect)
+      expect([effect.target.width, effect.target.height]).toEqual([1, 1])
+    } finally { resize.mockRestore() }
+    config.density = NaN
+    expect(() => h.pipeline.render(camera)).toThrow('density')
+    expect(h.state.target).toBe(h.initialTarget)
+    expect(h.pipeline.lastFrame.complete).toBe(false)
+    const disposed = [0, 0, 0]
+    for (const [index, resource] of [effect.target, scatter, composite].entries()) resource.addEventListener('dispose', () => disposed[index]++)
+    h.pipeline.dispose()
+    h.pipeline.dispose()
+    expect(disposed).toEqual([1, 1, 1])
+    expect(borrowedDisposals).toBe(0)
+    expect(() => effect.setSize(2, 2)).toThrow('disposed')
+    expect(() => effect.render(h.webgl, camera, beauty.depthTexture!, config)).toThrow('disposed')
+  } finally {
+    h.pipeline.dispose(); shadow.depthTexture!.dispose(); shadow.dispose()
+    for (const mesh of [opaque, glass]) { mesh.geometry.dispose(); mesh.material.dispose() }
   }
 })

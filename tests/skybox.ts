@@ -348,7 +348,7 @@ export async function runSkyboxChecks(renderer: VoxelRenderer, settings: ViewSet
       const results = []
       for (const projection of ['perspective', 'orthographic'] as const) {
         set({ projection, pathTracing: false })
-        // Aim at sunset's glow. Parallel orthographic rays should all sample this direction.
+        // Aim toward the horizon; orthographic geometry keeps its native rays, but the backdrop is panoramic.
         renderer.setView({ position: { x: 0, y: 16, z: 0 }, target: { x: 40, y: 23, z: 0 }, up: { x: 0, y: 1, z: 0 }, zoom: 1, orthographicSpan: 38, fov: 55 })
         const raster = new Map<SkyboxPreset, ImageData>()
         for (const pathTracing of [false, true]) {
@@ -362,8 +362,8 @@ export async function runSkyboxChecks(renderer: VoxelRenderer, settings: ViewSet
             const locations = [[4, 4], [123, 4], [4, 123], [123, 123], [64, 64]]
             const colors = locations.map(([x, y]) => patch(image, x, y, 1))
             check(colors.every(rgb => mean(rgb) > 4), `${projection}/${skybox}: sky must cover corners and center, not a small unit cube`)
-            if (projection === 'orthographic' || skybox === 'solid') check(colors.every(rgb => difference(rgb, colors[0]).max <= 1), `${projection}/${skybox}: parallel sky rays must be spatially uniform`)
-            else if (skybox === 'sunset') check(difference(colors[0], colors[4]).mean > 3, 'Perspective sky must retain its directional glow, not a flat clear color')
+            if (skybox === 'solid') check(colors.every(rgb => difference(rgb, colors[0]).max <= 1), `${projection}/${skybox}: solid backdrop must be spatially uniform`)
+            else check(colors.some(rgb => difference(rgb, colors[0]).mean > 3), `${projection}/${skybox}: clouds and landscape must not collapse to a flat clear color`)
             if (!pathTracing) raster.set(skybox, image)
             else {
               const deltas = locations.map(([x, y]) => difference(patch(image, x, y, 1), patch(raster.get(skybox)!, x, y, 1)))

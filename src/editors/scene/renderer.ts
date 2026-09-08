@@ -253,7 +253,7 @@ export class SceneRenderer {
       for (const { material } of this.materials.values()) this.host.applyEnvironment(material)
       const viewport = this.host.getSceneViewport()
       this.gizmo.camera = viewport.camera
-      viewport.controls.touches.ONE = viewport.renderMode ? THREE.TOUCH.ROTATE : -1 as THREE.TOUCH
+      viewport.controls.touches.ONE = viewport.renderMode ? THREE.TOUCH.PAN : -1 as THREE.TOUCH
       if (viewport.renderMode) { this.cancelInteraction(); this.ghost.visible = false }
       this.dirty = true
       this.updateGizmo()

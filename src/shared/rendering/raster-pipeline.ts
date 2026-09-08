@@ -4,6 +4,8 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js'
 import { FXAAShader } from 'three/addons/shaders/FXAAShader.js'
 import type { SceneContent } from './contracts'
+import { VolumetricLighting, type VolumetricLightingConfig } from './volumetric-lighting'
+import { SkyBackground } from './sky-background'
 
 type Surface = THREE.Mesh | THREE.Line | THREE.Points | THREE.Sprite
 type Phase = 'opaque' | 'peel' | 'shade' | 'overlay'
@@ -94,6 +96,8 @@ export class RasterPipeline {
   renderToScreen = true
   /** False substitutes opaque palette-only diffuse shading for physical mesh materials. */
   pbrMaterials = true
+  /** Default off. Undefined skips all volumetric allocations and draws. Inputs are borrowed. */
+  volumetricLighting?: VolumetricLightingConfig
   readonly lastFrame = { layers: 0, triangleBound: 0, occludedMeshes: 0, complete: false }
 
   private readonly renderer: THREE.WebGLRenderer
@@ -147,6 +151,8 @@ export class RasterPipeline {
   `, { ...THREE.UniformsUtils.clone(FXAAShader.uniforms), toneMappingExposure: { value: 1 } })
   private readonly quad = new FullScreenQuad(this.copy)
   private readonly output = new OutputPass()
+  private volumetrics?: VolumetricLighting
+  private skyBackground?: SkyBackground
   private disposed = false
   private rendering = false
 
@@ -186,6 +192,7 @@ export class RasterPipeline {
     this.aa.uniforms.resolution.value.set(1 / width, 1 / height)
     this.uniforms.rasterTransmissionSize.value.set(width, height)
     this.ambientOcclusion.setSize(Math.max(1, Math.ceil(width / 2)), Math.max(1, Math.ceil(height / 2)))
+    if (this.volumetricLighting) this.volumetrics?.setSize(width, height)
     for (const target of this.reductions) target.dispose()
     this.reductions.length = 0
     while (width > 1 || height > 1) {
@@ -359,6 +366,7 @@ export class RasterPipeline {
     Object.assign(this.lastFrame, { layers: 0, triangleBound: 0, occludedMeshes: 0, complete: false })
     const renderer = this.renderer
     const scene = this.scene
+    const volumetric = this.volumetricLighting
     const gl = renderer.getContext()
     if (gl.isContextLost()) throw new Error('RasterPipeline: WebGL context lost.')
     const started = performance.now()
@@ -484,6 +492,15 @@ export class RasterPipeline {
       show('opaque')
       renderer.setRenderTarget(this.beauty)
       renderer.clear(true, true, true)
+      if ((camera as THREE.OrthographicCamera).isOrthographicCamera && scene.background instanceof THREE.Texture
+        && scene.background.mapping === THREE.EquirectangularReflectionMapping) {
+        this.skyBackground ??= new SkyBackground()
+        this.skyBackground.update(camera, scene)
+        this.quad.material = this.skyBackground
+        this.quad.render(renderer)
+        // Keep the backdrop in beauty/transmission copies, without Three's unit sky cube.
+        scene.background = null
+      }
       renderer.render(scene, camera)
       // Parent invalidates shadows on geometry/light changes; no repeated shadow work per peel.
       renderer.shadowMap.autoUpdate = false
@@ -499,6 +516,12 @@ export class RasterPipeline {
         }
         ao.render(renderer, this.scratch, this.beauty, 0, false)
         this.blit(this.scratch.texture, this.beauty)
+      }
+      if (volumetric) {
+        this.volumetrics ??= new VolumetricLighting()
+        this.volumetrics.setSize(this.beauty.width, this.beauty.height)
+        // Capture opaque depth now: transparent shading may later write the beauty depth.
+        this.volumetrics.render(renderer, camera, this.beauty.depthTexture!, volumetric)
       }
       this.uniforms.rasterPreviousDepth.value = this.beauty.depthTexture
       for (let layer = 0; layer <= this.lastFrame.triangleBound && this.lastFrame.triangleBound > 0; layer++) {
@@ -524,6 +547,10 @@ export class RasterPipeline {
         renderer.render(scene, camera)
         this.uniforms.rasterPreviousDepth.value = peel.depthTexture
         this.lastFrame.layers++
+      }
+      if (volumetric) {
+        this.volumetrics!.composite(renderer, this.beauty.texture, this.scratch)
+        this.blit(this.scratch.texture, this.beauty)
       }
       renderer.state.buffers.depth.setClear(1)
       show('overlay')
@@ -554,6 +581,7 @@ export class RasterPipeline {
         object.castShadow = castShadow
       }
       scene.background = saved.background
+      if (this.skyBackground) this.skyBackground.uniforms.skyMap.value = null
       scene.overrideMaterial = saved.override
       renderer.autoClear = saved.autoClear
       renderer.shadowMap.autoUpdate = saved.shadowAutoUpdate
@@ -580,6 +608,8 @@ export class RasterPipeline {
     for (const entry of this.diffuse.values()) entry.dispose()
     for (const target of [this.readBuffer, this.beauty, this.scratch, this.snapshot, ...this.peels, ...this.reductions]) target.dispose()
     this.ambientOcclusion.dispose()
+    this.volumetrics?.dispose()
+    this.skyBackground?.dispose()
     this.hidden.dispose()
     this.copy.dispose()
     this.reduce.dispose()

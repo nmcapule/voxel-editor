@@ -718,6 +718,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     app.querySelector<HTMLSelectElement>('#projection')!.value = cubeSprites ? 'orthographic' : settings.projection
     app.querySelector<HTMLOptionElement>('#projection option[value="perspective"]')!.disabled = cubeSprites
     app.querySelector<HTMLSelectElement>('#skybox')!.value = settings.skybox
+    app.querySelector<HTMLInputElement>('#show-sun')!.checked = settings.showSun
     app.querySelector<HTMLElement>('#background-label')!.hidden = settings.skybox !== 'solid'
     app.querySelector<HTMLElement>('#skybox-help')!.hidden = settings.skybox === 'solid'
     app.querySelector<HTMLInputElement>('#background')!.value = settings.background
@@ -726,6 +727,9 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     app.querySelector<HTMLInputElement>('#azimuth')!.value = String(settings.lightAzimuth)
     app.querySelector<HTMLInputElement>('#ambient-occlusion')!.checked = settings.ambientOcclusion
     app.querySelector<HTMLInputElement>('#shadows')!.checked = settings.shadows
+    app.querySelector<HTMLInputElement>('#volumetric-lighting')!.checked = settings.volumetricLighting
+    app.querySelector<HTMLElement>('#fog-controls')!.hidden = !settings.volumetricLighting
+    app.querySelector<HTMLInputElement>('#fog-color')!.value = settings.fogColor
     app.querySelector<HTMLInputElement>('#grid')!.checked = settings.grid
     app.querySelector<HTMLInputElement>('#face-grid')!.checked = settings.faceGrid
     app.querySelector<HTMLInputElement>('#mesh-vertices')!.checked = settings.meshVertices
@@ -734,7 +738,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     app.querySelector<HTMLInputElement>('#path-tracing')!.disabled = cubeSprites
     app.querySelector<HTMLInputElement>('#tilt-shift')!.checked = settings.tiltShift
     app.querySelector<HTMLElement>('#tilt-shift-controls')!.hidden = !settings.tiltShift
-    for (const key of ['tiltShiftStrength', 'tiltShiftFocus', 'tiltShiftWidth'] as const) {
+    for (const key of ['tiltShiftStrength', 'tiltShiftFocus', 'tiltShiftWidth', 'fogDensity', 'fogSpread'] as const) {
       const input = app.querySelector<HTMLInputElement>(`#${key}`)!
       input.value = String(settings[key])
       const percent = `${Math.round(settings[key] * 100)}%`
@@ -1277,12 +1281,16 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     if (target.id === 'projection') patch.projection = target.value as ViewSettings['projection']
     if (target.id === 'pbr-materials') patch.pbrMaterials = (target as HTMLInputElement).checked
     if (target.id === 'skybox') patch.skybox = target.value as ViewSettings['skybox']
+    if (target.id === 'show-sun') patch.showSun = (target as HTMLInputElement).checked
     if (target.id === 'background') patch.background = target.value
     if (target.id === 'ambient') patch.ambient = Number(target.value)
     if (target.id === 'light') patch.light = Number(target.value)
     if (target.id === 'azimuth') patch.lightAzimuth = Number(target.value)
     if (target.id === 'ambient-occlusion') patch.ambientOcclusion = (target as HTMLInputElement).checked
     if (target.id === 'shadows') patch.shadows = (target as HTMLInputElement).checked
+    if (target.id === 'volumetric-lighting') patch.volumetricLighting = (target as HTMLInputElement).checked
+    if (target.id === 'fogDensity' || target.id === 'fogSpread') patch[target.id] = Number(target.value)
+    if (target.id === 'fog-color') patch.fogColor = target.value
     if (target.id === 'grid') patch.grid = (target as HTMLInputElement).checked
     if (target.id === 'face-grid') patch.faceGrid = (target as HTMLInputElement).checked
     if (target.id === 'mesh-vertices') patch.meshVertices = (target as HTMLInputElement).checked

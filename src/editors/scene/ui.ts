@@ -162,14 +162,26 @@ export function mountSceneUI(root: HTMLElement, host: SceneUIHost, keyboardRoot:
           <p id="scene-tilt-shift-band-help" class="scene-note">Focus runs from 0% at the top to 100% at the bottom. Sharp band width is a percentage of image height.</p>
         </div>
         <label class="select-row"><span>Skybox</span><select data-scene-setting="skybox">${Object.entries(SKYBOX_PRESETS).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}</select></label>
+        <label class="toggle-row"><span>Show sun/moon</span><input type="checkbox" data-scene-setting="showSun" aria-describedby="scene-show-sun-help"></label>
+        <p id="scene-show-sun-help" class="scene-note">Direction marker only; lighting is unchanged.</p>
         <label id="scene-background-label" class="color-row"><span>Backdrop</span><input type="color" data-scene-setting="background"></label>
         ${([['ambient', 'Ambient light', 0, 3, 0.1], ['light', 'Key light', 0, 5, 0.1], ['lightAzimuth', 'Light angle', -180, 180, 1]] as const).map(([key, label, min, max, step]) => `<label class="range-row"><span>${label}<output id="scene-output-${key}"></output></span><input type="range" data-scene-setting="${key}" aria-label="${label}" min="${min}" max="${max}" step="${step}"></label>`).join('')}
         <p id="scene-skybox-help" class="scene-note" hidden>Ambient scales sky lighting and reflections. Key light controls the sun or moon. Light angle rotates the sky and light.</p>
-        ${([['ambientOcclusion', 'Ambient occlusion'], ['shadows', 'Shadows'], ['grid', 'Editing grid']] as const).map(([key, label]) => `<label class="toggle-row"><span>${label}</span><input type="checkbox" data-scene-setting="${key}"></label>`).join('')}
+        ${([['ambientOcclusion', 'Ambient occlusion'], ['shadows', 'Shadows']] as const).map(([key, label]) => `<label class="toggle-row"><span>${label}</span><input type="checkbox" data-scene-setting="${key}"></label>`).join('')}
+        <label class="toggle-row"><span>Volumetric lighting</span><input type="checkbox" data-scene-setting="volumetricLighting" aria-describedby="scene-volumetric-lighting-help" aria-controls="scene-fog-controls"></label>
+        <p id="scene-volumetric-lighting-help" class="scene-note">Adds sunbeams and haze to realtime and progressive rendering, with extra render cost. With Shadows off, haze remains.</p>
+        <div id="scene-fog-controls" hidden>
+          <label class="range-row"><span>Density<output id="scene-output-fogDensity" for="scene-fogDensity"></output></span><input id="scene-fogDensity" type="range" data-scene-setting="fogDensity" aria-label="Fog density" aria-describedby="scene-fog-density-help" min="0" max="3" step="0.05"></label>
+          <p id="scene-fog-density-help" class="scene-note">Density is relative: 100% is the default.</p>
+          <label class="range-row"><span>Spread<output id="scene-output-fogSpread" for="scene-fogSpread"></output></span><input id="scene-fogSpread" type="range" data-scene-setting="fogSpread" aria-label="Fog spread" aria-describedby="scene-fog-spread-help" min="0" max="1" step="0.05"></label>
+          <p id="scene-fog-spread-help" class="scene-note">Spread extends atmosphere beyond the scene on each side, as a percentage of its longest axis.</p>
+          <label class="color-row"><span>Fog color</span><input type="color" data-scene-setting="fogColor"></label>
+        </div>
+        <label class="toggle-row"><span>Editing grid</span><input type="checkbox" data-scene-setting="grid"></label>
         <label class="toggle-row"><span>Performance monitor</span><input type="checkbox" data-performance-monitor aria-describedby="scene-performance-help"></label>
         <p id="scene-performance-help" class="scene-note">FPS, main-thread render time, and JS heap where available. Remembered in this browser; not included in PNG captures.</p>
         <label class="toggle-row"><span>Auto simplify rendering</span><input type="checkbox" data-auto-simplify-rendering aria-describedby="scene-auto-simplify-help"></label>
-        <p id="scene-auto-simplify-help" class="scene-note">While moving the camera or editing, turns off realtime PBR, shadows, ambient occlusion, and miniature photography, and pauses progressive PBR. Glass becomes opaque. Restores your settings afterward; captures keep requested quality. Remembered in this browser.</p>
+        <p id="scene-auto-simplify-help" class="scene-note">While moving the camera or editing, turns off realtime PBR, shadows, ambient occlusion, volumetric lighting, and miniature photography, and pauses progressive PBR. Glass becomes opaque. Restores your settings afterward; captures keep requested quality. Remembered in this browser.</p>
         <label class="scene-field scene-capture-quality">Capture quality<select id="scene-capture-quality" aria-describedby="scene-capture-help"><option value="viewport">Viewport detail</option><option value="full">Full-scene detail</option></select></label>
         <p id="scene-capture-help" class="scene-note">Viewport detail uses the current rendered detail. Full-scene detail prepares every visible scene layer at full voxel detail. Preflight may reject it above 1,000,000 triangles or a 96 MiB estimated peak budget. If rejected, choose Viewport detail or reduce the scene.</p>
         ${button('capture', 'Capture PNG', 'camera', 'id="scene-capture" class="primary full"')}
@@ -612,6 +624,7 @@ export function mountSceneUI(root: HTMLElement, host: SceneUIHost, keyboardRoot:
       updateSettingOutput(input)
     }
     $('#scene-tilt-shift-controls').hidden = !data.settings.tiltShift
+    $('#scene-fog-controls').hidden = !data.settings.volumetricLighting
     $('#scene-background-label').hidden = data.settings.skybox !== 'solid'
     $('#scene-skybox-help').hidden = data.settings.skybox === 'solid'
     $<HTMLInputElement>('#scene-snap').disabled = busy
@@ -825,7 +838,7 @@ export function mountSceneUI(root: HTMLElement, host: SceneUIHost, keyboardRoot:
     const key = input.dataset.sceneSetting!
     const output = element.querySelector(`#scene-output-${key}`)
     if (!output) return
-    const text = key.startsWith('tiltShift') ? `${Math.round(Number(input.value) * 100)}%` : `${input.value}${key === 'lightAzimuth' ? ' deg' : ''}`
+    const text = key.startsWith('tiltShift') || key === 'fogDensity' || key === 'fogSpread' ? `${Math.round(Number(input.value) * 100)}%` : `${input.value}${key === 'lightAzimuth' ? ' deg' : ''}`
     output.textContent = text
     input.setAttribute('aria-valuetext', text)
   }

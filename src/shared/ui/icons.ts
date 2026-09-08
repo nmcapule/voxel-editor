@@ -6,6 +6,7 @@ const icons: Record<string, string> = {
   'frame': '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 4H4v4M16 4h4v4M20 16v4h-4M8 20H4v-4"/><path d="m12 8 4 2.3v4.6L12 17l-4-2.1v-4.6L12 8Z"/></svg>',
   'sliders': '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 6h14M5 12h14M5 18h14"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="11" cy="18" r="2"/></svg>',
   'render': '<svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg>',
+  'moon': '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 14A8.5 8.5 0 0 1 10 4a8.5 8.5 0 1 0 10 10Z"/></svg>',
   'select': '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 4H4v4M16 4h4v4M20 16v4h-4M8 20H4v-4"/><path d="m12 8 4 2.3v4.6L12 17l-4-2.1v-4.6L12 8Z"/></svg>',
   'paint': '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 4h12v6H5zM8 10v4h6v6H8v-6M17 6h2v9"/></svg>',
   'pick': '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="m14 4 6 6-3 3-1.5-1.5L9 18H5v-4l6.5-6.5L10 6l4-2Z"/><path d="m7 16 1 1"/></svg>',

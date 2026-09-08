@@ -3,6 +3,8 @@ import * as THREE from 'three'
 import { Viewport } from './viewport'
 import { DEFAULT_SETTINGS, type ViewSettings } from './settings'
 import { TiltShift } from './tilt-shift'
+import { FogVolumeMaterial } from 'three-gpu-pathtracer/src/index.js'
+import { volumetricRegion } from './volumetric-lighting'
 import { createSkyTexture, skyColor, SKY_LIGHTING } from './sky'
 
 test('canceling a focus tween preserves the current camera and orbit target, including reduced motion', () => {
@@ -112,7 +114,7 @@ test('viewport teardown cancels owned work, detaches borrowed content and dispos
     tiltShift: { dispose() { resources.tiltShift++ } },
     environmentTarget: { dispose() { resources.environment++ } }, ambientEnvironment: { dispose() { resources.ambient++ } },
     skyTexture: { dispose() { resources.sky++ } },
-    pathTracingWorker: { dispose() { resources.worker++ } }, pathTracer: { dispose() { resources.tracer++ } },
+    pathTracingWorker: { dispose() { resources.worker++ } }, pathTracer: { dispose() { resources.tracer++ } }, traceSky: { value: true },
   })
   try {
     const preparing = probe.prepareSceneContent()
@@ -128,6 +130,7 @@ test('viewport teardown cancels owned work, detaches borrowed content and dispos
     await expect(preparing).rejects.toMatchObject({ name: 'AbortError' })
     expect(resources).toEqual({ raster: 1, tiltShift: 1, renderer: 1, controls: 1, environment: 1, ambient: 1, sky: 1, observer: 1, canvas: 1, worker: 1, tracer: 1, grid: 1, gridMaterial: 1, borrowed: 0, detail: 1 })
     expect(probe.pathTracer).toBeUndefined()
+    expect(probe.traceSky).toBeUndefined()
     expect(probe.content).toBeUndefined()
     await expect(probe.capture()).rejects.toThrow('disposed')
     expect(() => probe.setSceneContent({ root })).toThrow('disposed')
@@ -202,6 +205,105 @@ function photoProbe() {
   })
   return { probe, calls, pathTracer }
 }
+
+test('key-light indicator refreshes even when progressive rendering is already converged', () => {
+  const { probe, pathTracer } = photoProbe()
+  probe.keyLightIndicator = { update: mock() }
+  probe.settings.skybox = 'night'
+  probe.render()
+  expect(probe.keyLightIndicator.update).toHaveBeenCalledWith(probe.camera, probe.sunlight, 'night', true)
+  expect(pathTracer.reset).not.toHaveBeenCalled()
+  expect(pathTracer.renderSample).not.toHaveBeenCalled()
+})
+
+test('volumetrics rebuild tracing, preserve preview shadows, and stay out of inspection', () => {
+  const { probe } = photoProbe()
+  probe.render = mock()
+  probe.updatePathTracing = mock()
+  probe.requestPathTraceRebuild = mock()
+  probe.setSettings({ ...probe.settings, volumetricLighting: true })
+  expect(probe.requestPathTraceRebuild).toHaveBeenCalledTimes(1)
+  expect(probe.renderer.shadowMap.needsUpdate).toBe(true)
+  probe.setSettings({ ...probe.settings })
+  expect(probe.requestPathTraceRebuild).toHaveBeenCalledTimes(1)
+  probe.raster.render = () => expect(probe.renderer.shadowMap.enabled).toBe(true)
+  probe.renderRaster(undefined, undefined, false)
+  expect(probe.raster.volumetricLighting).toMatchObject(volumetricRegion(probe.sceneContent.bounds))
+  const inspection = { pbrMaterials: true, ambientOcclusion: { enabled: false }, render() {} }
+  probe.renderRaster(probe.camera, inspection, true)
+  expect(Reflect.get(inspection, 'volumetricLighting')).toBeUndefined()
+  probe.setSettings({ ...probe.settings, shadows: false })
+  probe.raster.render = () => expect(probe.renderer.shadowMap.enabled).toBe(false)
+  probe.renderRaster()
+  expect(probe.raster.volumetricLighting).toBeDefined()
+  probe.autoSimplifyRendering = true
+  probe.rasterInteractions.add('controls')
+  probe.renderRaster(undefined, undefined, undefined, true)
+  expect(probe.raster.volumetricLighting).toBeUndefined()
+  probe.captures = 1
+  probe.renderRaster(undefined, undefined, undefined, true)
+  expect(probe.raster.volumetricLighting).toBeDefined()
+  probe.captures = 0
+  probe.autoSimplifyRendering = false
+  probe.setSettings({ ...probe.settings, volumetricLighting: false })
+  probe.renderRaster()
+  expect(probe.raster.volumetricLighting).toBeUndefined()
+  expect(probe.requestPathTraceRebuild).toHaveBeenCalledTimes(2)
+})
+
+test('tracer atmosphere detaches before worker completion and releases only owned resources', async () => {
+  const { probe, pathTracer } = photoProbe()
+  probe.settings.volumetricLighting = true
+  probe.pathTracingReady = false
+  probe.pathTracingBuildRequested = true
+  const fog = new THREE.Mesh(new THREE.BoxGeometry(), new FogVolumeMaterial())
+  probe.traceFog = fog
+  probe.ensurePathTracer = async () => pathTracer
+  probe.startPathTracingSamples = mock()
+  const geometryDispose = spyOn(fog.geometry, 'dispose'), materialDispose = spyOn(fog.material, 'dispose')
+  const pending = Promise.withResolvers<void>()
+  pathTracer.setSceneAsync.mockImplementation(scene => {
+    expect(scene.children).toContain(fog)
+    expect(Reflect.get(pathTracer, 'transmissiveBounces')).toBe(18)
+    expect(fog.material.density).toBe(volumetricRegion(probe.sceneContent.bounds).density)
+    return pending.promise
+  })
+  const building = probe.buildPathTrace()
+  await Promise.resolve()
+  expect(pathTracer.setSceneAsync).toHaveBeenCalledTimes(1)
+  expect(fog.parent).toBeNull()
+  expect(probe.pathTracingReady).toBe(false)
+  pending.resolve()
+  await building
+  expect(probe.pathTracingReady).toBe(true)
+  expect(probe.startPathTracingSamples).toHaveBeenCalledTimes(1)
+  probe.settings.volumetricLighting = false
+  probe.pathTracingBuildRequested = true
+  pathTracer.setSceneAsync.mockImplementation(async scene => {
+    expect(scene.children).not.toContain(fog)
+    expect(Reflect.get(pathTracer, 'transmissiveBounces')).toBe(10)
+  })
+  await probe.buildPathTrace()
+  probe.disposePathTracer()
+  probe.disposePathTracer()
+  expect(geometryDispose).toHaveBeenCalledTimes(1)
+  expect(materialDispose).toHaveBeenCalledTimes(1)
+  expect(probe.traceFog).toBeUndefined()
+})
+
+test('visible air retains offscreen shadow casters even without visible surface receivers', () => {
+  const { probe } = photoProbe()
+  probe.sceneContent.stage = 'world'
+  probe.sceneContent.bounds = new THREE.Box3(new THREE.Vector3(-10, 0, -10), new THREE.Vector3(10, 20, 10))
+  probe.camera = new THREE.OrthographicCamera(-4, 4, 4, -4, -100, 100)
+  probe.camera.position.set(0, 8, 30); probe.camera.lookAt(0, 8, 0)
+  probe.render = mock()
+  probe.invalidateSceneContent = mock()
+  probe.setSettings({ ...probe.settings, volumetricLighting: false })
+  expect(probe.getSceneShadowVolume([], probe.sceneContent.bounds)).toBeUndefined()
+  probe.setSettings({ ...probe.settings, volumetricLighting: true })
+  expect(probe.getSceneShadowVolume([], probe.sceneContent.bounds)).toBeInstanceOf(THREE.Frustum)
+})
 
 test('opaque culling is passed only to live primary frames outside captures and progressive previews', () => {
   const { probe } = photoProbe(), cullOpaque = mock(() => new Set<THREE.Mesh>())
@@ -1322,8 +1424,14 @@ test('procedural skies are deterministic, linear, seam-safe and oriented +Y towa
       expect(data[(height - 1) * width * 4]).toBeCloseTo(north.r, 2)
       const south = skyColor(preset, new THREE.Vector3(0, -1, 0))
       expect(data[0]).toBeCloseTo(south.r, 2)
-      for (let y = 0; y < height; y++) for (let channel = 0; channel < 3; channel++) {
-        expect(data[y * width * 4 + channel]).toBeCloseTo(data[(y * width + width - 1) * 4 + channel], 5)
+      expect(texture.wrapS).toBe(THREE.RepeatWrapping)
+      for (let y = 0; y < height; y++) {
+        const theta = (y + 0.5) / height * Math.PI
+        const a = skyColor(preset, new THREE.Vector3(-Math.sin(theta), -Math.cos(theta), 1e-10))
+        const b = skyColor(preset, new THREE.Vector3(-Math.sin(theta), -Math.cos(theta), -1e-10))
+        expect(a.r).toBeCloseTo(b.r, 5)
+        expect(a.g).toBeCloseTo(b.g, 5)
+        expect(a.b).toBeCloseTo(b.b, 5)
       }
     } finally { texture.dispose(); duplicate.dispose() }
   }
@@ -1415,7 +1523,7 @@ test('realtime PBR toggles invalidate shadows without changing progressive traci
   }
 })
 
-test('orthographic non-PBR raster restores sky and ambient lighting on rendering failure', () => {
+test('orthographic non-PBR raster passes the sky texture to the panorama pipeline and restores ambient lighting on failure', () => {
   const { probe } = photoProbe()
   probe.settings = { ...probe.settings, skybox: 'sunset', pathTracing: false, pbrMaterials: false }
   probe.hemisphere.intensity = 0
@@ -1424,12 +1532,10 @@ test('orthographic non-PBR raster restores sky and ambient lighting on rendering
   probe.scene.backgroundRotation.y = -Math.PI / 2
   probe.camera = new THREE.OrthographicCamera()
   probe.camera.lookAt(0, 0, 1)
-  const expected = skyColor('sunset', new THREE.Vector3(1, 0, 0))
   probe.raster.render = () => {
     expect(probe.raster.pbrMaterials).toBe(false)
     expect(probe.hemisphere.intensity).toBe(probe.settings.ambient)
-    expect(probe.scene.background).toBeInstanceOf(THREE.Color)
-    expect(probe.scene.background.r).toBeCloseTo(expected.r)
+    expect(probe.scene.background).toBe(probe.skyTexture)
     throw new Error('raster failed')
   }
   try {
@@ -1457,4 +1563,122 @@ test('failed sky filtering disposes the tentative texture and preserves the prev
     expect(probe.scene.environment).toBe(source)
     expect(probe.environmentTarget).toBe(environment)
   } finally { dispose.mockRestore(); environment.dispose(); source.dispose() }
+})
+
+test('fog density and tint update native tracing materials without rebuilding geometry in either workspace', () => {
+  for (const stage of ['bounded', 'world']) {
+    const { probe, pathTracer } = photoProbe()
+    probe.sceneContent.stage = stage
+    probe.sceneContent.prepareFullDetail = mock()
+    probe.settings.volumetricLighting = true
+    probe.traceFog = new THREE.Mesh(new THREE.BoxGeometry(), new FogVolumeMaterial())
+    probe.render = mock()
+    probe.startPathTracingSamples = mock()
+    probe.invalidateSceneContent = mock()
+    probe.requestPathTraceRebuild = mock()
+    try {
+      probe.setSettings({ ...probe.settings, fogDensity: 2.5, fogColor: '#4080ff' })
+      const region = volumetricRegion(probe.sceneContent.bounds, 2.5, probe.settings.fogSpread)
+      expect(probe.traceFog.material.density).toBe(region.density)
+      expect(probe.traceFog.material.color.equals(new THREE.Color('#4080ff'))).toBe(true)
+      expect(probe.traceFog.position.equals(region.bounds.getCenter(new THREE.Vector3()))).toBe(true)
+      expect(probe.traceFog.scale.equals(region.bounds.getSize(new THREE.Vector3()))).toBe(true)
+      expect(pathTracer.updateMaterials).toHaveBeenCalledTimes(1)
+      expect(probe.startPathTracingSamples).toHaveBeenCalledTimes(1)
+      expect(probe.requestPathTraceRebuild).not.toHaveBeenCalled()
+      expect(probe.invalidateSceneContent).not.toHaveBeenCalled()
+      expect(pathTracer.setSceneAsync).not.toHaveBeenCalled()
+      probe.renderRaster()
+      expect(probe.raster.volumetricLighting).toMatchObject({ ...region, color: new THREE.Color('#4080ff') })
+      probe.setSettings({ ...probe.settings })
+      expect(pathTracer.updateMaterials).toHaveBeenCalledTimes(1)
+    } finally { probe.disposePathTracer() }
+  }
+})
+
+test('fog spread changes rebuild tracing and shadow residency, including capture preparation epochs', () => {
+  for (const stage of ['bounded', 'world']) {
+    const { probe } = photoProbe()
+    probe.sceneContent.stage = stage
+    probe.sceneContent.prepareFullDetail = mock()
+    probe.settings.volumetricLighting = true
+    probe.render = mock()
+    probe.requestPathTraceRebuild = mock()
+    probe.setSettings(probe.settings)
+    const width = probe.sunlight.shadow.camera.right - probe.sunlight.shadow.camera.left
+    probe.renderer.shadowMap.needsUpdate = false
+    probe.setSettings({ ...probe.settings, fogSpread: 1 })
+    expect(probe.renderer.shadowMap.needsUpdate).toBe(true)
+    expect(probe.requestPathTraceRebuild).toHaveBeenCalledTimes(1)
+    if (stage === 'world') {
+      expect(probe.fullEpoch).toBe(1)
+      expect(probe.pathTracer).toBeUndefined()
+      expect(probe.sunlight.shadow.camera.right - probe.sunlight.shadow.camera.left).toBeGreaterThan(width)
+    }
+    probe.renderRaster()
+    expect(probe.raster.volumetricLighting.bounds.equals(volumetricRegion(probe.sceneContent.bounds, 1, 1).bounds)).toBe(true)
+  }
+})
+
+test('zero fog skips raster atmosphere and hiding the sun changes neither illumination nor tracing', () => {
+  const { probe, pathTracer } = photoProbe()
+  probe.render = mock()
+  probe.startPathTracingSamples = mock()
+  probe.settings.volumetricLighting = true
+  probe.traceFog = new THREE.Mesh(new THREE.BoxGeometry(), new FogVolumeMaterial())
+  probe.setSettings(probe.settings)
+  const light = probe.sunlight.intensity, ambient = probe.hemisphere.intensity, environment = probe.scene.environmentIntensity
+  try {
+    probe.setSettings({ ...probe.settings, fogDensity: 0 })
+    expect(probe.traceFog.material.density).toBe(0)
+    expect(pathTracer.updateMaterials).toHaveBeenCalledTimes(1)
+    probe.renderRaster()
+    expect(probe.raster.volumetricLighting).toBeUndefined()
+    probe.keyLightIndicator = { update: mock() }
+    probe.setSettings({ ...probe.settings, showSun: false })
+    probe.traceHidden = false
+    Reflect.get(Viewport.prototype, 'render').call(probe)
+    expect(probe.keyLightIndicator.update).toHaveBeenLastCalledWith(probe.camera, probe.sunlight, probe.settings.skybox, false)
+    expect([probe.sunlight.intensity, probe.hemisphere.intensity, probe.scene.environmentIntensity]).toEqual([light, ambient, environment])
+    expect(pathTracer.updateMaterials).toHaveBeenCalledTimes(1)
+    expect(pathTracer.updateLights).not.toHaveBeenCalled()
+    expect(pathTracer.setSceneAsync).not.toHaveBeenCalled()
+  } finally { probe.disposePathTracer() }
+})
+
+test('fog material changes invalidate an in-flight build and reject exact captures before encoding', async () => {
+  const { probe, calls } = photoProbe()
+  probe.render = mock()
+  probe.settings.volumetricLighting = true
+  probe.pathTracingBuildRunning = true
+  probe.setSettings({ ...probe.settings, fogDensity: 2 })
+  expect(probe.pathTracingBuildRequested).toBe(true)
+  expect(probe.pathTracingRevision).toBe(1)
+  const ready = Promise.withResolvers<void>()
+  probe.sceneContent.whenReady = () => ready.promise
+  const capture = probe.capture(true)
+  probe.setSettings({ ...probe.settings, fogColor: '#abcdef' })
+  ready.resolve()
+  await expect(capture).rejects.toThrow('changed during exact capture')
+  expect(calls).not.toContain('encode')
+  expect(probe.captures).toBe(0)
+  expect(probe.pathTracingRevision).toBe(2)
+})
+
+test('sun indicator visibility changes neither exact captures nor the panorama enable uniform', async () => {
+  const { probe } = photoProbe()
+  probe.render = mock()
+  probe.traceSky = { value: true }
+  probe.settings.skybox = 'daylight'
+  const ready = Promise.withResolvers<void>()
+  probe.sceneContent.whenReady = () => ready.promise
+  const capture = probe.capture(true)
+  probe.setSettings({ ...probe.settings, showSun: false })
+  ready.resolve()
+  await expect(capture).resolves.toHaveProperty('blob')
+  expect(probe.traceSky.value).toBe(true)
+  probe.replaceEnvironment = mock()
+  probe.updatePathTracing = mock()
+  probe.setSettings({ ...probe.settings, skybox: 'solid' })
+  expect(probe.traceSky.value).toBe(false)
 })

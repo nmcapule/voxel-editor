@@ -12,12 +12,17 @@ export type SkyboxPreset = keyof typeof SKYBOX_PRESETS
 
 export interface ViewSettings {
   skybox: SkyboxPreset
+  showSun: boolean
   background: string
   ambient: number
   light: number
   lightAzimuth: number
   ambientOcclusion: boolean
   shadows: boolean
+  volumetricLighting: boolean
+  fogDensity: number
+  fogSpread: number // Padding per side as a fraction of the longest model/scene axis.
+  fogColor: string
   grid: boolean
   faceGrid: boolean
   meshVertices: boolean
@@ -33,8 +38,9 @@ export interface ViewSettings {
 }
 
 export const DEFAULT_SETTINGS: ViewSettings = {
-  skybox: 'solid', background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42,
-  ambientOcclusion: true, shadows: true, grid: true, faceGrid: false,
+  skybox: 'solid', showSun: true, background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42,
+  ambientOcclusion: true, shadows: true, volumetricLighting: false, grid: true, faceGrid: false,
+  fogDensity: 1, fogSpread: 0.25, fogColor: '#ffffff',
   meshVertices: false, meshTriangles: false, previewRenderer: 'standard', pbrMaterials: true, projection: 'orthographic', pathTracing: true,
   tiltShift: false, tiltShiftStrength: 0.5, tiltShiftFocus: 0.5, tiltShiftWidth: 0.3,
 }
@@ -45,16 +51,20 @@ export function settingsPatch(value: unknown): Partial<ViewSettings> {
   const allowed = new Set([...Object.keys(DEFAULT_SETTINGS), 'cubeSpritesPbr'])
   for (const key of Object.keys(input)) if (!allowed.has(key)) throw invalid(`Unknown setting: ${key}.`)
   if (input.skybox !== undefined) patch.skybox = oneOf(input.skybox, 'command.patch.skybox', Object.keys(SKYBOX_PRESETS) as SkyboxPreset[])
-  if (input.background !== undefined) {
-    const background = stringValue(input.background, 'command.patch.background', 7)
-    if (!/^#[0-9a-f]{6}$/i.test(background)) throw invalid('command.patch.background must be a six-digit hex color.')
-    patch.background = background
+  if (input.showSun !== undefined) patch.showSun = booleanValue(input.showSun, 'command.patch.showSun')
+  for (const key of ['background', 'fogColor'] as const) if (input[key] !== undefined) {
+    const color = stringValue(input[key], `command.patch.${key}`, 7)
+    if (!/^#[0-9a-f]{6}$/i.test(color)) throw invalid(`command.patch.${key} must be a six-digit hex color.`)
+    patch[key] = color
   }
   if (input.ambient !== undefined) patch.ambient = numberValue(input.ambient, 'command.patch.ambient', 0, 3)
   if (input.light !== undefined) patch.light = numberValue(input.light, 'command.patch.light', 0, 5)
   if (input.lightAzimuth !== undefined) patch.lightAzimuth = numberValue(input.lightAzimuth, 'command.patch.lightAzimuth', -180, 180)
   if (input.ambientOcclusion !== undefined) patch.ambientOcclusion = booleanValue(input.ambientOcclusion, 'command.patch.ambientOcclusion')
   if (input.shadows !== undefined) patch.shadows = booleanValue(input.shadows, 'command.patch.shadows')
+  if (input.volumetricLighting !== undefined) patch.volumetricLighting = booleanValue(input.volumetricLighting, 'command.patch.volumetricLighting')
+  if (input.fogDensity !== undefined) patch.fogDensity = numberValue(input.fogDensity, 'command.patch.fogDensity', 0, 3)
+  if (input.fogSpread !== undefined) patch.fogSpread = numberValue(input.fogSpread, 'command.patch.fogSpread', 0, 1)
   if (input.grid !== undefined) patch.grid = booleanValue(input.grid, 'command.patch.grid')
   if (input.faceGrid !== undefined) patch.faceGrid = booleanValue(input.faceGrid, 'command.patch.faceGrid')
   if (input.meshVertices !== undefined) patch.meshVertices = booleanValue(input.meshVertices, 'command.patch.meshVertices')

@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test'
 import {
-  BufferAttribute, BufferGeometry, Color, CubeTexture, DataTexture, Float32BufferAttribute,
-  Mesh, MeshStandardMaterial, PerspectiveCamera, Scene, Vector4,
+  BoxGeometry, BufferAttribute, BufferGeometry, Color, CubeTexture, DataTexture, Float32BufferAttribute,
+  Mesh, MeshStandardMaterial, OrthographicCamera, PerspectiveCamera, Scene, Vector4,
 } from 'three'
 import type { Material, WebGLRenderer, WebGLRenderTarget } from 'three'
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js'
 import { BVHShaderGLSL, MeshBVH } from 'three-mesh-bvh'
 // Explicit ESM entry is the source Vite uses; Bun otherwise selects the UMD main.
-import { PathTracingSceneGenerator, WebGLPathTracer } from 'three-gpu-pathtracer/src/index.js'
+import { FogVolumeMaterial, PathTracingSceneGenerator, WebGLPathTracer } from 'three-gpu-pathtracer/src/index.js'
 // @ts-expect-error Upstream no longer declares this deprecated, still exported renderer.
 import { PathTracingRenderer } from 'three-gpu-pathtracer/src/core/PathTracingRenderer.js'
 // @ts-expect-error Upstream does not publish declarations for its internal merge helper.
@@ -488,6 +488,153 @@ test('Bun/CommonJS entry points retain the same generation, disposal and shader 
   tracer.dispose()
   expect(primary).toHaveBeenCalledTimes(1)
   expect(lowRes).toHaveBeenCalledTimes(1)
+})
+
+test('fog is baked before setSceneAsync returns, survives immediate detachment, and matches ESM/CommonJS', async () => {
+  const entries = [{ WebGLPathTracer, FogVolumeMaterial }, await import('three-gpu-pathtracer')]
+  expect(entries[0].WebGLPathTracer).not.toBe(entries[1].WebGLPathTracer)
+  let esmShader: string | undefined
+  for (const entry of entries) for (const camera of [new PerspectiveCamera(), new OrthographicCamera()]) {
+    const tracer = new entry.WebGLPathTracer(new StubRenderer() as unknown as WebGLRenderer) as any
+    const { worker, transport } = makeWorker()
+    tracer.setBVHWorker(worker)
+    const scene = makeScene(1)
+    const mesh = scene.children[0] as Mesh<BufferGeometry, MeshStandardMaterial>
+    const fog = new Mesh(new BoxGeometry(2, 2, 2), new entry.FogVolumeMaterial())
+    fog.material.density = 0.125
+    fog.uuid = 'temporary-fog'
+    fog.position.set(4, 5, 6)
+    fog.scale.set(2, 3, 4)
+    const generate = spyOn(tracer._generator, 'generate')
+    try {
+      // Serialized initial bake, unchanged bake, refit, and removal. No queued scene mutation.
+      for (const [i, includeFog] of [true, true, true, false].entries()) {
+        if (i === 2) fog.position.x++
+        if (includeFog) scene.add(fog)
+        const pending = tracer.setSceneAsync(scene, camera)
+        scene.remove(fog)
+        expect(generate).toHaveBeenCalledTimes(i + 1)
+        const baked = generate.mock.results[i].value as any
+        expect(baked.materials.includes(fog.material)).toBe(includeFog)
+        expect(baked.geometry.attributes.position.count).toBe(includeFog ? 27 : 3)
+        expect(tracer._buildAsync).toBe(false)
+        expect(tracer._generator._buildAsync).toBe(false)
+        expect(worker.running).toBe(i === 0 || i === 3)
+        if (worker.running) {
+          expect(transport.message.position.length).toBe(includeFog ? 81 : 9)
+          transport.succeed()
+        }
+        const result = await pending
+        expect(result.materials.includes(fog.material)).toBe(includeFog)
+        expect(fog.parent).toBeNull()
+        expect(fog.geometry.attributes.position.array.byteLength).toBeGreaterThan(0)
+        const material = tracer._pathTracer.material
+        material.onBeforeRender()
+        expect(material.defines.CAMERA_TYPE).toBe(camera instanceof OrthographicCamera ? 1 : 0)
+        expect(material.defines.FEATURE_FOG).toBe(includeFog ? 1 : 0)
+        if (includeFog) {
+          const index = result.materials.indexOf(fog.material)
+          const offset = index * material.defines.MATERIAL_PIXELS * 4
+          const packed = material.materials.image.data
+          expect(packed[offset + 13 * 4 + 1]).toBe(0.125)
+          expect(packed[offset + 14 * 4 + 1]).toBe(0) // Fog intentionally does not use surface castShadow.
+          expect(packed[offset + 14 * 4 + 2] & 4).toBe(4)
+          expect([...result.geometry.attributes.materialIndex.array].slice(3)).toEqual(Array(24).fill(index))
+          expect(result.geometry.attributes.position.getX(3)).toBe(i === 2 ? 7 : 6)
+        }
+      }
+      const shader = tracer._pathTracer.material.fragmentShader
+      esmShader ??= shader
+      expect(shader).toBe(esmShader)
+    } finally {
+      worker.dispose()
+      tracer.dispose()
+      fog.geometry.dispose()
+      fog.material.dispose()
+      mesh.geometry.dispose()
+      mesh.material.dispose()
+    }
+  }
+})
+
+test('installed fog GLSL excludes surface-only state and respects finite light distances (CPU control-flow probe)', () => {
+  const tracer = new PathTracingRenderer(new StubRenderer() as unknown as WebGLRenderer)
+  const shader: string = tracer.material.fragmentShader
+  tracer.dispose()
+  const predicate = (pattern: RegExp, ...args: string[]) => {
+    const expression = shader.match(pattern)?.[1]
+    expect(expression).toBeDefined()
+    return new Function(...args, `return ${expression};`)
+  }
+  const attenuatesGlass = predicate(/if \( ([^\n]+) \) \{\s*state.throughputColor \*= transmissionAttenuation/, 'surf')
+  expect(attenuatesGlass({ volumeParticle: true, get frontFace() { throw new Error('Uninitialized fog frontFace') } })).toBe(false)
+  expect(attenuatesGlass({ volumeParticle: false, frontFace: false })).toBe(true)
+  expect(attenuatesGlass({ volumeParticle: false, frontFace: true })).toBe(false)
+  const skipsNoncaster = predicate(/if \( ([^\n]*! material.castShadow && state.isShadowRay) \)/, 'hitType', 'material', 'state', 'SURFACE_HIT')
+  expect(skipsNoncaster(3, { castShadow: false }, { isShadowRay: true }, 1)).toBe(false)
+  expect(skipsNoncaster(1, { castShadow: false }, { isShadowRay: true }, 1)).toBe(true)
+  expect(skipsNoncaster(1, { castShadow: true }, { isShadowRay: true }, 1)).toBe(false)
+  expect(skipsNoncaster(1, { castShadow: false }, { isShadowRay: false }, 1)).toBe(false)
+
+  const lookup = shader.match(/Material material;[\s\S]*?(?=#if FEATURE_FOG)/)?.[0]
+  expect(lookup).toBeDefined()
+  const readMaterial = new Function('hitType', 'surfaceHit', 'uTexelFetch1D', 'readMaterialInfo', `
+    const SURFACE_HIT = 1, materialIndexAttribute = null, materials = null;
+    ${lookup!.replace(/\b(?:Material|uint)\b/g, 'let')}
+    return material;
+  `)
+  const fetch = mock(() => ({ r: 7 }))
+  expect(readMaterial(3, { get faceIndices() { throw new Error('Fog has no triangle') } }, fetch, () => {})).toBeUndefined()
+  expect(fetch).not.toHaveBeenCalled()
+  expect(readMaterial(1, { faceIndices: { x: 0 } }, fetch, (_: unknown, index: number) => index)).toBe(7)
+  expect(shader).toMatch(/if \( hitType == FOG_HIT \) \{\s*material = state.fogMaterial;\s*state.accumulatedRoughness \+= 0.2;\s*state.transmissiveRay = false;/)
+
+  // Execute the installed branches with collinear scalar rays and controlled intersections.
+  // This is not a GLSL compiler; vector math and GPU compilation are checked separately.
+  const scalarBody = (name: string) => {
+    const body = shader.match(new RegExp(`(?:int|bool) ${name}\\([\\s\\S]*?\\) \\{([\\s\\S]*?)\\n\\t\\}`))?.[1]
+    expect(body).toBeDefined()
+    return body!
+      .replace(/^\s*#(?:if|endif).*$/gm, '')
+      .replace(/SurfaceHit surfaceHit;/g, 'let surfaceHit = {};')
+      .replace(/\b(?:int|uint|bool|float|vec[234]|Material) (?=\w)/g, 'let ')
+  }
+  const traceScene = new Function('surfaceHit', 'bvhIntersectFirstHit', 'intersectFogVolume', `
+    const NO_HIT = 0, SURFACE_HIT = 1, FOG_HIT = 3, INFINITY = 1e20, RAY_OFFSET = 1e-4;
+    const bvh = null, ray = { origin: 0, direction: 1 }, fogMaterial = { fogVolume: true };
+    const rand = () => 0.5, normalize = x => x;
+    ${scalarBody('traceScene')}
+  `)
+  for (const staleDistance of [undefined, 0, 0.25]) {
+    const hit = { dist: staleDistance }
+    expect(traceScene(hit, () => false, () => 2)).toBe(3)
+    expect(hit.dist).toBe(2)
+    expect(traceScene(hit, () => false, () => 1e20)).toBe(0) // Zero density cannot create a particle.
+    expect(traceScene(hit, () => { hit.dist = 1; return true }, () => 2)).toBe(1)
+  }
+  const attenuateHit = new Function('traceScene', 'rayDist', 'budget', `
+    const NO_HIT = 0, SURFACE_HIT = 1, FOG_HIT = 3;
+    let sobolBounceIndex = 0, color;
+    const state = { traversals: 3, transmissiveTraversals: budget, isShadowRay: true, fogMaterial: {} };
+    const ray = { origin: 0, direction: 1 }, materialIndexAttribute = null, materials = null;
+    const vec3 = x => x, sign = Math.sign, distance = (a, b) => Math.abs(a - b);
+    const stepRayOrigin = (o, d, n, t) => o + d * t;
+    const uTexelFetch1D = () => ({ r: 0 }), readMaterialInfo = () => ({ fogVolume: true });
+    ${scalarBody('attenuateHit')}
+  `)
+  for (const [hits, budget, blocked] of [
+    [[[3, 2]], 0, true], [[[3, 12]], 0, false], [[[1, 12]], 0, false],
+    [[[1, 3], [3, 9]], 1, false], [[[1, 3], [3, 6]], 1, true],
+    [[[1, 1], [1, 1], [0, 0]], 0, false],
+  ] as const) {
+    let i = 0
+    expect(attenuateHit((_ray: unknown, _fog: unknown, hit: any) => {
+      const [type, dist] = hits[i++]
+      Object.assign(hit, { dist, side: 1, faceNormal: -1, faceIndices: { x: 0 } })
+      return type
+    }, 10, budget)).toBe(blocked)
+    expect(i).toBe(hits.length)
+  }
 })
 
 describe('GLSL equal-distance policy (CPU probe, GPU compilation is validated in the browser)', () => {

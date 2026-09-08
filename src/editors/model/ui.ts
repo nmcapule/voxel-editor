@@ -221,6 +221,8 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
             <p id="tilt-shift-band-help" class="panel-note">Focus runs from 0% at the top to 100% at the bottom. Sharp band width is a percentage of image height.</p>
           </div>
           <label class="select-row"><span>Skybox</span><select id="skybox">${Object.entries(SKYBOX_PRESETS).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}</select></label>
+          <label class="toggle-row"><span>Show sun/moon</span><input id="show-sun" type="checkbox" aria-describedby="show-sun-help"></label>
+          <p id="show-sun-help" class="panel-note">Direction marker only; lighting is unchanged.</p>
           <label id="background-label" class="color-row"><span>Backdrop</span><input id="background" type="color"></label>
           <label class="range-row"><span>Ambient <output id="ambient-output">1.2</output></span><input id="ambient" aria-label="Ambient light" type="range" min="0" max="3" value="1.2" step="0.1"></label>
           <label class="range-row"><span>Key light <output id="light-output">2.4</output></span><input id="light" aria-label="Key light" type="range" min="0" max="5" value="2.4" step="0.1"></label>
@@ -228,6 +230,15 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
           <p id="skybox-help" class="panel-note" hidden>Ambient scales sky lighting and reflections. Key light controls the sun or moon. Light angle rotates the sky and light.</p>
           <label class="toggle-row"><span>Ambient occlusion</span><input id="ambient-occlusion" type="checkbox"></label>
           <label class="toggle-row"><span>Shadows</span><input id="shadows" type="checkbox"></label>
+          <label class="toggle-row"><span>Volumetric lighting</span><input id="volumetric-lighting" type="checkbox" aria-describedby="volumetric-lighting-help" aria-controls="fog-controls"></label>
+          <p id="volumetric-lighting-help" class="panel-note">Adds sunbeams and haze to realtime and progressive rendering, with extra render cost. With Shadows off, haze remains.</p>
+          <div id="fog-controls" hidden>
+            <label class="range-row"><span>Density<output id="fogDensity-output" for="fogDensity">100%</output></span><input id="fogDensity" aria-label="Fog density" aria-describedby="fog-density-help" type="range" min="0" max="3" value="1" step="0.05"></label>
+            <p id="fog-density-help" class="panel-note">Density is relative: 100% is the default.</p>
+            <label class="range-row"><span>Spread<output id="fogSpread-output" for="fogSpread">25%</output></span><input id="fogSpread" aria-label="Fog spread" aria-describedby="fog-spread-help" type="range" min="0" max="1" value="0.25" step="0.05"></label>
+            <p id="fog-spread-help" class="panel-note">Spread extends atmosphere beyond the model on each side, as a percentage of its longest axis.</p>
+            <label class="color-row"><span>Fog color</span><input id="fog-color" type="color" value="#ffffff"></label>
+          </div>
           <label class="toggle-row"><span>Editing grid</span><input id="grid" type="checkbox"></label>
           <label class="toggle-row"><span>Voxel face grid</span><input id="face-grid" type="checkbox"></label>
           <label class="toggle-row" title="Show the merged mesh's vertices in edit mode"><span>Mesh vertices</span><input id="mesh-vertices" type="checkbox"></label>
@@ -235,7 +246,7 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
           <label class="toggle-row"><span>Performance monitor</span><input type="checkbox" data-performance-monitor aria-describedby="model-performance-help"></label>
           <p id="model-performance-help" class="panel-note">FPS, main-thread render time, and JS heap where available. Remembered in this browser; not included in PNG captures.</p>
           <label class="toggle-row"><span>Auto simplify rendering</span><input type="checkbox" data-auto-simplify-rendering aria-describedby="model-auto-simplify-help"></label>
-          <p id="model-auto-simplify-help" class="panel-note">While moving the camera or editing, turns off realtime PBR, shadows, ambient occlusion, and miniature photography, and pauses progressive PBR. Glass becomes opaque. Restores your settings afterward; captures keep requested quality. Remembered in this browser.</p>
+          <p id="model-auto-simplify-help" class="panel-note">While moving the camera or editing, turns off realtime PBR, shadows, ambient occlusion, volumetric lighting, and miniature photography, and pauses progressive PBR. Glass becomes opaque. Restores your settings afterward; captures keep requested quality. Remembered in this browser.</p>
           <button type="button" class="primary full" data-action="capture">${icon('camera')} Capture PNG</button>
         </section>
       </aside>

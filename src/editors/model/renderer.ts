@@ -511,8 +511,8 @@ export class VoxelRenderer {
       const pan = !this.viewport.renderMode && this.tool === 'layer' && !this.auxiliary
       controls.mouseButtons.LEFT = pan ? THREE.MOUSE.PAN : -1 as THREE.MOUSE
       if (event.pointerType !== 'touch') return
-      const orbit = this.viewport.renderMode || shouldOrbitTouch(this.touchTargetActionable(this.targetAt(event)), this.touchPointers.size)
-      controls.touches.ONE = pan ? THREE.TOUCH.PAN : orbit ? THREE.TOUCH.ROTATE : -1 as THREE.TOUCH
+      const orbit = !this.viewport.renderMode && shouldOrbitTouch(this.touchTargetActionable(this.targetAt(event)), this.touchPointers.size)
+      controls.touches.ONE = this.viewport.renderMode || pan ? THREE.TOUCH.PAN : orbit ? THREE.TOUCH.ROTATE : -1 as THREE.TOUCH
       this.orbitTouch = !pan && orbit ? { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY } : undefined
     }, { ...options, capture: true })
     canvas.addEventListener('pointerdown', event => {

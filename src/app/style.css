@@ -15,6 +15,10 @@ body { min-width: 320px; }
 .performance-monitor dd > span { display: block; min-height: 17px; }
 .performance-monitor canvas { display: block; }
 .studio[data-editor="asset"] .performance-monitor { top: 156px; }
+@media (min-width: 841px) {
+  .studio:not([data-editor="scene"]):has(.model-root .stage-panel[data-open="true"]) > .viewport .key-light-guide,
+  .studio[data-editor="scene"]:has(.scene-root .stage-panel[data-open="true"]) > .viewport .key-light-guide { right: 392px; }
+}
 @media (max-width: 840px) {
   .studio[data-editor] .performance-monitor { top: auto; bottom: calc(114px + env(safe-area-inset-bottom)); left: max(10px, env(safe-area-inset-left)); }
   .scene-return { top: 72px; left: 10px; max-width: calc(100% - 20px); gap: 8px; }

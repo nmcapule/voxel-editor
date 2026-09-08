@@ -5,10 +5,108 @@ import { PROTOCOL, SerialCommandQueue, parseRequest } from './protocol'
 import { decodeProjectSnapshot, encodeProjectSnapshot, parseProjectSnapshot } from '../../shared/voxel/snapshot'
 import { restoreProjectSnapshot, snapshotProject } from './storage'
 import { DEFAULT_SETTINGS, SKYBOX_PRESETS, type SkyboxPreset } from '../../shared/rendering/settings'
+import { Studio } from './studio'
 
 const settings = { ...DEFAULT_SETTINGS }
 
 describe('scripting protocol', () => {
+  test('fog and sun marker settings validate finite ranges, six-digit colors, and booleans', () => {
+    const parse = (patch: unknown) => parseRequest({ protocol: PROTOCOL, id: 'atmosphere', command: { type: 'settings.update', patch } }).command
+    const document = new VoxelDocument(), snapshot = encodeProjectSnapshot(document, settings), stored = snapshotProject(document, settings)
+    for (const [key, valid, invalid] of [
+      ['fogDensity', [0, 0.05, 0.123, 1, 3], [null, NaN, Infinity, -Infinity, -0.01, 3.01, true, false, '1', [], {}]],
+      ['fogSpread', [0, 0.05, 0.123, 0.25, 1], [null, NaN, Infinity, -Infinity, -0.01, 1.01, true, false, '0.25', [], {}]],
+      ['fogColor', ['#ffffff', '#000000', '#aBc123'], [null, 0, NaN, true, '', '#fff', '#ffff', '#ffffffff', '#gggggg', 'ffffff', '#123456\n', [], {}]],
+      ['showSun', [false, true], [null, 0, 1, NaN, 'false', 'true', [], {}]],
+    ] as const) {
+      for (const value of valid) expect(parse({ [key]: value })).toEqual({ type: 'settings.update', patch: { [key]: value } })
+      for (const value of invalid) {
+        const patch = { ambient: 0, [key]: value }, before = structuredClone(patch)
+        expect(() => parse(patch)).toThrow(key)
+        expect(patch).toEqual(before)
+        expect(() => parseProjectSnapshot({ ...snapshot, settings: { ...settings, ...patch } })).toThrow(key)
+        expect(() => restoreProjectSnapshot({ ...stored, settings: { ...settings, ...patch } })).toThrow(key)
+      }
+      expect(() => parse({ [key]: undefined })).toThrow('must change at least one setting')
+    }
+  })
+
+  test('fog and sun marker settings round-trip with legacy defaults and no model geometry edits', () => {
+    expect(DEFAULT_SETTINGS).toMatchObject({ fogDensity: 1, fogSpread: 0.25, fogColor: '#ffffff', showSun: true })
+    const document = new VoxelDocument()
+    document.setVoxel(1, 2, 3, 5)
+    const studio = new Studio(document, settings), before = encodeProjectSnapshot(document, studio.settings)
+    const patch = { fogDensity: 1.35, fogSpread: 0.65, fogColor: '#aBc123', showSun: false }
+    expect(studio.execute({ type: 'settings.update', patch })).toMatchObject({ changed: true, effects: { settingsChanged: true, save: true } })
+    expect(studio.document).toBe(document)
+    expect(studio.canUndo).toBe(false)
+    expect(studio.renderMode).toBe(false)
+    const snapshot = encodeProjectSnapshot(document, studio.settings), stored = snapshotProject(document, studio.settings)
+    expect(snapshot).toEqual({ ...before, settings: { ...settings, ...patch } })
+    expect(snapshot.version).toBe(1)
+    expect(stored.version).toBe(3)
+    const keys = ['fogDensity', 'fogSpread', 'fogColor', 'showSun'] as const
+    for (const missing of [[], ...keys.map(key => [key]), keys]) {
+      const legacy = structuredClone(snapshot), legacyStored = structuredClone(stored), expected = { ...studio.settings }
+      for (const key of missing) {
+        Reflect.deleteProperty(legacy.settings, key)
+        Reflect.deleteProperty(legacyStored.settings, key)
+        Reflect.set(expected, key, DEFAULT_SETTINGS[key])
+      }
+      const decoded = decodeProjectSnapshot(JSON.parse(JSON.stringify(legacy)))
+      expect(encodeProjectSnapshot(decoded.document, decoded.settings)).toEqual({ ...snapshot, settings: expected })
+      for (const version of [1, 2, 3] as const) {
+        const recovered = restoreProjectSnapshot({ ...legacyStored, version })!
+        expect(snapshotProject(recovered.document, recovered.settings)).toEqual({ ...stored, settings: expected })
+      }
+    }
+    expect(studio.execute({ type: 'settings.update', patch }).changed).toBe(false)
+  })
+
+  test('volumetric lighting accepts only booleans at command and persistence boundaries', () => {
+    const parse = (volumetricLighting: unknown) => parseRequest({ protocol: PROTOCOL, id: 'volumetric', command: { type: 'settings.update', patch: { volumetricLighting } } }).command
+    const document = new VoxelDocument(), snapshot = encodeProjectSnapshot(document, settings), stored = snapshotProject(document, settings)
+    for (const volumetricLighting of [false, true]) expect(parse(volumetricLighting)).toEqual({ type: 'settings.update', patch: { volumetricLighting } })
+    for (const volumetricLighting of [null, 0, 1, NaN, 'false', 'true', [], {}]) {
+      expect(() => parse(volumetricLighting)).toThrow('volumetricLighting must be a boolean')
+      const invalid = { ...settings, volumetricLighting }
+      expect(() => parseProjectSnapshot({ ...snapshot, settings: invalid })).toThrow('volumetricLighting')
+      expect(() => restoreProjectSnapshot({ ...stored, settings: invalid } as typeof stored)).toThrow('volumetricLighting')
+    }
+    expect(() => parse(undefined)).toThrow('must change at least one setting')
+  })
+
+  test('volumetric lighting saves without geometry edits and legacy model documents default off', () => {
+    expect(DEFAULT_SETTINGS.volumetricLighting).toBe(false)
+    const document = new VoxelDocument()
+    document.setVoxel(1, 2, 3, 5)
+    const studio = new Studio(document, { ...settings, shadows: false })
+    const before = encodeProjectSnapshot(document, studio.settings)
+    for (const volumetricLighting of [true, false]) {
+      const command = { type: 'settings.update' as const, patch: { volumetricLighting } }
+      expect(studio.execute(command)).toMatchObject({ changed: true, effects: { settingsChanged: true, save: true } })
+      const expected = { ...before.settings, volumetricLighting }
+      expect(studio.settings).toEqual(expected)
+      expect(studio.document).toBe(document)
+      expect(studio.renderMode).toBe(false)
+      expect(studio.canUndo).toBe(false)
+      const snapshot = encodeProjectSnapshot(document, studio.settings), stored = snapshotProject(document, studio.settings)
+      expect(snapshot).toEqual({ ...before, settings: expected })
+      const decoded = decodeProjectSnapshot(JSON.parse(JSON.stringify(snapshot)))
+      expect(encodeProjectSnapshot(decoded.document, decoded.settings)).toEqual(snapshot)
+      for (const version of [1, 2, 3] as const) {
+        const recovered = restoreProjectSnapshot(structuredClone({ ...stored, version }))!
+        expect(snapshotProject(recovered.document, recovered.settings)).toEqual(stored)
+        const legacy = structuredClone({ ...stored, version })
+        Reflect.deleteProperty(legacy.settings, 'volumetricLighting')
+        expect(restoreProjectSnapshot(legacy)!.settings).toEqual(before.settings)
+      }
+      Reflect.deleteProperty(snapshot.settings, 'volumetricLighting')
+      expect(decodeProjectSnapshot(snapshot).settings).toEqual(before.settings)
+      expect(studio.execute(command).changed).toBe(false)
+    }
+  })
+
   test('realtime PBR updates normalize the legacy alias and reject conflicts', () => {
     const parse = (patch: unknown) => parseRequest({ protocol: PROTOCOL, id: 'pbr', command: { type: 'settings.update', patch } }).command
     const document = new VoxelDocument()

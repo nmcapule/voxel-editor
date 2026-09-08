@@ -247,13 +247,15 @@ test('transform preview stays outside the document, mouseup commits once, Escape
   expect(probe.pointer).toBeUndefined(); expect(probe.marquee.visible).toBe(false)
 })
 
-test('scene marquee and transform cancellation releases DPR on abandonment, tool/render switches and deactivation', () => {
+test('scene cancellation releases DPR and Render touch mapping survives mode and controls changes', () => {
   const ownerDocument = Object.assign(new EventTarget(), { defaultView: new EventTarget(), hidden: false })
   const captures = new Set<number>(), raster: boolean[] = []
   const canvas = Object.assign(new EventTarget(), { ownerDocument, style: {},
     setPointerCapture(id: number) { captures.add(id) }, hasPointerCapture: (id: number) => captures.has(id), releasePointerCapture(id: number) { captures.delete(id) },
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) })
-  const viewport = { canvas, camera: new THREE.PerspectiveCamera(), controls: { enabled: true, touches: {} }, renderMode: false }
+  const viewport = { canvas, camera: new THREE.PerspectiveCamera(), controls: { enabled: true,
+    touches: { ONE: -1 as THREE.TOUCH, TWO: THREE.TOUCH.DOLLY_ROTATE },
+    mouseButtons: { LEFT: -1 as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE } }, renderMode: false }
   const host = { content: undefined as any, getSceneViewport: () => viewport, getView: () => ({}),
     setSceneContent(content: any) { this.content = content; content?.onViewportChange() },
     setRenderMode(active: boolean) { viewport.renderMode = active; this.content?.onViewportChange() },
@@ -297,6 +299,23 @@ test('scene marquee and transform cancellation releases DPR on abandonment, tool
     renderer.setActive(true); host.setRenderMode(false)
     emit('pointerdown'); emit('pointerdown', 1)
     expect(raster.at(-1)).toBe(false)
+    emit('pointercancel')
+    for (const renderMode of [true, false, true]) {
+      host.setRenderMode(renderMode)
+      const previous = viewport.controls
+      expect(previous.touches.ONE).toBe(renderMode ? THREE.TOUCH.PAN : -1 as THREE.TOUCH)
+      viewport.controls = { ...previous, touches: { ...previous.touches, ONE: -1 as THREE.TOUCH } }
+      host.content.onViewportChange()
+      expect(viewport.controls.touches).toEqual({ ONE: renderMode ? THREE.TOUCH.PAN : -1 as THREE.TOUCH, TWO: THREE.TOUCH.DOLLY_ROTATE })
+      expect(viewport.controls.mouseButtons).toEqual({ LEFT: -1 as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE })
+      if (renderMode) for (const tool of ['select', 'transform', 'place'] as const) {
+        renderer.setTool(tool)
+        emit('pointerdown'); emit('pointerdown', 1); emit('pointermove')
+        expect(probe.pointer).toBeUndefined(); expect(probe.drag).toBeUndefined()
+        expect(viewport.controls.enabled).toBe(true)
+        emit('pointerup', 1); emit('pointerup')
+      }
+    }
   } finally { renderer.dispose(); schedule.mockRestore() }
 })
 

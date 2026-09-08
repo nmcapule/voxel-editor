@@ -89,7 +89,7 @@ the quad plane; shadows use a separate light-oriented bake of the same unit cube
 
 ## Pipeline And Invalidation
 
-The raster path is `opaque color/depth -> half-resolution AO -> transparent layers ->
+The raster path is `opaque color/depth -> half-resolution AO -> optional volume integration -> transparent layers -> optional volume composite ->
 editor overlays -> FXAA -> ACES/sRGB`. Each transparent layer samples the already
 composited linear background, preserving material maps, transmission and roughness.
 Source materials and scene visibility are restored before returning, including failures.
@@ -124,7 +124,7 @@ hardware; software-GPU checks only establish rendering correctness.
 **Auto simplify rendering** is a default-off browser preference shared by both Render
 panels, stored under `voxel-studio-auto-simplify-rendering`, not in project settings or
 undo history. During camera movement and editing it disables realtime PBR, shadows,
-AO and miniature photography on live frames only. Glass temporarily becomes opaque
+AO, volumetric lighting and miniature photography on live frames only. Glass temporarily becomes opaque
 palette color. Selection feedback and authored materials/maps remain unchanged.
 Cube sprites swaps draw materials without repacking geometry. Shadow residency and
 pending shadow updates are retained while shadow rendering is skipped.
@@ -146,8 +146,54 @@ pass suppression, pixel-identical full-quality captures/restoration in both proj
 wheel/edit settling, and progressive pause/resume without camera-only BVH rebuilds.
 These checks establish correctness, not a hardware-independent performance gain.
 
-Skybox presets generate a 256x128 linear equirectangular texture for the background
-and traced environment, with a 64-pixel-face PMREM for realtime materials. Ambient
+### Volumetric Lighting
+
+`volumetricLighting` is saved per document and defaults off, including older saves.
+Both editors expose it beside Shadows. Realtime Edit/Render views, Progressive PBR,
+and PNG captures include the effect; diagnostic inspection stays atmosphere-free.
+One-finger touch dragging pans the camera in Render mode in both editors; right
+mouse drag and two-finger orbit/zoom retain their existing mappings.
+
+Enabling it reveals saved Density (`fogDensity`, 0-3, default 1), Spread
+(`fogSpread`, 0-1, default 0.25), and Fog color (`fogColor`, default `#ffffff`).
+Old documents retain the previous appearance through these defaults. The
+camera-independent air box is padded by Spread times the longest content axis
+on each side, with optical depth `0.4 * Density` across the padded longest axis.
+Zero density skips realtime scattering; tint colors scattering, not extinction.
+Realtime uses a
+48-step single-scattering raymarch of opaque depth with the key light's comparison
+shadow map. Visible air is a shadow receiver for scene streaming, including offscreen
+casters. Shadows off retains unshadowed haze. The off state skips effect GPU work;
+buffers are allocated lazily and follow viewport resize/disposal/context recovery.
+
+Progressive PBR uses the installed `FogVolumeMaterial` with the same bounds/density.
+The serialized, pinned generator bakes the temporary volume synchronously before
+its worker await, so no fog mesh remains in the live scene or authored content.
+Fog toggles and spread changes rebuild tracing and shadow coverage; density/tint
+update native fog materials and restart accumulation without a BVH rebuild.
+Ordinary camera changes do not rebuild the volume. The four-bounce tracer reserves
+eight extra boundary traversals for the air box, retaining its normal glass budget.
+The dependency patch corrects fog-hit distance/state handling and prevents treating
+volume particles as glass or non-shadow-casting surfaces. The volume adds 12
+triangles and one material to full-scene budget checks.
+
+Realtime transparent layers receive the opaque ray's atmosphere, not refracted
+or per-layer transport. Tracing includes volumetric scattering but can remain
+noisy at the existing 128-sample ceiling. Large-scene shadow-map resolution and
+adaptive caster LOD still limit narrow realtime shafts. No new dependency or
+unbounded temporal accumulation is introduced.
+
+For GPU regression checks, open `/tests/transparency.html`, then run
+`import('/tests/volumetric.ts').then(m => m.runVolumetricChecks(transparencyTest.renderer, transparencyTest.settings, transparencyTest.errors))`
+and poll `window.volumetricChecks`. Run sequentially with other GPU suites.
+
+Skybox presets generate a deterministic 1024x512 linear half-float equirectangular
+texture (4 MiB source) with procedural cloud noise, layered mountain ridges, pine
+silhouettes, and textured ground. These are distant backdrop/environment details,
+not editable or shadow-casting scene geometry. Night adds a bounded lunar disk/glow
+and stronger blue moonlight (`keyStrength=0.65`, formerly 0.03), without increasing
+global exposure. The texture supplies the background and traced environment,
+with a 64-pixel-face PMREM for realtime materials. Ambient
 scales sky illumination and reflections; the hemisphere is disabled in sky mode.
 Preset sun/moon color, elevation and strength combine with the existing Key light
 and Light angle controls. The latter rotates the background, environment and key
@@ -155,11 +201,26 @@ together without regenerating textures. Solid color retains the original room an
 hemisphere lighting. The viewport owns and replaces both sky resources on preset
 changes; model, scene and capture materials only borrow them. Context loss releases
 GPU handles before restoration rebuilds PMREM and reuploads the retained CPU sky.
-Orthographic raster backgrounds sample the parallel viewing direction, matching
-tracing instead of Three's small unit sky cube. Perspective cameras show the panorama.
+Perspective cameras show the native panorama. Orthographic views use an 80-degree
+perspective-style backdrop following camera orientation and aspect, while model
+rays, picking, and environmental illumination remain orthographic. A shared shader
+formula draws the raster backdrop before opaque geometry and adjusts only traced
+primary/transmissive background misses. The guarded per-instance integration is
+pinned to the installed tracer; it preserves refraction's angular deflection and
+does not patch camera rays, BVH traversal, or indirect environment sampling.
+The viewport also shows a DOM sun/moon direction marker, derived from the actual
+key light and camera orientation. Its view-space compass works in both projections,
+stays onscreen with Ahead/Behind text, and is unaffected by pan or zoom. It is a
+navigation aid, not a second light or sky texture: scene lighting, reflections and
+PNG captures are unchanged. Night uses the moon; other presets, including Solid,
+use the sun. The saved **Show sun/moon** setting (`showSun`, default true) hides
+only this compass, not the key light or the night panorama's lunar glow.
 Both PNG capture qualities include the selected sky; VOX and CPU library thumbnails
 remain unchanged. Run `transparencyTest.runSkyboxChecks()` in the browser harness for
 preset, material, projection, capture and context-recovery regressions.
+`import('/tests/scenery.ts').then(m => m.runSceneryChecks(transparencyTest.renderer, transparencyTest.settings, transparencyTest.errors))`
+adds bounded panorama parity, moonlight, indicator visibility, and fog-control GPU
+checks; poll `window.sceneryChecks` and run sequentially with other GPU suites.
 
 Miniature photography is an optional Render-mode finishing effect shared by raster and
 PBR, including low-resolution previews and PNG captures. `tilt-shift.ts` copies the

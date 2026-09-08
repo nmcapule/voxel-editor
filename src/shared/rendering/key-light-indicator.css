@@ -1,0 +1,37 @@
+.key-light-guide {
+  position: absolute;
+  z-index: 1;
+  inset: min(25%, 116px) min(15%, 48px) min(30%, 150px);
+  pointer-events: none;
+  user-select: none;
+}
+.key-light-guide[hidden] { display: none; }
+.key-light-indicator {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  width: 72px;
+  transform: translate(-50%, -50%);
+  font: 12px/1.3 "Avenir Next", "Segoe UI Variable", "Segoe UI", Helvetica, Arial, sans-serif;
+}
+.key-light-indicator > span:not(.key-light-caption) {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #fff0bd;
+  color: #754409;
+  box-shadow: 0 2px 6px rgb(25 35 47 / 18%);
+}
+.key-light-indicator > span.key-light-moon { color: #334c7a; background: #e4edff; box-shadow: 0 2px 6px rgb(25 35 47 / 18%), 0 0 22px 7px rgb(175 203 255 / 40%); }
+.key-light-indicator[data-body="sun"] > .key-light-moon,
+.key-light-indicator[data-body="moon"] > .key-light-sun { display: none; }
+.key-light-indicator svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.key-light-caption { display: grid; justify-items: center; padding: 3px 7px; border-radius: 6px; color: #20262c; background: #f9faf8; box-shadow: 0 2px 6px rgb(25 35 47 / 12%); }
+.key-light-caption strong { font-weight: 700; }
+@media (max-width: 840px) {
+  .key-light-guide { top: min(50%, 160px); bottom: max(164px, calc(env(safe-area-inset-bottom) + 154px)); }
+}

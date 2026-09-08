@@ -125,16 +125,36 @@ data uses tabular figures.
   Its camera is orthographic and Progressive PBR is disabled without erasing the saved
   preference. A missing plugin shows Standard with an explicit fallback notice while
   retaining the saved choice. Keep the existing independent AO and shadow switches.
+- Both Render tabs place **Volumetric lighting** beside **Shadows**, using the existing
+  native checkbox row. It is saved per document and defaults off. Help explains
+  sunbeams in realtime and Progressive PBR, added rendering cost, and unshadowed
+  haze with Shadows off. The effect is visible in Edit/Render views and PNG captures.
+  Enabling it reveals native **Density** (0-300%, default 100%), **Spread** (0-100%,
+  default 25% padding on each side), and **Fog color** controls. Density and spread
+  are relative to model/scene scale; settings persist with each document.
+- One-finger touch dragging pans in Render mode in both editors, like the model
+  Layer tool. Mouse mappings and two-finger orbit/zoom remain unchanged.
 - Both Render tabs offer **Miniature photography**, a saved, default-off tilt-shift
   effect visible only in Render mode and included in PNG captures from that mode.
   Enabling it reveals native percentage sliders for **Blur strength**, **Focus
   position** (top to bottom), and **Sharp band width** (fraction of image height),
   without changing render mode or camera. Model sliders preview during dragging;
   scene sliders update on release or keyboard changes as one undoable command.
-- Both Render tabs place a native **Skybox** select immediately before **Backdrop**.
+- Both Render tabs place a native **Skybox** select before **Backdrop**.
   **Solid color** is the default; Daylight, Overcast, Sunset, and Night hide the
   backdrop color control without resetting it or the lighting controls.
   Show the short Ambient, Key light, and Light angle explanation only for active skies.
+  Non-solid presets include procedural clouds, layered mountain ranges and pine
+  silhouettes. Orthographic models retain their projection but get a perspective-style
+  panoramic backdrop. Night has a glowing moon and stronger actual moonlight, not
+  merely a brighter icon; the other presets and global exposure remain independently controlled.
+- A default-on key-light compass, not a scene object, shows warm **Sun** for Solid color,
+  Daylight, Overcast, and Sunset; cool **Moon** for Night, with porcelain **Ahead/Behind** labels.
+  It follows actual light and camera orientation in view space for orthographic/perspective views,
+  stays stable on pan/zoom, never intercepts pointers, and leaves lighting and PNG captures unchanged.
+  It avoids the desktop Stage inspector and clears mobile chrome, dock, and safe area.
+  A saved **Show sun/moon** checkbox beside Skybox hides only the compass, without
+  turning off illumination or the night panorama's moon. The moon marker has a cool glow.
 - Render mode and PNG captures show authored geometry against the selected backdrop
   or sky, without an automatic ground plane. The editing grid remains an edit-only guide.
 - The optional voxel face grid traces exposed unit-cell boundaries in adaptive

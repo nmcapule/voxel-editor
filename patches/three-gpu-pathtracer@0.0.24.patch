@@ -1,5 +1,5 @@
 diff --git a/build/index.umd.cjs b/build/index.umd.cjs
-index 820b20465257564ddca61a195afc444be3c6dfee..659d8cb03a4d9bc2b7a614b6390c7e0ab4eb6b45 100644
+index 820b20465257564ddca61a195afc444be3c6dfee..88389515513092286bf68e7f1e381823b68525c2 100644
 --- a/build/index.umd.cjs
 +++ b/build/index.umd.cjs
 @@ -188,6 +188,7 @@
@@ -72,13 +72,13 @@ index 820b20465257564ddca61a195afc444be3c6dfee..659d8cb03a4d9bc2b7a614b6390c7e0a
 +				try {
 +
 +					result = this.generate( onProgress );
-+
+ 
 +				} finally {
 +
 +					this._buildAsync = false;
 +
 +				}
- 
++
 +				// Keep failed BVH promises rejected: transferred buffers may be detached.
 +				// Recovery requires a new generator and worker, not just clearing this.bvh.
  				result.bvh = this.bvh = await result.bvh;
@@ -131,7 +131,53 @@ index 820b20465257564ddca61a195afc444be3c6dfee..659d8cb03a4d9bc2b7a614b6390c7e0a
  			this.fsQuad.dispose();
  
  		}
-@@ -7221,6 +7263,23 @@ bool bvhIntersectFogVolumeHit(
+@@ -6463,20 +6505,20 @@ bool bvhIntersectFogVolumeHit(
+ 
+ 			int hitType = traceScene( ray, fogMaterial, surfaceHit );
+ 
+-			if ( hitType == FOG_HIT ) {
++			// Neither surfaces nor fog particles beyond the light can occlude it.
++			if ( hitType != NO_HIT && distance( startPoint, ray.origin + ray.direction * surfaceHit.dist ) > rayDist ) {
+ 
+-				result = true;
++				result = false;
+ 				break;
+ 
+-			} else if ( hitType == SURFACE_HIT ) {
++			}
+ 
+-				float totalDist = distance( startPoint, ray.origin + ray.direction * surfaceHit.dist );
+-				if ( totalDist > rayDist ) {
++			if ( hitType == FOG_HIT ) {
+ 
+-					result = false;
+-					break;
++				result = true;
++				break;
+ 
+-				}
++			} else if ( hitType == SURFACE_HIT ) {
+ 
+ 				// TODO: attenuate the contribution based on the PDF of the resulting ray including refraction values
+ 				// Should be able to work using the material BSDF functions which will take into account specularity, etc.
+@@ -6496,7 +6538,7 @@ bool bvhIntersectFogVolumeHit(
+ 					fogMaterial = material;
+ 					fogMaterial.fogVolume = surfaceHit.side == 1.0;
+ 					i -= sign( transmissiveTraversals );
+-					transmissiveTraversals --;
++					transmissiveTraversals -= sign( transmissiveTraversals );
+ 					continue;
+ 
+ 				}
+@@ -7185,6 +7227,7 @@ bool bvhIntersectFogVolumeHit(
+ 	) {
+ 
+ 		int result = NO_HIT;
++		surfaceHit.dist = INFINITY;
+ 		bool hit = bvhIntersectFirstHit( bvh, ray.origin, ray.direction, surfaceHit.faceIndices, surfaceHit.faceNormal, surfaceHit.barycoord, surfaceHit.side, surfaceHit.dist );
+ 
+ 		#if FEATURE_FOG
+@@ -7221,6 +7264,23 @@ bool bvhIntersectFogVolumeHit(
  
  	class PhysicalPathTracingMaterial extends MaterialBase {
  
@@ -155,7 +201,49 @@ index 820b20465257564ddca61a195afc444be3c6dfee..659d8cb03a4d9bc2b7a614b6390c7e0a
  		onBeforeRender() {
  
  			this.setDefine( 'FEATURE_DOF', this.physicalCamera.bokehSize === 0 ? 0 : 1 );
-@@ -8001,10 +8060,14 @@ bool bvhIntersectFogVolumeHit(
+@@ -7602,8 +7662,13 @@ bool bvhIntersectFogVolumeHit(
+ 
+ 						}
+ 
+-						uint materialIndex = uTexelFetch1D( materialIndexAttribute, surfaceHit.faceIndices.x ).r;
+-						Material material = readMaterialInfo( materials, materialIndex );
++						Material material;
++						if ( hitType == SURFACE_HIT ) {
++
++							uint materialIndex = uTexelFetch1D( materialIndexAttribute, surfaceHit.faceIndices.x ).r;
++							material = readMaterialInfo( materials, materialIndex );
++
++						}
+ 
+ 						#if FEATURE_FOG
+ 
+@@ -7611,6 +7676,7 @@ bool bvhIntersectFogVolumeHit(
+ 
+ 							material = state.fogMaterial;
+ 							state.accumulatedRoughness += 0.2;
++							state.transmissiveRay = false;
+ 
+ 						} else if ( material.fogVolume ) {
+ 
+@@ -7637,7 +7703,7 @@ bool bvhIntersectFogVolumeHit(
+ 
+ 						// if we've determined that this is a shadow ray and we've hit an item with no shadow casting
+ 						// then skip it
+-						if ( ! material.castShadow && state.isShadowRay ) {
++						if ( hitType == SURFACE_HIT && ! material.castShadow && state.isShadowRay ) {
+ 
+ 							ray.origin = stepRayOrigin( ray.origin, ray.direction, - surfaceHit.faceNormal, surfaceHit.dist );
+ 							continue;
+@@ -7715,7 +7781,7 @@ bool bvhIntersectFogVolumeHit(
+ 
+ 						// handle throughput color transformation
+ 						// attenuate the throughput color by the medium color
+-						if ( ! surf.frontFace ) {
++						if ( ! surf.volumeParticle && ! surf.frontFace ) {
+ 
+ 							state.throughputColor *= transmissionAttenuation( surfaceHit.dist, surf.attenuationColor, surf.attenuationDistance );
+ 
+@@ -8001,10 +8067,14 @@ bool bvhIntersectFogVolumeHit(
  			this._renderer = renderer;
  			this._alpha = false;
  			this._fsQuad = new Pass_js.FullScreenQuad( new PhysicalPathTracingMaterial() );
@@ -170,7 +258,7 @@ index 820b20465257564ddca61a195afc444be3c6dfee..659d8cb03a4d9bc2b7a614b6390c7e0a
  
  			this._sobolTarget = new SobolNumberMapGenerator().generate( renderer );
  
-@@ -8033,7 +8096,10 @@ bool bvhIntersectFogVolumeHit(
+@@ -8033,7 +8103,10 @@ bool bvhIntersectFogVolumeHit(
  			// before starting to render
  			this._compileFunction = () => {
  
@@ -182,7 +270,7 @@ index 820b20465257564ddca61a195afc444be3c6dfee..659d8cb03a4d9bc2b7a614b6390c7e0a
  				promise.then( () => {
  
  					if ( this._compilePromise === promise ) {
-@@ -8042,9 +8108,16 @@ bool bvhIntersectFogVolumeHit(
+@@ -8042,9 +8115,16 @@ bool bvhIntersectFogVolumeHit(
  
  					}
  
@@ -201,7 +289,7 @@ index 820b20465257564ddca61a195afc444be3c6dfee..659d8cb03a4d9bc2b7a614b6390c7e0a
  
  			};
  
-@@ -8052,8 +8125,9 @@ bool bvhIntersectFogVolumeHit(
+@@ -8052,8 +8132,9 @@ bool bvhIntersectFogVolumeHit(
  
  		}
  
@@ -212,7 +300,7 @@ index 820b20465257564ddca61a195afc444be3c6dfee..659d8cb03a4d9bc2b7a614b6390c7e0a
  			return this._renderer.compileAsync( this._fsQuad._mesh );
  
  		}
-@@ -8117,11 +8191,19 @@ bool bvhIntersectFogVolumeHit(
+@@ -8117,11 +8198,19 @@ bool bvhIntersectFogVolumeHit(
  
  		dispose() {
  
@@ -232,7 +320,7 @@ index 820b20465257564ddca61a195afc444be3c6dfee..659d8cb03a4d9bc2b7a614b6390c7e0a
  			this._fsQuad.dispose();
  			this._blendQuad.dispose();
  			this._task = null;
-@@ -8139,13 +8221,15 @@ bool bvhIntersectFogVolumeHit(
+@@ -8139,13 +8228,15 @@ bool bvhIntersectFogVolumeHit(
  			_renderer.setClearColor( 0, 0 );
  			_renderer.clearColor();
  
@@ -254,7 +342,7 @@ index 820b20465257564ddca61a195afc444be3c6dfee..659d8cb03a4d9bc2b7a614b6390c7e0a
  
  			_renderer.setClearColor( ogClearColor, ogClearAlpha );
  			_renderer.setRenderTarget( ogRenderTarget );
-@@ -8165,6 +8249,9 @@ bool bvhIntersectFogVolumeHit(
+@@ -8165,6 +8256,9 @@ bool bvhIntersectFogVolumeHit(
  
  		update() {
  
@@ -264,7 +352,7 @@ index 820b20465257564ddca61a195afc444be3c6dfee..659d8cb03a4d9bc2b7a614b6390c7e0a
  			// ensure we've updated our defines before rendering so we can ensure we
  			// can wait for compilation to finish
  			this.material.onBeforeRender();
-@@ -8531,6 +8618,7 @@ bool bvhIntersectFogVolumeHit(
+@@ -8531,6 +8625,7 @@ bool bvhIntersectFogVolumeHit(
  
  		dispose() {
  
@@ -272,7 +360,7 @@ index 820b20465257564ddca61a195afc444be3c6dfee..659d8cb03a4d9bc2b7a614b6390c7e0a
  			this._quad.dispose();
  
  		}
-@@ -8639,6 +8727,7 @@ bool bvhIntersectFogVolumeHit(
+@@ -8639,6 +8734,7 @@ bool bvhIntersectFogVolumeHit(
  			this._queueReset = false;
  			this._clock = new three.Clock();
  			this._compilePromise = null;
@@ -280,7 +368,7 @@ index 820b20465257564ddca61a195afc444be3c6dfee..659d8cb03a4d9bc2b7a614b6390c7e0a
  
  			this._lowResPathTracer = new PathTracingRenderer( renderer );
  			this._lowResPathTracer.tiles.set( 1, 1 );
-@@ -8722,10 +8811,15 @@ bool bvhIntersectFogVolumeHit(
+@@ -8722,10 +8818,15 @@ bool bvhIntersectFogVolumeHit(
  		setSceneAsync( ...args ) {
  
  			this._buildAsync = true;
@@ -299,7 +387,7 @@ index 820b20465257564ddca61a195afc444be3c6dfee..659d8cb03a4d9bc2b7a614b6390c7e0a
  
  		}
  
-@@ -8783,7 +8877,7 @@ bool bvhIntersectFogVolumeHit(
+@@ -8783,7 +8884,7 @@ bool bvhIntersectFogVolumeHit(
  			const scene = this.scene;
  			const material = this._pathTracer.material;
  
@@ -308,7 +396,7 @@ index 820b20465257564ddca61a195afc444be3c6dfee..659d8cb03a4d9bc2b7a614b6390c7e0a
  
  				this._internalBackground.dispose();
  				this._internalBackground = null;
-@@ -8821,7 +8915,17 @@ bool bvhIntersectFogVolumeHit(
+@@ -8821,7 +8922,17 @@ bool bvhIntersectFogVolumeHit(
  
  				if ( scene.background !== this._previousBackground ) {
  
@@ -327,7 +415,7 @@ index 820b20465257564ddca61a195afc444be3c6dfee..659d8cb03a4d9bc2b7a614b6390c7e0a
  					this._internalBackground = background;
  					material.backgroundMap = background;
  					material.backgroundAlpha = 1;
-@@ -8844,8 +8948,19 @@ bool bvhIntersectFogVolumeHit(
+@@ -8844,8 +8955,19 @@ bool bvhIntersectFogVolumeHit(
  
  					if ( scene.environment.isCubeTexture ) {
  
@@ -349,7 +437,7 @@ index 820b20465257564ddca61a195afc444be3c6dfee..659d8cb03a4d9bc2b7a614b6390c7e0a
  
  					} else {
  
-@@ -8915,6 +9030,8 @@ bool bvhIntersectFogVolumeHit(
+@@ -8915,6 +9037,8 @@ bool bvhIntersectFogVolumeHit(
  
  		renderSample() {
  
@@ -358,7 +446,7 @@ index 820b20465257564ddca61a195afc444be3c6dfee..659d8cb03a4d9bc2b7a614b6390c7e0a
  			const lowResPathTracer = this._lowResPathTracer;
  			const pathTracer = this._pathTracer;
  			const renderer = this._renderer;
-@@ -9025,9 +9142,16 @@ bool bvhIntersectFogVolumeHit(
+@@ -9025,9 +9149,16 @@ bool bvhIntersectFogVolumeHit(
  
  		dispose() {
  
@@ -725,7 +813,7 @@ index 81230070666694c7d7dc3ad006e1f45408b5f8ab..8cf2a63361d0af46ce61a78bf88f8345
  }
  
 diff --git a/src/materials/pathtracing/PhysicalPathTracingMaterial.js b/src/materials/pathtracing/PhysicalPathTracingMaterial.js
-index 1794015eeb804de9e8b813500a27c1fac4d8caea..0c830d2d112d4e3a1f1626bb0495b8280a39a340 100644
+index 1794015eeb804de9e8b813500a27c1fac4d8caea..610efc93e02da6d4fb384343c28cc3f87495ba24 100644
 --- a/src/materials/pathtracing/PhysicalPathTracingMaterial.js
 +++ b/src/materials/pathtracing/PhysicalPathTracingMaterial.js
 @@ -28,6 +28,23 @@ import * as RenderGLSL from './glsl/index.js';
@@ -752,6 +840,102 @@ index 1794015eeb804de9e8b813500a27c1fac4d8caea..0c830d2d112d4e3a1f1626bb0495b828
  	onBeforeRender() {
  
  		this.setDefine( 'FEATURE_DOF', this.physicalCamera.bokehSize === 0 ? 0 : 1 );
+@@ -409,8 +426,13 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
+ 
+ 						}
+ 
+-						uint materialIndex = uTexelFetch1D( materialIndexAttribute, surfaceHit.faceIndices.x ).r;
+-						Material material = readMaterialInfo( materials, materialIndex );
++						Material material;
++						if ( hitType == SURFACE_HIT ) {
++
++							uint materialIndex = uTexelFetch1D( materialIndexAttribute, surfaceHit.faceIndices.x ).r;
++							material = readMaterialInfo( materials, materialIndex );
++
++						}
+ 
+ 						#if FEATURE_FOG
+ 
+@@ -418,6 +440,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
+ 
+ 							material = state.fogMaterial;
+ 							state.accumulatedRoughness += 0.2;
++							state.transmissiveRay = false;
+ 
+ 						} else if ( material.fogVolume ) {
+ 
+@@ -444,7 +467,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
+ 
+ 						// if we've determined that this is a shadow ray and we've hit an item with no shadow casting
+ 						// then skip it
+-						if ( ! material.castShadow && state.isShadowRay ) {
++						if ( hitType == SURFACE_HIT && ! material.castShadow && state.isShadowRay ) {
+ 
+ 							ray.origin = stepRayOrigin( ray.origin, ray.direction, - surfaceHit.faceNormal, surfaceHit.dist );
+ 							continue;
+@@ -522,7 +545,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
+ 
+ 						// handle throughput color transformation
+ 						// attenuate the throughput color by the medium color
+-						if ( ! surf.frontFace ) {
++						if ( ! surf.volumeParticle && ! surf.frontFace ) {
+ 
+ 							state.throughputColor *= transmissionAttenuation( surfaceHit.dist, surf.attenuationColor, surf.attenuationDistance );
+ 
+diff --git a/src/materials/pathtracing/glsl/attenuate_hit_function.glsl.js b/src/materials/pathtracing/glsl/attenuate_hit_function.glsl.js
+index d172d4914043f337355b8d1dd307c9dce4fcbb3c..6a52c36274e5716f5705ea787735dd6ce65d6513 100644
+--- a/src/materials/pathtracing/glsl/attenuate_hit_function.glsl.js
++++ b/src/materials/pathtracing/glsl/attenuate_hit_function.glsl.js
+@@ -30,20 +30,20 @@ export const attenuate_hit_function = /* glsl */`
+ 
+ 			int hitType = traceScene( ray, fogMaterial, surfaceHit );
+ 
+-			if ( hitType == FOG_HIT ) {
++			// Neither surfaces nor fog particles beyond the light can occlude it.
++			if ( hitType != NO_HIT && distance( startPoint, ray.origin + ray.direction * surfaceHit.dist ) > rayDist ) {
+ 
+-				result = true;
++				result = false;
+ 				break;
+ 
+-			} else if ( hitType == SURFACE_HIT ) {
++			}
+ 
+-				float totalDist = distance( startPoint, ray.origin + ray.direction * surfaceHit.dist );
+-				if ( totalDist > rayDist ) {
++			if ( hitType == FOG_HIT ) {
+ 
+-					result = false;
+-					break;
++				result = true;
++				break;
+ 
+-				}
++			} else if ( hitType == SURFACE_HIT ) {
+ 
+ 				// TODO: attenuate the contribution based on the PDF of the resulting ray including refraction values
+ 				// Should be able to work using the material BSDF functions which will take into account specularity, etc.
+@@ -63,7 +63,7 @@ export const attenuate_hit_function = /* glsl */`
+ 					fogMaterial = material;
+ 					fogMaterial.fogVolume = surfaceHit.side == 1.0;
+ 					i -= sign( transmissiveTraversals );
+-					transmissiveTraversals --;
++					transmissiveTraversals -= sign( transmissiveTraversals );
+ 					continue;
+ 
+ 				}
+diff --git a/src/materials/pathtracing/glsl/trace_scene_function.glsl.js b/src/materials/pathtracing/glsl/trace_scene_function.glsl.js
+index 5d537355ed968d9b082c6d76d4a49afa33b988e6..86ed086ff7a42922a3a76ceeecda2de582f93b27 100644
+--- a/src/materials/pathtracing/glsl/trace_scene_function.glsl.js
++++ b/src/materials/pathtracing/glsl/trace_scene_function.glsl.js
+@@ -13,6 +13,7 @@ export const trace_scene_function = /* glsl */`
+ 	) {
+ 
+ 		int result = NO_HIT;
++		surfaceHit.dist = INFINITY;
+ 		bool hit = bvhIntersectFirstHit( bvh, ray.origin, ray.direction, surfaceHit.faceIndices, surfaceHit.faceNormal, surfaceHit.barycoord, surfaceHit.side, surfaceHit.dist );
+ 
+ 		#if FEATURE_FOG
 diff --git a/src/uniforms/RenderTarget2DArray.js b/src/uniforms/RenderTarget2DArray.js
 index 7bb324764fc5e11c212ff5aec7a02c014003c834..f62903219f20c8be0948ba773edf0c32f2472c49 100644
 --- a/src/uniforms/RenderTarget2DArray.js

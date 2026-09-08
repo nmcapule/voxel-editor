@@ -580,6 +580,59 @@ test('Layer release activates the starting layer; primary drags use real screen-
   }
 })
 
+test('Render touch drags pan in both projections without editing or changing mouse and two-finger navigation', () => {
+  for (const camera of [new PerspectiveCamera(), new OrthographicCamera(-10, 10, 10, -10)]) {
+    const gesture = modelGestureProbe(), { probe, emit, target } = gesture
+    const selected = probe.callbacks.onLayerSelect = mock(), picked = probe.callbacks.onPick = mock()
+    Object.assign(probe.viewport, { camera, renderMode: true, callbacks: {}, cameraChanged() { camera.updateMatrixWorld() }, setRasterInteraction() {} })
+    camera.position.set(12, 8, 12)
+    const controls = Reflect.get(Viewport.prototype, 'createControls').call(probe.viewport, camera)
+    probe.viewport.controls = controls
+    try {
+      for (const tool of ['select', 'paint', 'sculpt', 'layer']) for (const auxiliary of [undefined, 'pick']) for (const occupied of [false, true]) {
+        probe.setToolState(tool, 'paint', auxiliary)
+        probe.targetAt = () => occupied ? target : undefined
+        const before = camera.position.clone(), pivot = controls.target.clone(), orientation = camera.quaternion.clone()
+        emit('pointerdown', { pointerType: 'touch' })
+        expect(controls.touches.ONE).toBe(TOUCH.PAN)
+        expect(controls.mouseButtons).toEqual({ LEFT: -1, MIDDLE: MOUSE.PAN, RIGHT: MOUSE.ROTATE })
+        expect(probe.orbitTouch).toBeUndefined()
+        emit('pointermove', { pointerType: 'touch', clientX: 75 })
+        expect(camera.position.distanceTo(before)).toBeGreaterThan(0)
+        expect(camera.position.clone().sub(before).distanceTo(controls.target.clone().sub(pivot))).toBeLessThan(1e-10)
+        expect(camera.quaternion.angleTo(orientation)).toBeLessThan(1e-7)
+        emit('pointerup', { pointerType: 'touch', clientX: 75 })
+        emit('pointerdown', { pointerType: 'touch' }); emit('pointerup', { pointerType: 'touch' })
+      }
+      for (const pointerType of ['mouse', 'pen']) for (const button of [0, 1, 2]) {
+        const before = camera.position.clone(), offset = before.clone().sub(controls.target)
+        emit('pointerdown', { pointerType, button })
+        emit('pointermove', { pointerType, button, clientX: 70 })
+        emit('pointerup', { pointerType, button, clientX: 70 })
+        expect(camera.position.distanceTo(before) > 1e-6).toBe(button !== 0)
+        expect(camera.position.clone().sub(controls.target).distanceTo(offset) > 1e-6).toBe(button === 2)
+      }
+      const distance = camera.position.distanceTo(controls.target), zoom = camera.zoom, orientation = camera.quaternion.clone()
+      emit('pointerdown', { pointerType: 'touch', pointerId: 1, clientX: 30 })
+      emit('pointerdown', { pointerType: 'touch', pointerId: 2, clientX: 70 })
+      expect(controls.touches.TWO).toBe(TOUCH.DOLLY_ROTATE)
+      emit('pointermove', { pointerType: 'touch', pointerId: 2, clientX: 90 })
+      expect(camera.zoom !== zoom || Math.abs(camera.position.distanceTo(controls.target) - distance) > 1e-6).toBe(true)
+      expect(camera.quaternion.angleTo(orientation)).toBeGreaterThan(1e-6)
+      emit('pointerup', { pointerType: 'touch', pointerId: 2, clientX: 90 })
+      const before = camera.position.clone(), pivot = controls.target.clone()
+      emit('pointermove', { pointerType: 'touch', pointerId: 1, clientX: 45 })
+      expect(camera.position.distanceTo(before)).toBeGreaterThan(0)
+      expect(camera.position.clone().sub(before).distanceTo(controls.target.clone().sub(pivot))).toBeLessThan(1e-10)
+      emit('pointerup', { pointerType: 'touch', pointerId: 1, clientX: 45 })
+      expect(gesture.commits()).toBe(0)
+      expect(selected).not.toHaveBeenCalled()
+      expect(picked).not.toHaveBeenCalled()
+      expect(probe.touchPointers.size).toBe(0)
+    } finally { controls.dispose(); gesture.dispose() }
+  }
+})
+
 test('Layer clicks cancel on abandonment and transitions; pointer mapping uses replacement controls', () => {
   const gesture = modelGestureProbe(), { probe, emit, ownerDocument } = gesture
   const selected = probe.callbacks.onLayerSelect = mock()
@@ -611,7 +664,7 @@ test('Layer clicks cancel on abandonment and transitions; pointer mapping uses r
     probe.viewport.renderMode = true
     emit('pointerdown', { pointerType: 'touch' })
     expect(probe.viewport.controls.mouseButtons.LEFT).toBe(-1)
-    expect(probe.viewport.controls.touches.ONE).toBe(TOUCH.ROTATE)
+    expect(probe.viewport.controls.touches.ONE).toBe(TOUCH.PAN)
     emit('pointerup', { pointerType: 'touch' })
     expect(selected).toHaveBeenCalledTimes(1)
     probe.modelSuspended = true

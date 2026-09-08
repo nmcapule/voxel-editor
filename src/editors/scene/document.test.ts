@@ -33,6 +33,107 @@ function fixture(instances = [instance()], assets = [asset()]): SceneManifest {
 }
 
 describe('scene boundary', () => {
+  test('fog and sun marker settings round-trip independently in scenes and child models with legacy defaults', () => {
+    const manifest = structuredClone(fixture())
+    manifest.settings = { ...settings, fogDensity: 1.35, fogSpread: 0.65, fogColor: '#aBc123', showSun: false }
+    manifest.assets[0].model.settings = { ...settings, fogDensity: 0, fogSpread: 1, fogColor: '#000000', showSun: true }
+    const keys = ['fogDensity', 'fogSpread', 'fogColor', 'showSun'] as const
+    for (const missing of [[], ...keys.map(key => [key]), keys]) {
+      const legacy = structuredClone(manifest), expected = structuredClone(manifest)
+      for (const key of missing) {
+        Reflect.deleteProperty(legacy.settings, key)
+        Reflect.deleteProperty(legacy.assets[0].model.settings, key)
+        Reflect.set(expected.settings, key, DEFAULT_SETTINGS[key])
+        Reflect.set(expected.assets[0].model.settings, key, DEFAULT_SETTINGS[key])
+      }
+      const restored = new SceneDocument(JSON.parse(JSON.stringify(legacy))).snapshot()
+      expect(restored).toEqual(expected)
+      expect(createScene(restored.settings).settings).toEqual(expected.settings)
+      expect(parseSceneManifest(JSON.parse(JSON.stringify(restored)))).toEqual(expected)
+      expect(restored.version).toBe(1)
+    }
+  })
+
+  test('fog and sun marker patches validate atomically and undo without changing scene geometry', () => {
+    const scene = new SceneDocument(fixture()), before = scene.snapshot(), updates = scene.index.updateCount
+    for (const [key, invalid] of [
+      ['fogDensity', [null, NaN, Infinity, -Infinity, -0.01, 3.01, false, '1', [], {}]],
+      ['fogSpread', [null, NaN, Infinity, -Infinity, -0.01, 1.01, true, '0.25', [], {}]],
+      ['fogColor', [null, 0, true, '', '#fff', '#ffffffff', '#gggggg', 'ffffff', '#123456\n', [], {}]],
+      ['showSun', [null, 0, 1, NaN, 'false', 'true', [], {}]],
+    ] as const) for (const value of invalid) {
+      const patch = { ambient: 0, [key]: value }, invalidSettings = { ...settings, ...patch }
+      expect(() => scene.execute({ type: 'scene.settings', patch })).toThrow(key)
+      expect(() => parseSceneManifest({ ...before, settings: invalidSettings })).toThrow(key)
+      expect(() => parseSceneAsset({ ...before.assets[0], model: { ...header, settings: invalidSettings } })).toThrow(key)
+      expect(scene.snapshot()).toBe(before)
+      expect(scene.canUndo).toBe(false)
+      expect(scene.index.updateCount).toBe(updates)
+    }
+    for (const patch of [
+      { fogDensity: 0, fogSpread: 0, fogColor: '#000000', showSun: false },
+      { fogDensity: 3, fogSpread: 1, fogColor: '#ffffff', showSun: true },
+      { fogDensity: 1.35, fogSpread: 0.65, fogColor: '#aBc123', showSun: false },
+    ]) {
+      const previous = scene.data.settings, expected = { ...before.settings, ...patch }
+      expect(scene.execute({ type: 'scene.settings', patch })).toMatchObject({ changed: true, instanceIds: [], assetIds: [] })
+      expect(scene.data.settings).toEqual(expected)
+      scene.execute({ type: 'history.undo' })
+      expect(scene.data.settings).toEqual(previous)
+      scene.execute({ type: 'history.redo' })
+      expect(scene.data.settings).toEqual(expected)
+      expect(scene.execute({ type: 'scene.settings', patch }).changed).toBe(false)
+      expect(scene.data.assets).toBe(before.assets)
+      expect(scene.data.instances).toBe(before.instances)
+      expect(scene.data.layers).toBe(before.layers)
+      expect(scene.index.updateCount).toBe(updates)
+    }
+  })
+
+  test('volumetric lighting round-trips independently in scenes and child models with legacy defaults', () => {
+    for (const volumetricLighting of [false, true, undefined]) {
+      const manifest = structuredClone(fixture())
+      manifest.settings = { ...settings, volumetricLighting: volumetricLighting ?? false, shadows: false }
+      manifest.assets[0].model.settings = { ...settings, volumetricLighting: volumetricLighting === undefined ? false : !volumetricLighting }
+      const expected = structuredClone(manifest)
+      if (volumetricLighting === undefined) {
+        Reflect.deleteProperty(manifest.settings, 'volumetricLighting')
+        Reflect.deleteProperty(manifest.assets[0].model.settings, 'volumetricLighting')
+      }
+      const restored = new SceneDocument(JSON.parse(JSON.stringify(manifest))).snapshot()
+      expect(restored).toEqual(expected)
+      expect(createScene(restored.settings).settings).toEqual(expected.settings)
+      expect(parseSceneManifest(JSON.parse(JSON.stringify(restored)))).toEqual(expected)
+    }
+  })
+
+  test('volumetric lighting validates atomically and scene undo leaves geometry untouched', () => {
+    const scene = new SceneDocument({ ...fixture(), settings: { ...settings, shadows: false } })
+    const before = scene.snapshot(), updates = scene.index.updateCount
+    for (const volumetricLighting of [null, 0, 1, NaN, 'false', 'true', [], {}]) {
+      const invalid = { ...before.settings, volumetricLighting }
+      expect(() => scene.execute({ type: 'scene.settings', patch: { volumetricLighting, ambient: 0 } } as SceneCommand)).toThrow('volumetricLighting')
+      expect(() => parseSceneManifest({ ...before, settings: invalid })).toThrow('volumetricLighting')
+      expect(() => parseSceneAsset({ ...before.assets[0], model: { ...header, settings: invalid } })).toThrow('volumetricLighting')
+      expect(scene.snapshot()).toBe(before)
+      expect(scene.canUndo).toBe(false)
+    }
+    for (const volumetricLighting of [true, false]) {
+      const previous = scene.data.settings, patch = { volumetricLighting }
+      expect(scene.execute({ type: 'scene.settings', patch })).toMatchObject({ changed: true, instanceIds: [], assetIds: [] })
+      expect(scene.data.settings).toEqual({ ...before.settings, volumetricLighting })
+      scene.execute({ type: 'history.undo' })
+      expect(scene.data.settings).toEqual(previous)
+      scene.execute({ type: 'history.redo' })
+      expect(scene.data.settings).toEqual({ ...before.settings, volumetricLighting })
+      expect(scene.execute({ type: 'scene.settings', patch }).changed).toBe(false)
+      expect(scene.data.assets).toBe(before.assets)
+      expect(scene.data.instances).toBe(before.instances)
+      expect(scene.data.layers).toBe(before.layers)
+      expect(scene.index.updateCount).toBe(updates)
+    }
+  })
+
   test('legacy scene PBR stays on while child models retain their own renderer migration', () => {
     for (const previewRenderer of ['standard', 'cube-sprites'] as const) for (const pbrMaterials of [undefined, false, true]) {
       const manifest = structuredClone(fixture())
@@ -688,6 +789,15 @@ test('100M-voxel trusted autosaves visit no untouched chunk metadata and write o
     expect(legacySky.data.settings).toEqual({ ...sky.data.settings, skybox: 'solid' })
     await saveSceneDocumentRecovery(legacySky)
     expect((await loadSceneRecovery())!.scene.settings).toEqual(legacySky.data.settings)
+
+    const volumetric = new SceneDocument(createScene({ ...settings, volumetricLighting: true, shadows: false }))
+    await saveSceneDocumentRecovery(volumetric)
+    expect((await loadSceneRecovery())!.scene.settings).toEqual(volumetric.data.settings)
+    const volumetricRow = stores.get('scenes')!.get(JSON.stringify(volumetric.data.id)) as SceneManifest
+    Reflect.deleteProperty(volumetricRow.settings, 'volumetricLighting')
+    expect((await loadSceneRecovery())!.scene.settings).toEqual({ ...volumetric.data.settings, volumetricLighting: false })
+    Reflect.set(volumetricRow.settings, 'volumetricLighting', 'true')
+    await expect(loadSceneRecovery()).rejects.toThrow('volumetricLighting')
 
     const miniature = new SceneDocument(createScene({ ...settings, tiltShift: true, tiltShiftStrength: 0.85, tiltShiftFocus: 0.7, tiltShiftWidth: 0.2 }))
     await saveSceneDocumentRecovery(miniature)

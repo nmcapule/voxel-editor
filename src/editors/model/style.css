@@ -1,6 +1,6 @@
 @import '../../shared/ui/base.css';
 
-.model-editor { position: absolute; inset: 0; pointer-events: none; anchor-scope: all; --tool-dock-bottom: max(18px, env(safe-area-inset-bottom)); --tool-popup-bottom: calc(var(--tool-dock-bottom) + 124px); }
+.model-editor { position: absolute; inset: 0; pointer-events: none; anchor-scope: all; --tool-dock-bottom: max(18px, env(safe-area-inset-bottom)); --tool-height: 44px; --tool-popup-bottom: calc(var(--tool-dock-bottom) + var(--tool-height) + 40px); }
 .model-editor > :not(.top-chrome) { pointer-events: auto; }
 .model-editor[data-tool="select"] .viewport canvas { cursor: crosshair; }
 .model-editor[data-tool="paint"] .viewport canvas { cursor: crosshair; }
@@ -98,26 +98,20 @@
 :where(.model-editor) #paint-tool-swatch { flex: 0 0 7px; width: 7px; height: 7px; border: 1px solid rgba(32, 38, 44, 0.2); border-radius: 50%; }
 :where(.model-editor) .tool-dock button[aria-pressed="true"] #paint-tool-swatch { border-color: rgba(255, 255, 255, 0.6); }
 :where(.model-editor) .tool-dock { bottom: var(--tool-dock-bottom); }
-:where(.model-editor) .tool-slot { position: relative; flex: 1 1 0; min-width: 0; }
-:where(.model-editor) .tool-slot > button[data-tool] { width: 100%; }
+:where(.model-editor) .tool-slot { flex: 1 1 0; min-width: 0; }
+:where(.model-editor) .tool-slot > button[data-tool] { width: 100%; height: var(--tool-height); border-radius: 0 0 12px 12px; }
 :where(.model-editor) .tool-dock .tool-expand {
-  position: absolute;
-  top: -48px;
-  left: 50%;
-  width: 44px;
-  min-width: 44px;
-  height: 44px;
+  width: 100%;
+  min-width: 0;
+  height: 24px;
   padding: 0;
   grid-template: 1fr / 1fr;
   place-items: center;
   gap: 0;
-  border: 1px solid var(--line);
-  border-radius: 50%;
-  background: var(--porcelain);
-  box-shadow: 0 3px 8px rgba(39, 53, 64, 0.09);
-  transform: translateX(-50%);
+  border-bottom: 1px solid var(--line);
+  border-radius: 8px 8px 0 0;
 }
-:where(.model-editor) .tool-expand > svg { width: 16px; height: 16px; transform: rotate(-90deg); }
+:where(.model-editor) .tool-expand > svg { width: 14px; height: 14px; transform: rotate(-90deg); }
 .model-editor:has(#select-tool-popup:popover-open) .tool-dock button[popovertarget="select-tool-popup"] { background: #ecefec; }
 .model-editor:has(#paint-tool-popup:popover-open) .tool-dock button[popovertarget="paint-tool-popup"] { background: #ecefec; }
 .model-editor:has(#sculpt-tool-popup:popover-open) .tool-dock button[popovertarget="sculpt-tool-popup"] { background: #ecefec; }
@@ -327,7 +321,7 @@
 :where(.model-editor) .context-summary { display: none !important; }
 }
 @media (max-width: 840px) {
-.model-editor { --tool-dock-bottom: max(10px, env(safe-area-inset-bottom)); }
+.model-editor { --tool-dock-bottom: max(10px, env(safe-area-inset-bottom)); --tool-height: 56px; }
 @supports (left: anchor(center)) {
 :where(.model-editor) .tool-popup { left: clamp(130px, anchor(center), calc(100vw - 130px)); }
 }

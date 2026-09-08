@@ -1,22 +1,29 @@
 # Cube Sprites
 
-Optional, opaque orthographic rendering for the model editor's **Edit and Render modes**.
+Optional orthographic rendering for the model editor's **Edit and Render modes**.
 In Stage > Render choose **Renderer: Cube sprites** to use it in both modes.
 The scene renderer is unchanged; child asset editing uses the model renderer. Isometric views
 are orthographic camera orientations; continuous orbit and axis-aligned views work.
 
 ## Behavior
 
-- Rendered cells use palette colors, stylized hemispheric ambient light, and the
+- With **PBR materials** off (the default), rendered cells use palette colors, stylized hemispheric ambient light, and the
   existing directional light. All occupied cells are opaque, even if their authored
   materials describe glass, opacity, or emission. Physical properties and texture
-  maps remain saved and unmodified, but are not applied by this renderer.
+  maps remain saved and unmodified, but are not applied in this mode.
+- With **PBR materials** on, every material surface remains an impostor. Palette/chunk batches
+  use cloned Standard physical materials, including opacity, transmission, IOR,
+  roughness, metalness, emission, normal maps, other texture maps and environment
+  bindings. Nonopaque surfaces use the same layered raster pipeline as Standard.
+  Only opaque batches cast realtime shadows. Beauty uses front-entry surfaces only;
+  shadow casters use back-exit surfaces. Same-material internal faces are suppressed;
+  a face against a different transparent neighbor remains exposed, matching the mesher.
 - Select, Sculpt, and Paint use active-layer sprites with the existing neutral ghost
   context. Volume, Layer, Eyedropper, and Render mode use the full visible composition.
   Picking and tool behavior are unchanged.
 - Ambient occlusion and Shadows reuse the existing independent UI switches.
   The sky/backdrop and optional Miniature photography finishing effect still work.
-  Ambient remains stylized rather than sampling physical environment reflections.
+  Ambient remains stylized when PBR is off; PBR uses Standard environment lighting.
 - Selecting the plugin enforces orthographic projection, including restored or
   scripted conflicting settings. Progressive PBR is paused without overwriting its
   saved preference; selecting Standard enables it again if previously selected.
@@ -38,6 +45,29 @@ Chunks have independent instance buffers and conservative bounds. Palette colors
 live in one linear-color lookup texture, so recoloring doesn't rebuild instances.
 Edits dirty affected chunk instance buffers for live updates. There is one current-scope
 cache, not a per-layer cache; scope changes repack chunks on demand.
+
+In PBR mode the six bits indicate mesher-suppressed faces, in both beauty and shadows.
+The plugin chooses `PreviewFrame.materials` only during `prepare`, copies changed
+material values/bindings into owned clones, and never disposes borrowed textures.
+The host signals material edits with `needsUpdate`, including environment changes;
+borrowed texture image/UV-transform updates remain live. Unchanged frames retain both materials and voxel buffers. Scalar/map changes update
+materials without repacking; opaque/alpha/transmission classification changes and
+PBR toggles repack the current scope, including neighbor masks across chunk seams.
+
+The physical `onBeforeCompile` patch keeps Three's BRDF and normal mapping, replacing
+its geometry inputs with the hit normal, view/world position and chunk-local planar
+face UVs. Fragment inputs are mutable globals, not writes to varyings. Directional
+shadow coordinates use the hit position and Standard's normal bias.
+
+Integration requires `ViewSettings.cubeSpritesPbr` (default `false`) and borrowed
+`PreviewFrame.materials?: readonly THREE.MeshPhysicalMaterial[]`, populated by the
+host each prepare with current map/environment bindings. The raster pipeline must
+call the material callback **after** its patch and place `// voxel-fragment-depth`
+immediately after `gl_FragDepth = gl_FragCoord.z;`. The plugin replaces that entire
+assignment/marker pair (whitespace tolerated), before any peel rejection. Unlayered
+shaders initialize hits at the start of `main`. Missing layered markers fail loudly.
+The versioned shader cache key includes this marker contract. Layer bounds must count
+`InstancedBufferGeometry.instanceCount`, not just the two billboard triangles.
 
 Physical mesh materials are hidden while the plugin is active, but the helper tree
 is retained, including neutral ghost context and mesh-based face grids/topology overlays.
@@ -66,7 +96,11 @@ Dirty chunks are packed synchronously on the first required frame. Highly expose
 256-cubed models can stall activation and still incur substantial overdraw; move
 packing to a worker if measurements justify it. Conventional editing meshes remain
 resident in model mode, so four bytes per sprite is not a total-memory claim.
-No scene streaming, transformed scene instances, transparency, or full PBR support.
+No scene streaming or transformed scene instances. PBR is raster-only, not path
+tracing. Geometry displacement is not reconstructed; surfaces remain unit cubes.
+Transmission retains Standard's screen-space approximation, not ray-traced refraction,
+caustics or colored transmitted shadows. Neutral editing ghosts and guide overlays
+retain the existing helper meshes; no authored material falls back to mesh rendering.
 
 Run `bun test plugins/cube-sprites`. For GPU checks, start the existing browser harness
 with `bunx vite --config tests/vite.config.ts`, open `/tests/transparency.html`, then:
@@ -74,13 +108,21 @@ with `bunx vite --config tests/vite.config.ts`, open `/tests/transparency.html`,
 ```js
 const checks = await import('/plugins/cube-sprites/browser-checks.ts')
 checks.runCubeSpriteDepthChecks()
+checks.runCubeSpritePbrChecks()
 await checks.runCubeSpriteChecks()
 await checks.runCubeSpriteEditingChecks()
+await checks.runCubeSpriteEditingChecks(true)
 await checks.runCubeSpriteBenchmark()
 ```
 
 Depth checks compare against real cubes across nine orientations and verify
 subpixel rasterization differences against exact ray/geometry intersections.
+PBR GPU checks compare real meshed cubes in 28 cases across four orientations, chunk seams,
+physical/map/environment/shadow/alpha/transmission cases, exact layer counts and
+toggle restoration. Maps include normal, roughness, metalness, transmission and
+thickness with nonidentity UV transforms. They reject shader errors and compare
+readback pixels (a small whole-image tolerance allows subpixel rasterization edges).
+A twelve-layer alpha column in two palette batches catches billboard-only layer bounds.
 Integration checks cover palette updates, dirty edits, bake reuse, AO/shadows,
 capture, offscreen views, renderer switching, and context recovery. Editing checks
 cover automatic live frames, scoped picking, layer/tool changes, helper overlays,

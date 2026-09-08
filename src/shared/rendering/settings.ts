@@ -23,6 +23,7 @@ export interface ViewSettings {
   meshVertices: boolean
   meshTriangles: boolean
   previewRenderer: 'standard' | 'cube-sprites'
+  cubeSpritesPbr: boolean
   projection: 'orthographic' | 'perspective'
   pathTracing: boolean
   tiltShift: boolean
@@ -34,7 +35,7 @@ export interface ViewSettings {
 export const DEFAULT_SETTINGS: ViewSettings = {
   skybox: 'solid', background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42,
   ambientOcclusion: true, shadows: true, grid: true, faceGrid: false,
-  meshVertices: false, meshTriangles: false, previewRenderer: 'standard', projection: 'orthographic', pathTracing: true,
+  meshVertices: false, meshTriangles: false, previewRenderer: 'standard', cubeSpritesPbr: false, projection: 'orthographic', pathTracing: true,
   tiltShift: false, tiltShiftStrength: 0.5, tiltShiftFocus: 0.5, tiltShiftWidth: 0.3,
 }
 
@@ -59,6 +60,7 @@ export function settingsPatch(value: unknown): Partial<ViewSettings> {
   if (input.meshVertices !== undefined) patch.meshVertices = booleanValue(input.meshVertices, 'command.patch.meshVertices')
   if (input.meshTriangles !== undefined) patch.meshTriangles = booleanValue(input.meshTriangles, 'command.patch.meshTriangles')
   if (input.previewRenderer !== undefined) patch.previewRenderer = oneOf(input.previewRenderer, 'command.patch.previewRenderer', ['standard', 'cube-sprites'] as const)
+  if (input.cubeSpritesPbr !== undefined) patch.cubeSpritesPbr = booleanValue(input.cubeSpritesPbr, 'command.patch.cubeSpritesPbr')
   if (input.pathTracing !== undefined) patch.pathTracing = booleanValue(input.pathTracing, 'command.patch.pathTracing')
   if (input.tiltShift !== undefined) patch.tiltShift = booleanValue(input.tiltShift, 'command.patch.tiltShift')
   for (const key of ['tiltShiftStrength', 'tiltShiftFocus', 'tiltShiftWidth'] as const) {

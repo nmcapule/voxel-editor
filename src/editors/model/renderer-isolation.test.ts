@@ -485,6 +485,9 @@ test('rapid atomic scope switches reject stale meshes and grids without losing c
 test('transparency topology changes invalidate both surfaces while color and roughness preserve warm isolation', async () => {
   const { document, active } = layeredDocument()
   const harness = meshProbe(document), { probe, postMessage } = harness
+  const updatePalette = mock(() => {})
+  probe.preview = { root: new Group(), updatePalette, setLayerScope() {}, markDirty: mock() }
+  probe.preview.root.visible = false
   try {
     probe.setToolState('select', 'paint'); await harness.flush()
     const root = probe.chunkMeshes.get(0) as Group
@@ -493,6 +496,9 @@ test('transparency topology changes invalidate both surfaces while color and rou
       probe.setTool('layer')
       Object.assign(document.materials[6], preset)
       probe.updatePaletteMaterial(6)
+      expect(updatePalette).toHaveBeenCalled()
+      expect(probe.preview.markDirty).toHaveBeenCalledWith([0])
+      updatePalette.mockClear(); probe.preview.markDirty.mockClear()
       await harness.flush()
       expect(root.userData.version).toBeGreaterThan(version)
       expect(cached.visible).toBe(false)
@@ -509,6 +515,8 @@ test('transparency topology changes invalidate both surfaces while color and rou
     postMessage.mockClear()
     document.materials[6].roughness = 0.9; probe.updatePaletteMaterial(6)
     document.palette[6] = 0xff0000; probe.updatePalette()
+    expect(updatePalette).toHaveBeenCalledTimes(2)
+    expect(probe.preview.markDirty).not.toHaveBeenCalled()
     probe.setTool('layer'); await harness.flush()
     probe.setToolState('select', 'paint'); await harness.flush()
     expect(postMessage).not.toHaveBeenCalled()

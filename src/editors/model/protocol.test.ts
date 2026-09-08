@@ -9,6 +9,28 @@ import { DEFAULT_SETTINGS, SKYBOX_PRESETS, type SkyboxPreset } from '../../share
 const settings = { ...DEFAULT_SETTINGS }
 
 describe('scripting protocol', () => {
+  test('Cube sprites PBR validates and round-trips independently of progressive PBR, defaulting off for old saves', () => {
+    expect(DEFAULT_SETTINGS.cubeSpritesPbr).toBe(false)
+    const document = new VoxelDocument()
+    for (const cubeSpritesPbr of [false, true, undefined]) {
+      const expected = { ...settings, previewRenderer: 'cube-sprites' as const, cubeSpritesPbr: cubeSpritesPbr ?? false, pathTracing: true }
+      const snapshot = encodeProjectSnapshot(document, expected), stored = snapshotProject(document, expected)
+      if (cubeSpritesPbr === undefined) {
+        Reflect.deleteProperty(snapshot.settings, 'cubeSpritesPbr')
+        Reflect.deleteProperty(stored.settings, 'cubeSpritesPbr')
+      } else {
+        expect(parseRequest({ protocol: PROTOCOL, id: 'pbr', command: { type: 'settings.update', patch: { cubeSpritesPbr } } }).command).toEqual({ type: 'settings.update', patch: { cubeSpritesPbr } })
+      }
+      expect(decodeProjectSnapshot(JSON.parse(JSON.stringify(snapshot))).settings).toEqual(expected)
+      expect(restoreProjectSnapshot(structuredClone(stored))!.settings).toEqual(expected)
+    }
+    for (const cubeSpritesPbr of [null, 0, 1, 'true', [], {}]) {
+      expect(() => parseRequest({ protocol: PROTOCOL, id: 'pbr', command: { type: 'settings.update', patch: { cubeSpritesPbr } } })).toThrow('cubeSpritesPbr')
+      expect(() => parseProjectSnapshot({ ...encodeProjectSnapshot(document, settings), settings: { ...settings, cubeSpritesPbr } })).toThrow('cubeSpritesPbr')
+      expect(() => restoreProjectSnapshot({ ...snapshotProject(document, settings), settings: { ...settings, cubeSpritesPbr } } as any)).toThrow('cubeSpritesPbr')
+    }
+  })
+
   test('preview renderer IDs validate without requiring an installed plugin', () => {
     const parse = (previewRenderer: unknown) => parseRequest({ protocol: PROTOCOL, id: 'renderer', command: { type: 'settings.update', patch: { previewRenderer } } }).command
     for (const previewRenderer of ['standard', 'cube-sprites'] as const) expect(parse(previewRenderer)).toEqual({ type: 'settings.update', patch: { previewRenderer } })

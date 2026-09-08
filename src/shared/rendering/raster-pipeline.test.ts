@@ -103,6 +103,22 @@ test('terminates on the first empty peel, not an arbitrary fixed layer cap', () 
   h.pipeline.dispose()
 })
 
+test('layer bound counts billboard geometry instances and permits every transparent layer', () => {
+  const scene = new THREE.Scene()
+  const geometry = new THREE.InstancedBufferGeometry()
+  geometry.setAttribute('position', triangles(2).getAttribute('position'))
+  geometry.instanceCount = 12
+  const mesh = new THREE.Mesh(geometry, new THREE.MeshPhysicalMaterial({ opacity: 0.5, transparent: true }))
+  scene.add(mesh)
+  expect(transparentTriangleBound(mesh)).toBe(24)
+  const h = harness(scene, [...Array<number>(12).fill(255), 0])
+  h.pipeline.render(new THREE.OrthographicCamera())
+  expect(h.pipeline.lastFrame).toEqual({ layers: 12, triangleBound: 24, complete: true })
+  geometry.instanceCount = 0
+  expect(transparentTriangleBound(mesh)).toBe(0)
+  h.pipeline.dispose()
+})
+
 test('nonconvergence, invalid readback and context loss fail without publishing a partial frame', () => {
   for (const failure of ['bound', 'readback', 'context'] as const) {
     const scene = new THREE.Scene()
@@ -163,6 +179,7 @@ test('physical variants retain maps, opacity, IOR and dynamic transmission unifo
     expect(shader.vertexShader).toContain('invariant gl_Position;')
     expect(shader.fragmentShader).toContain('invariant gl_FragDepth;')
     expect(shader.fragmentShader).toContain('gl_FragDepth = gl_FragCoord.z;')
+    expect(shader.fragmentShader).toMatch(/gl_FragDepth = gl_FragCoord.z;\s*\/\/ voxel-fragment-depth/)
     expect(shader.fragmentShader.indexOf('gl_FragDepth = gl_FragCoord.z;')).toBeLessThan(shader.fragmentShader.indexOf('discard;'))
     expect(shader.fragmentShader).not.toContain('transmissionSamplerMap')
     expect(shader.fragmentShader).toContain('rasterTransmissionMap')

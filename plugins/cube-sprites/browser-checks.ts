@@ -4,6 +4,9 @@ import plugin, { CubeSprites } from './index'
 import { VoxelDocument, dirtyChunks } from '../../src/shared/voxel/document'
 import { DEFAULT_SETTINGS } from '../../src/shared/rendering/settings'
 import { VoxelRenderer, type RendererCallbacks } from '../../src/editors/model/renderer'
+import { RasterPipeline } from '../../src/shared/rendering/raster-pipeline'
+import { meshChunk } from '../../src/shared/voxel/mesher'
+import { chunkCoords } from '../../src/shared/voxel/document'
 
 function check(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message)
@@ -22,6 +25,130 @@ function difference(a: ArrayLike<number>, b: ArrayLike<number>) {
   let sum = 0
   for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i])
   return sum / a.length
+}
+
+/** Real meshed cube faces are the oracle, including their planar UV convention. */
+export function runCubeSpritePbrChecks() {
+  const renderer = new THREE.WebGLRenderer()
+  renderer.debug.onShaderError = (gl, program, vertex, fragment) => {
+    throw new Error([gl.getProgramInfoLog(program), gl.getShaderInfoLog(vertex), gl.getShaderInfoLog(fragment)].join('\n'))
+  }
+  renderer.setSize(128, 128)
+  const scene = new THREE.Scene()
+  scene.background = new THREE.Color(0x778899)
+  const light = new THREE.DirectionalLight(0xffffff, 3)
+  light.position.set(6, 12, 8); light.target.position.set(0, 3, 0)
+  light.castShadow = true
+  Object.assign(light.shadow.camera, { left: -6, right: 6, top: 6, bottom: -6, near: 0.1, far: 40 })
+  light.shadow.camera.updateProjectionMatrix()
+  light.shadow.mapSize.set(512, 512)
+  renderer.shadowMap.type = THREE.PCFShadowMap
+  scene.add(light, light.target, new THREE.HemisphereLight(0xffffff, 0x334455, 1))
+  const camera = new THREE.OrthographicCamera(-4, 4, 4, -4, 0.1, 50)
+  const pipeline = new RasterPipeline(renderer, scene, { antialias: false, ambientOcclusion: false })
+  pipeline.setSize(128, 128)
+  const target = new THREE.WebGLRenderTarget(128, 128)
+  const model = new VoxelDocument({ x: 32, y: 16, z: 32 })
+  for (let x = 14; x < 18; x++) for (let z = 14; z < 18; z++) model.setVoxel(x, 1, z, 3)
+  for (let x = 15; x < 17; x++) for (const [y, index] of [[2, 7], [3, 7], [4, 12]]) model.setVoxel(x, y, 15, index)
+  const materials = model.materials.map(() => new THREE.MeshPhysicalMaterial({ color: 0xaaaaaa, roughness: 0.4 }))
+  const environmentScene = new THREE.Scene()
+  environmentScene.background = new THREE.Color(0x778899)
+  const pmrem = new THREE.PMREMGenerator(renderer), environment = pmrem.fromScene(environmentScene, 0, 0.1, 10, { size: 16 })
+  for (const material of materials) material.envMap = environment.texture
+  materials[7].color.set(0xe68538); materials[12].color.set(0x58bbae)
+  const texture = new THREE.DataTexture(new Uint8Array([255, 120, 50, 255, 20, 200, 255, 255, 70, 90, 220, 255, 240, 240, 80, 255]), 2, 2)
+  texture.wrapS = texture.wrapT = THREE.RepeatWrapping
+  texture.magFilter = texture.minFilter = THREE.NearestFilter
+  texture.repeat.set(0.75, 1.25); texture.offset.set(0.13, 0.21); texture.needsUpdate = true
+  const normalMap = new THREE.DataTexture(new Uint8Array([170, 100, 245, 255]), 1, 1)
+  normalMap.needsUpdate = true
+  const sprites = new CubeSprites(model), reference = new THREE.Group()
+  scene.add(sprites.root, reference)
+  const settings = { ...DEFAULT_SETTINGS, shadows: false, cubeSpritesPbr: true }
+  const actual = new Uint8Array(128 * 128 * 4), expected = new Uint8Array(actual.length)
+  const results: object[] = []
+  let unmapped: Uint8Array | undefined
+  const render = (sprite: boolean, pixels: Uint8Array) => {
+    sprites.root.visible = sprite; reference.visible = !sprite
+    if (sprite) sprites.prepare({ renderer, camera, light, settings, materials, width: 128, height: 128 })
+    renderer.shadowMap.enabled = settings.shadows
+    renderer.shadowMap.needsUpdate = true
+    pipeline.render(camera, target)
+    renderer.readRenderTargetPixels(target, 0, 0, 128, 128, pixels)
+  }
+  const clearReference = () => {
+    for (const mesh of reference.children as THREE.Mesh[]) mesh.geometry.dispose()
+    reference.clear()
+  }
+  try {
+    for (const kind of ['physical', 'maps', 'shadows', 'alpha', 'transmission', 'mapped-transmission', 'deep-alpha'] as const) {
+      settings.shadows = kind === 'shadows'
+      if (kind === 'deep-alpha') {
+        sprites.markDirty(model.chunks.keys())
+        for (let x = 14; x < 18; x++) for (let y = 1; y < 5; y++) for (let z = 14; z < 18; z++) model.setVoxel(x, y, z, 0)
+        for (let y = 1; y <= 12; y++) model.setVoxel(14, y, 14, y % 2 ? 7 : 12)
+        sprites.markDirty(model.chunks.keys())
+      }
+      materials[7].metalness = 0.35; materials[7].clearcoat = 0.4
+      materials[7].map = kind === 'physical' ? null : texture
+      materials[7].normalMap = kind === 'physical' ? null : normalMap
+      materials[7].roughnessMap = materials[7].metalnessMap = kind === 'physical' ? null : texture
+      for (const index of [7, 12]) {
+        const material = materials[index]
+        material.opacity = kind.includes('alpha') ? 0.45 : 1
+        material.transparent = material.opacity < 1; material.depthWrite = !material.transparent
+        material.transmission = kind.includes('transmission') ? 0.8 : 0
+        material.thickness = 0.6; material.ior = 1.4
+        material.transmissionMap = material.thicknessMap = kind === 'mapped-transmission' ? texture : null
+        material.needsUpdate = true
+      }
+      clearReference()
+      const transparent = Uint8Array.from(materials, material => Number(material.opacity < 1 || material.transmission > 0))
+      for (const id of model.chunks.keys()) {
+        const data = meshChunk(model.paddedChunk(id, true), undefined, false, transparent)
+        const geometry = new THREE.BufferGeometry()
+        geometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3))
+        geometry.setAttribute('normal', new THREE.BufferAttribute(data.normals, 3))
+        geometry.setAttribute('uv', new THREE.BufferAttribute(data.uvs, 2))
+        geometry.setIndex(new THREE.BufferAttribute(data.indices, 1))
+        for (const group of data.groups) geometry.addGroup(group.start, group.count, group.materialIndex)
+        const mesh = new THREE.Mesh(geometry, materials), chunk = chunkCoords(id)
+        mesh.castShadow = mesh.receiveShadow = true
+        mesh.position.set(chunk.x * 16 - 16, chunk.y * 16, chunk.z * 16 - 16)
+        reference.add(mesh)
+      }
+      for (const direction of [[1, 1, 1], [-1, 0.7, -1], [0, 0, 1], [0, 1, 0]]) {
+        const center = kind === 'deep-alpha' ? new THREE.Vector3(-1.5, 6, -1.5) : new THREE.Vector3(0, 3, 0)
+        camera.position.set(...direction as [number, number, number]).multiplyScalar(12).add(center)
+        camera.lookAt(center); camera.updateMatrixWorld()
+        render(false, expected)
+        const layers = pipeline.lastFrame.layers
+        render(true, actual)
+        const error = difference(actual, expected)
+        if (direction[0] === 0 && direction[1] === 0 && kind === 'physical') unmapped = actual.slice()
+        if (direction[0] === 0 && direction[1] === 0 && kind === 'maps') check(difference(actual, unmapped!) > 0.5, 'Borrowed maps must affect physical pixels')
+        check(error < 1.5, `${kind} ${direction}: physical cube parity error ${error}`)
+        check(pipeline.lastFrame.layers === layers, `${kind}: sprites and cubes must peel the same layers`)
+        if (kind === 'deep-alpha' && direction[1] === 1 && direction[0] === 0) check(layers === 12, 'Instance-aware bound must allow twelve layers from two palette batches')
+        results.push({ kind, direction, error, layers })
+      }
+    }
+    const updates = sprites.stats.chunkUpdates
+    render(true, actual); render(true, expected)
+    check(sprites.stats.chunkUpdates === updates && difference(actual, expected) === 0, 'Unchanged PBR frames must retain instances and pixels')
+    settings.cubeSpritesPbr = false
+    render(true, expected)
+    check(difference(actual, expected) > 0.05 && sprites.stats.chunkUpdates > updates, 'Toggle off must restore stylized opaque rendering')
+    settings.cubeSpritesPbr = true
+    render(true, expected)
+    check(difference(actual, expected) === 0, 'Toggle on must restore physical pixels')
+    return results
+  } finally {
+    clearReference(); sprites.dispose(); pipeline.dispose(); target.dispose()
+    for (const material of materials) material.dispose()
+    texture.dispose(); normalMap.dispose(); environment.dispose(); pmrem.dispose(); light.shadow.dispose(); renderer.dispose()
+  }
 }
 
 export function runCubeSpriteDepthChecks() {
@@ -238,7 +365,7 @@ export async function runCubeSpriteChecks() {
   } finally { renderer.dispose(); host.remove() }
 }
 
-export async function runCubeSpriteEditingChecks() {
+export async function runCubeSpriteEditingChecks(cubeSpritesPbr = false) {
   const host = document.createElement('div')
   host.style.cssText = 'position:fixed;inset:0;width:320px;height:320px'
   document.body.append(host)
@@ -251,7 +378,7 @@ export async function runCubeSpriteEditingChecks() {
   const callbacks = new Proxy({ onError: (message: string) => errors.push(message) }, {
     get: (target, key) => target[key as keyof typeof target] ?? (() => {}),
   }) as unknown as RendererCallbacks
-  const renderer = new VoxelRenderer(host, model, { ...DEFAULT_SETTINGS, previewRenderer: 'cube-sprites',
+  const renderer = new VoxelRenderer(host, model, { ...DEFAULT_SETTINGS, previewRenderer: 'cube-sprites', cubeSpritesPbr,
     grid: false, ambientOcclusion: false, shadows: false }, callbacks, plugin)
   const viewport = renderer.viewport
   const presented = async () => {

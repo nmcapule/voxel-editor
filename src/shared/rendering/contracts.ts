@@ -40,6 +40,9 @@ export interface PreviewFrame {
   camera: THREE.Camera
   light: THREE.DirectionalLight
   settings: ViewSettings
+  /** Borrowed live palette, including maps and Standard environment bindings. Never dispose;
+   * cloned preview materials must set visible=true because host surfaces are hidden. */
+  materials?: readonly THREE.MeshPhysicalMaterial[]
   width: number
   height: number
 }

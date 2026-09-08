@@ -26,7 +26,9 @@ export function transparentTriangleBound(mesh: THREE.Mesh) {
     if (!material?.visible || !isLayered(material)) continue
     triangles += Math.ceil(Math.max(0, Math.min(end, group.start + group.count) - Math.max(start, group.start)) / 3)
   }
-  return triangles * ((mesh as THREE.InstancedMesh).isInstancedMesh ? (mesh as THREE.InstancedMesh).count : 1)
+  const instances = (mesh as THREE.InstancedMesh).isInstancedMesh ? (mesh as THREE.InstancedMesh).count
+    : (geometry as THREE.InstancedBufferGeometry).isInstancedBufferGeometry ? (geometry as THREE.InstancedBufferGeometry).instanceCount : 1
+  return triangles * instances
 }
 
 const fullscreenVertex = `
@@ -230,9 +232,11 @@ export class RasterPipeline {
           throw new Error('RasterPipeline: unsupported material shader (missing alpha stage).')
         }
         // Exact peeling must compare and write the same invariant depth in both programs.
+        // Impostor callbacks replace the assignment/marker before any layer comparison.
         shader.fragmentShader = 'invariant gl_FragDepth;\n' + declarations + shader.fragmentShader.replace('void main() {', `
           void main() {
             gl_FragDepth = gl_FragCoord.z;
+            // voxel-fragment-depth
             ivec2 rasterPixel = ivec2(gl_FragCoord.xy);
             ${reject}
         `).replace('#include <alphahash_fragment>', `

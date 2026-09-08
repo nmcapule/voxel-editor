@@ -674,13 +674,18 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     const cubeSprites = previewAvailable && settings.previewRenderer === 'cube-sprites'
     app.querySelector<HTMLSelectElement>('#preview-renderer')!.value = cubeSprites ? 'cube-sprites' : 'standard'
     app.querySelector<HTMLOptionElement>('#preview-renderer option[value="cube-sprites"]')!.disabled = !previewAvailable
+    app.querySelector<HTMLElement>('#cube-sprites-pbr-row')!.hidden = !cubeSprites
+    app.querySelector<HTMLInputElement>('#cube-sprites-pbr')!.checked = settings.cubeSpritesPbr
+    app.querySelector<HTMLInputElement>('#cube-sprites-pbr')!.disabled = !cubeSprites
     const previewHelp = app.querySelector<HTMLElement>('#preview-renderer-help')!
     previewHelp.hidden = previewAvailable && !cubeSprites
     const previewNotice = !previewAvailable
       ? settings.previewRenderer === 'cube-sprites'
         ? 'Cube sprites is unavailable. Using Standard; your saved Cube sprites choice is retained.'
         : 'Cube sprites is unavailable. Using Standard rendering.'
-      : cubeSprites ? 'Edit and Render modes: opaque palette colors, orthographic only. Physical materials and textures stay unchanged but are not applied. PBR preference is kept.' : ''
+      : cubeSprites ? settings.cubeSpritesPbr
+        ? 'Edit and Render modes: physical materials and texture maps, orthographic only. Progressive PBR preference is kept but not used.'
+        : 'Edit and Render modes: stylized opaque palette colors, orthographic only. Enable PBR materials to use physical materials and texture maps. Progressive PBR preference is kept but not used.' : ''
     if (previewHelp.textContent !== previewNotice) previewHelp.textContent = previewNotice
     app.querySelector<HTMLSelectElement>('#projection')!.value = cubeSprites ? 'orthographic' : settings.projection
     app.querySelector<HTMLOptionElement>('#projection option[value="perspective"]')!.disabled = cubeSprites
@@ -1241,6 +1246,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
       if (patch.previewRenderer === 'cube-sprites') patch.projection = 'orthographic'
     }
     if (target.id === 'projection') patch.projection = target.value as ViewSettings['projection']
+    if (target.id === 'cube-sprites-pbr') patch.cubeSpritesPbr = (target as HTMLInputElement).checked
     if (target.id === 'skybox') patch.skybox = target.value as ViewSettings['skybox']
     if (target.id === 'background') patch.background = target.value
     if (target.id === 'ambient') patch.ambient = Number(target.value)

@@ -265,7 +265,7 @@ export class VoxelRenderer {
       focusTarget: () => this.focusCenter(),
       onViewportChange: () => this.syncViewport(),
       previewRendererId: previewPlugin?.id,
-      prepareRaster: frame => { if (this.preview?.root.visible) this.preview.prepare(frame) },
+      prepareRaster: frame => { if (this.preview?.root.visible) this.preview.prepare({ ...frame, materials: this.materials }) },
       onContextLost: () => this.disposePreview(),
     }
     this.updateBounds()
@@ -1443,13 +1443,13 @@ export class VoxelRenderer {
   }
 
   updatePalette() {
-    this.preview?.updatePalette()
     this.materials.forEach((material, index) => {
       material.color.setHex(this.document.palette[index])
       material.emissive.copy(material.color)
       this.viewport.applyEnvironment(material)
       material.needsUpdate = true
     })
+    this.preview?.updatePalette()
     if (!this.modelSuspended) this.viewport.updatePathTracing('materials')
     this.viewport.render()
   }
@@ -1476,6 +1476,7 @@ export class VoxelRenderer {
     material.depthWrite = preset.opacity >= 1
     this.viewport.applyEnvironment(material)
     material.needsUpdate = true
+    this.preview?.updatePalette()
     if (wasTransparent !== (preset.opacity < 1 || preset.transmission > 0)) {
       this.updateWorkerPalette()
       this.markDirty(this.document.chunks.keys())
@@ -1598,6 +1599,7 @@ export class VoxelRenderer {
     material[map] = texture
     this.viewport.applyEnvironment(material)
     material.needsUpdate = true
+    this.preview?.updatePalette()
     if (!this.modelSuspended) this.viewport.updatePathTracing('materials')
     this.viewport.render()
   }
@@ -1612,6 +1614,7 @@ export class VoxelRenderer {
     }
     this.viewport.applyEnvironment(material)
     material.needsUpdate = true
+    this.preview?.updatePalette()
     if (!this.modelSuspended) this.viewport.updatePathTracing('materials')
     this.viewport.render()
   }

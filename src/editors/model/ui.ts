@@ -209,6 +209,7 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
         <section class="panel-section" role="tabpanel" aria-labelledby="render-tab" data-panel="render" hidden>
           <div class="section-heading"><h2>Render</h2><span>Realtime / progressive</span></div>
           <label class="select-row"><span>Renderer</span><select id="preview-renderer" aria-describedby="preview-renderer-help"><option value="standard">Standard</option><option value="cube-sprites" disabled>Cube sprites</option></select></label>
+          <label id="cube-sprites-pbr-row" class="toggle-row" hidden><span>PBR materials</span><input id="cube-sprites-pbr" type="checkbox" aria-describedby="preview-renderer-help" disabled></label>
           <p id="preview-renderer-help" class="panel-note" aria-live="polite" hidden></p>
           <label class="select-row"><span>Camera</span><select id="projection" aria-describedby="preview-renderer-help"><option value="orthographic">Orthographic</option><option value="perspective">Perspective</option></select></label>
           <label class="toggle-row"><span>Progressive PBR <output id="path-status" aria-live="polite">Ready</output></span><input id="path-tracing" type="checkbox" aria-label="Progressive PBR" aria-describedby="preview-renderer-help"></label>

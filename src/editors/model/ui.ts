@@ -234,6 +234,8 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
           <label class="toggle-row" title="Show the merged mesh's triangle edges in edit mode"><span>Mesh triangles</span><input id="mesh-triangles" type="checkbox"></label>
           <label class="toggle-row"><span>Performance monitor</span><input type="checkbox" data-performance-monitor aria-describedby="model-performance-help"></label>
           <p id="model-performance-help" class="panel-note">FPS, main-thread render time, and JS heap where available. Remembered in this browser; not included in PNG captures.</p>
+          <label class="toggle-row"><span>Auto simplify rendering</span><input type="checkbox" data-auto-simplify-rendering aria-describedby="model-auto-simplify-help"></label>
+          <p id="model-auto-simplify-help" class="panel-note">While moving the camera or editing, turns off realtime PBR, shadows, ambient occlusion, and miniature photography, and pauses progressive PBR. Glass becomes opaque. Restores your settings afterward; captures keep requested quality. Remembered in this browser.</p>
           <button type="button" class="primary full" data-action="capture">${icon('camera')} Capture PNG</button>
         </section>
       </aside>

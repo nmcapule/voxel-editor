@@ -178,6 +178,239 @@ export async function runInteractionDprChecks(renderer: VoxelRenderer, settings:
   })
 }
 
+export async function runAutoSimplifyChecks(renderer: VoxelRenderer, settings: ViewSettings, errors: string[]) {
+  const [{ VoxelDocument }, THREE, { TiltShift }] = await Promise.all([
+    import('../src/shared/voxel/document'), import('three'), import('../src/shared/rendering/tilt-shift'),
+  ])
+  return withViewport(renderer, 96, async () => {
+    const viewport = renderer.viewport, webgl = viewport.renderer, canvas = webgl.domElement
+    const raster = Reflect.get(viewport, 'raster') as import('../src/shared/rendering/raster-pipeline').RasterPipeline
+    const sunlight = Reflect.get(viewport, 'sunlight') as DirectionalLight
+    const savedAuto = Reflect.get(viewport, 'autoSimplifyRendering') as boolean
+    const savedShadowSize = sunlight.shadow.mapSize.clone(), savedBudget = Reflect.get(raster, 'maxFrameMilliseconds')
+    const errorStart = errors.length, restores: (() => void)[] = []
+    const frames: { capture: boolean; simplified: boolean; pbr: boolean; ao: boolean; shadows: boolean; casts: boolean;
+      draws: number; aoPasses: number; tiltPasses: number; layers: number; triangleBound: number; complete: boolean }[] = []
+    let drawing: typeof frames[number] | undefined
+    const watch = (target: object, key: string, before: () => void, after = () => {}) => {
+      const descriptor = Object.getOwnPropertyDescriptor(target, key), original = Reflect.get(target, key)
+      check(typeof original === 'function', `Missing integration method: ${key}`)
+      Reflect.set(target, key, function (this: object, ...args: unknown[]) {
+        before()
+        try { return Reflect.apply(original, this, args) } finally { after() }
+      })
+      restores.push(() => descriptor ? Object.defineProperty(target, key, descriptor) : Reflect.deleteProperty(target, key))
+    }
+    const healthy = () => {
+      check(errors.length === errorStart && !Reflect.get(viewport, 'pathTracingFailed'), errors.slice(errorStart).join('\n') || 'Progressive rendering failed')
+      check(!webgl.getContext().isContextLost(), 'WebGL context must remain available')
+    }
+    const settled = () => until(() => {
+      healthy()
+      return !Reflect.get(viewport, 'simplifyRendering') && Reflect.get(viewport, 'rasterRestoreTimer') === undefined && Reflect.get(viewport, 'rasterFrame') === undefined
+    }, 'full-quality idle frame', 60000)
+    const liveImage = (width = canvas.width, height = canvas.height) => {
+      const context = new OffscreenCanvas(width, height).getContext('2d')!
+      context.drawImage(canvas, 0, 0, width, height)
+      return context.getImageData(0, 0, width, height)
+    }
+    const full = (frame: typeof frames[number]) => check(frame?.complete && frame.draws > 0 && frame.pbr && frame.ao && frame.shadows && frame.casts
+      && frame.aoPasses > 0 && frame.tiltPasses > 0 && frame.layers > 0, `Expected full-quality draw: ${JSON.stringify(frame)}`)
+    const reduced = (frame: typeof frames[number]) => check(frame?.complete && frame.draws > 0 && frame.simplified && !frame.capture
+      && !frame.pbr && !frame.ao && !frame.shadows && !frame.casts && !frame.aoPasses && !frame.tiltPasses
+      && frame.layers === 0 && frame.triangleBound === 0, `Expected simplified live draw: ${JSON.stringify(frame)}`)
+    const liveFrame = async () => {
+      const start = frames.length
+      renderer.render()
+      await until(() => { healthy(); return frames.length > start && Reflect.get(viewport, 'rasterFrame') === undefined }, 'scheduled live draw', 60000)
+      return frames[frames.length - 1]
+    }
+    const identities = () => {
+      const meshes: { mesh: Mesh; geometry: Mesh['geometry']; material: Mesh['material'] }[] = []
+      ;(Reflect.get(renderer, 'model') as Object3D).traverse(object => {
+        if (object instanceof THREE.Mesh) meshes.push({ mesh: object, geometry: object.geometry, material: object.material })
+      })
+      return meshes
+    }
+    const unchanged = (before: ReturnType<typeof identities>) => {
+      const after = identities()
+      check(before.length > 0 && before.length === after.length && before.every((entry, i) => entry.mesh === after[i].mesh
+        && entry.geometry === after[i].geometry && entry.material === after[i].material), 'Quality/camera changes must preserve mesh, geometry and material identities')
+    }
+    const fixture = new VoxelDocument({ x: 16, y: 16, z: 16 })
+    for (const [index, color, metalness, transmission] of [[40, 0xaeb8bf, 0, 0], [41, 0xec7833, 0.8, 0], [42, 0x6fcbff, 0, 0.85]]) {
+      fixture.palette[index] = color
+      Object.assign(fixture.materials[index], { roughness: index === 40 ? 1 : 0.08, metalness, transmission, opacity: 1, ior: 1.3, emissiveIntensity: 0 })
+    }
+    fill(fixture, 40, 1, 0, 1, 15, 1, 15)
+    fill(fixture, 41, 3, 1, 4, 7, 7, 8)
+    fill(fixture, 40, 9, 1, 6, 13, 7, 7)
+    fill(fixture, 42, 9, 2, 9, 13, 8, 10)
+    const options: ViewSettings = { ...settings, previewRenderer: 'standard', skybox: 'solid', background: '#283746',
+      pbrMaterials: true, shadows: true, ambientOcclusion: true, ambient: 1.2, light: 2.4,
+      pathTracing: false, grid: false, faceGrid: false, meshVertices: false, meshTriangles: false,
+      tiltShift: true, tiltShiftStrength: 0.8, tiltShiftFocus: 0.45, tiltShiftWidth: 0.2 }
+    try {
+      viewport.setAutoSimplifyRendering(false)
+      // Software GL needs only a small shadow map and a finite shader-compilation allowance, not a performance benchmark.
+      sunlight.shadow.mapSize.set(256, 256)
+      sunlight.shadow.map?.dispose(); sunlight.shadow.map = null
+      Reflect.set(raster, 'maxFrameMilliseconds', 60000)
+      renderer.clearSelection()
+      renderer.setSettings(options)
+      renderer.setDocument(fixture)
+      await renderer.whenMeshIdle()
+      renderer.setRenderMode(true)
+      watch(raster, 'render', () => {
+        drawing = { capture: Reflect.get(viewport, 'captures') > 0, simplified: Reflect.get(viewport, 'simplifyRendering'),
+          pbr: false, ao: false, shadows: false, casts: false, draws: 0, aoPasses: 0, tiltPasses: 0, layers: 0, triangleBound: 0, complete: false }
+        frames.push(drawing)
+      }, () => { Object.assign(drawing!, raster.lastFrame); drawing = undefined })
+      // Read the temporary flags inside actual WebGL draws, before Viewport restores them.
+      watch(webgl, 'render', () => {
+        if (!drawing) return
+        drawing.draws++
+        drawing.pbr ||= raster.pbrMaterials; drawing.ao ||= raster.ambientOcclusion.enabled
+        drawing.shadows ||= webgl.shadowMap.enabled; drawing.casts ||= sunlight.castShadow
+      })
+      watch(raster.ambientOcclusion, 'render', () => { if (drawing) drawing.aoPasses++ })
+      watch(TiltShift.prototype, 'render', () => { if (frames.length) frames[frames.length - 1].tiltPasses++ })
+      const materials = [...Reflect.get(renderer, 'materials') as import('three').MeshPhysicalMaterial[]]
+      const authored = () => JSON.stringify({ document: fixture.materials, palette: fixture.palette,
+        physical: materials.map(material => [material.color.getHex(), material.roughness, material.metalness, material.opacity, material.transmission, material.ior]) })
+      const authoredBefore = authored()
+      const rasterResults = []
+      let beforeEdit: ImageData | undefined
+      for (const projection of ['orthographic', 'perspective'] as const) {
+        viewport.setAutoSimplifyRendering(false)
+        renderer.setSettings({ ...options, projection })
+        renderer.setView({ position: { x: 20, y: 19, z: 27 }, target: { x: 0, y: 3, z: 0 }, up: { x: 0, y: 1, z: 0 }, zoom: 1, orthographicSpan: 21, fov: 35 })
+        await settled()
+        const baseline = await image(renderer), sources = identities()
+        const fullQualityFrame = { ...frames[frames.length - 1] }
+        full(fullQualityFrame)
+        viewport.controls.dispatchEvent({ type: 'start' })
+        full(await liveFrame())
+        check(!Reflect.get(viewport, 'simplifyRendering'), 'Disabled auto simplify must retain expensive passes during gestures')
+        viewport.controls.dispatchEvent({ type: 'end' })
+        await settled()
+        viewport.setAutoSimplifyRendering(true)
+        const view = JSON.stringify(renderer.getView())
+        viewport.controls.dispatchEvent({ type: 'start' })
+        const simplifiedFrame = await liveFrame()
+        reduced(simplifiedFrame)
+        const liveDifference = difference(baseline.data, liveImage(baseline.width, baseline.height).data)
+        check(liveDifference.mean > 0.1, 'The simplified fixture must visibly differ from its full-quality baseline')
+        const captureStart = frames.length, heldCapture = await image(renderer)
+        frames.slice(captureStart).filter(frame => frame.capture).forEach(full)
+        check(frames.slice(captureStart).some(frame => frame.capture), 'Held capture must execute a real full-quality raster draw')
+        const capturedDifference = difference(baseline.data, heldCapture.data)
+        check(capturedDifference.max <= 1, `Held capture changed full-quality pixels: ${JSON.stringify(capturedDifference)}`)
+        check(Reflect.get(viewport, 'simplifyRendering') && Reflect.get(viewport, 'rasterInteractions').has('controls'), 'Capture must preserve the held gesture')
+        reduced(await liveFrame())
+        unchanged(sources)
+        viewport.controls.dispatchEvent({ type: 'end' })
+        check(Reflect.get(viewport, 'simplifyRendering'), 'Quality must remain reduced through the settling delay')
+        await settled()
+        full(frames[frames.length - 1])
+        const restoredDifference = difference(baseline.data, liveImage().data)
+        check(restoredDifference.max <= 1, `Idle live pixels must restore without a capture forcing quality: ${JSON.stringify(restoredDifference)}`)
+        check(JSON.stringify(renderer.getView()) === view, 'Quality transitions must not move the camera')
+        const restoredCaptureDifference = difference(baseline.data, (await image(renderer)).data)
+        check(restoredCaptureDifference.max <= 1, 'Restored capture must match the original baseline')
+        const wheelStart = frames.length, wheelView = JSON.stringify(renderer.getView()), rect = canvas.getBoundingClientRect()
+        const wheel = new WheelEvent('wheel', { deltaY: 70, clientX: rect.x + rect.width / 2, clientY: rect.y + rect.height / 2, bubbles: true, cancelable: true })
+        canvas.dispatchEvent(wheel)
+        check(wheel.defaultPrevented && JSON.stringify(renderer.getView()) !== wheelView && Reflect.get(viewport, 'simplifyRendering'), 'Real wheel routing must move the camera and schedule reduced quality')
+        await settled()
+        const wheelFrames = frames.slice(wheelStart).filter(frame => frame.simplified && !frame.capture)
+        check(wheelFrames.length > 0, 'Wheel start/end must produce a simplified live frame')
+        wheelFrames.forEach(reduced)
+        full(frames[frames.length - 1])
+        const wheelPixels = liveImage()
+        beforeEdit = await image(renderer)
+        const wheelRestoredDifference = difference(wheelPixels.data, beforeEdit.data)
+        check(wheelRestoredDifference.max <= 1, 'Wheel idle pixels must match full-quality capture at the new camera')
+        unchanged(sources)
+        rasterResults.push({ projection, pixels: baseline.width * baseline.height, fullQualityFrame, simplifiedFrame, liveDifference,
+          capturedDifference, restoredDifference, restoredCaptureDifference, wheelFrames: wheelFrames.length, wheelRestoredDifference })
+      }
+
+      const beforeGeometryEdit = identities()
+      viewport.trackEdit()
+      fixture.setVoxel(12, 1, 3, 41)
+      renderer.markDirty(fixture.chunks.keys())
+      check(Reflect.get(viewport, 'simplifyRendering') && Reflect.get(viewport, 'rasterInteractions').has('edit')
+        && !Reflect.get(viewport, 'rasterInteractions').has('controls') && renderer.meshState().pending > 0, 'trackEdit alone must simplify synchronous markDirty invalidation')
+      viewport.controls.dispatchEvent({ type: 'start' })
+      await renderer.whenMeshIdle()
+      await until(() => !Reflect.get(viewport, 'rasterInteractions').has('edit'), 'edit readiness release')
+      reduced(await liveFrame())
+      check(Reflect.get(viewport, 'rasterInteractions').has('controls'), 'Mesh completion must not release the overlapping camera gesture')
+      check(identities().some(entry => !beforeGeometryEdit.some(before => entry.geometry === before.geometry)), 'The committed fixture edit must actually replace geometry')
+      const editedCapture = await image(renderer)
+      const editDifference = difference(beforeEdit!.data, editedCapture.data)
+      check(editDifference.mean > 0.01, 'The committed edit must change captured pixels while held')
+      reduced(await liveFrame())
+      viewport.controls.dispatchEvent({ type: 'end' })
+      await settled()
+      const editRestoredDifference = difference(editedCapture.data, liveImage().data)
+      check(editRestoredDifference.max <= 1, 'Edited live pixels must restore to the full-quality held capture')
+
+      viewport.setAutoSimplifyRendering(false)
+      renderer.setSettings({ ...viewport.settings, pathTracing: true })
+      await until(() => { healthy(); return !!Reflect.get(viewport, 'pathTracer') }, 'progressive initialization', 60000)
+      const tracer = Reflect.get(viewport, 'pathTracer') as import('three-gpu-pathtracer').WebGLPathTracer
+      const tuning = { dynamicLowRes: tracer.dynamicLowRes, fadeDuration: tracer.fadeDuration, renderScale: tracer.renderScale, bounces: tracer.bounces, tiles: tracer.tiles.clone() }
+      Object.assign(tracer, { dynamicLowRes: false, fadeDuration: 0, renderScale: 0.5, bounces: 2 })
+      tracer.tiles.set(1, 1)
+      restores.push(() => { const { tiles, ...options } = tuning; Object.assign(tracer, options); tracer.tiles.copy(tiles) })
+      const counters = { sampleCalls: 0, sceneBuilds: 0, bvhBuilds: 0 }
+      watch(tracer, 'renderSample', () => { counters.sampleCalls++ })
+      watch(tracer, 'setSceneAsync', () => { counters.sceneBuilds++ })
+      watch(Reflect.get(viewport, 'pathTracingWorker'), 'generate', () => { counters.bvhBuilds++ })
+      await until(() => { healthy(); return Reflect.get(viewport, 'pathTracingReady') && !Reflect.get(viewport, 'pathTracingBuildRunning') && tracer.samples >= 2 && !Reflect.get(viewport, 'traceHidden') }, 'two real progressive samples', 180000)
+      const initialSamples = tracer.samples, beforeCamera = { ...counters }, sources = identities()
+      viewport.setAutoSimplifyRendering(true)
+      viewport.controls.dispatchEvent({ type: 'start' })
+      check(Reflect.get(viewport, 'pathTracingPaused') && Reflect.get(viewport, 'traceHidden') && Reflect.get(viewport, 'pathTracingFrame') === undefined, 'Held gesture must hide tracing and cancel its sampling RAF')
+      for (let i = 0; i < 3; i++) reduced(await liveFrame())
+      const heldSampleCalls = counters.sampleCalls - beforeCamera.sampleCalls
+      check(tracer.samples === initialSamples && heldSampleCalls === 0, 'No real samples may execute while held')
+      const progressiveCaptureDifference = difference(editedCapture.data, (await image(renderer)).data)
+      check(progressiveCaptureDifference.max <= 1, 'Capture of a paused trace must use the full-quality raster baseline')
+      check(tracer.samples === initialSamples && counters.sampleCalls === beforeCamera.sampleCalls, 'Capturing a paused trace must not restart sampling')
+      viewport.camera.position.x += 0.25
+      viewport.controls.update()
+      const movedSamples = tracer.samples
+      for (let i = 0; i < 3; i++) reduced(await liveFrame())
+      check(tracer.samples === movedSamples && counters.sampleCalls === beforeCamera.sampleCalls, 'Camera updates must not sample while paused')
+      viewport.controls.dispatchEvent({ type: 'end' })
+      await until(() => { healthy(); return !Reflect.get(viewport, 'pathTracingPaused') && !Reflect.get(viewport, 'traceHidden') && tracer.samples >= movedSamples + 2 }, 'progressive resume after settling', 180000)
+      check(counters.sceneBuilds === beforeCamera.sceneBuilds && counters.bvhBuilds === beforeCamera.bvhBuilds, 'Camera-only pause/resume must not build a new scene or BVH')
+      unchanged(sources)
+      check(authored() === authoredBefore && materials.every((material, i) => material === Reflect.get(renderer, 'materials')[i]), 'All quality transitions and edits must preserve authored material values and identities')
+      healthy()
+      check(webgl.getContext().getError() === 0, 'Auto simplify must not introduce WebGL errors')
+      return { viewport: [canvas.width, canvas.height], raster: rasterResults, edit: { editDifference, editRestoredDifference },
+        progressive: { initialSamples, heldSampleCalls, cameraResetSamples: movedSamples, resumedSamples: tracer.samples,
+          sceneBuildsDuringCamera: counters.sceneBuilds - beforeCamera.sceneBuilds, bvhBuildsDuringCamera: counters.bvhBuilds - beforeCamera.bvhBuilds, progressiveCaptureDifference },
+        identitiesPreserved: true, errors: errors.slice(errorStart) }
+    } finally {
+      renderer.setRenderMode(false)
+      viewport.setAutoSimplifyRendering(false)
+      viewport.controls.dispatchEvent({ type: 'end' })
+      Reflect.get(viewport, 'clearRasterInteractions').call(viewport)
+      for (const restore of restores.reverse()) restore()
+      sunlight.shadow.mapSize.copy(savedShadowSize)
+      sunlight.shadow.map?.dispose(); sunlight.shadow.map = null
+      webgl.shadowMap.needsUpdate = true
+      Reflect.set(raster, 'maxFrameMilliseconds', savedBudget)
+      viewport.setAutoSimplifyRendering(savedAuto)
+    }
+  })
+}
+
 export async function runRenderingChecks(renderer: VoxelRenderer, settings: ViewSettings, errors: string[]) {
   const viewport = renderer.viewport
   const [{ VoxelDocument }, THREE] = await Promise.all([import('../src/shared/voxel/document'), import('three')])

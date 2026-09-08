@@ -7,6 +7,7 @@ import { StudioCommandError } from '../shared/errors'
 import { bytesToBase64 } from '../shared/voxel/snapshot'
 import type { ModelPreviewPlugin } from '../shared/rendering/contracts'
 import { mountPerformanceMonitor } from './performance-monitor'
+import { mountRenderingPreferences } from './rendering-preferences'
 
 export async function mountApplication(root: HTMLElement) {
   root.innerHTML = `<div class="studio editor-surface" data-editor="model"><div class="viewport"></div><div class="model-root"></div><div class="scene-root"></div><div class="scene-return instrument" hidden><button type="button" class="primary">Done: Return to scene</button><span></span></div><div class="toast instrument" role="status" aria-live="polite" hidden></div></div>`
@@ -108,6 +109,7 @@ export async function mountApplication(root: HTMLElement) {
     },
   })
   const disposePerformanceMonitor = mountPerformanceMonitor(shell, model.renderer.viewport)
+  const disposeRenderingPreferences = mountRenderingPreferences(shell, model.renderer.viewport)
   done.addEventListener('click', () => { void bridge!.returnToScene().catch(error => notify(error instanceof Error ? error.message : 'Could not return to the scene.', 'warning')) }, { signal: lifetime.signal })
   const disconnect = connectIntegrations({
     root: shell, menu: model.menu, dispatch,
@@ -140,7 +142,7 @@ export async function mountApplication(root: HTMLElement) {
           await bridge!.dispose()
           await model.dispose()
           disposed = true; editorGeneration++; lifetime.abort(); clearTimeout(toastTimer)
-          disposePerformanceMonitor(); disconnect(); listeners.clear(); root.replaceChildren()
+          disposePerformanceMonitor(); disposeRenderingPreferences(); disconnect(); listeners.clear(); root.replaceChildren()
         } catch (error) {
           notify(`Could not close the editor. ${error instanceof Error ? error.message : 'Save your work and retry.'}`, 'warning')
           throw error

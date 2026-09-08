@@ -168,6 +168,8 @@ async function integration(name: typeof cases[number]) {
     setDocument(document: VoxelDocument) { this.document = document; this.maps.clear() }
     setRenderMode(enabled: boolean) { this.renderMode = enabled }
     setActive() {}
+    setAutoSimplifyRendering() {}
+    trackEdit = mock(() => {})
     focusViewport() {}
     dispose() { disposedAdapters.push('model') }
     async setPbrMap(index: number, map: PbrMap, blob: Blob) {
@@ -520,6 +522,7 @@ async function integration(name: typeof cases[number]) {
         expect(renderer.applySelection).toHaveBeenLastCalledWith({ cells: [], count: 0 }, false)
         expect(counts()).toEqual([0, 1])
 
+        renderer.trackEdit.mockClear()
         for (const command of [
           { type: 'tool.set', tool: 'paint' },
           { type: 'tool.auxiliary', tool: 'pick' },
@@ -539,8 +542,10 @@ async function integration(name: typeof cases[number]) {
         ])
         expect(renderer.refreshLayerScope).toHaveBeenCalledTimes(7)
         expect(scans).not.toHaveBeenCalled()
+        expect(renderer.trackEdit).not.toHaveBeenCalled()
 
         await edit(2)
+        expect(renderer.trackEdit).toHaveBeenCalledTimes(1)
         expect(counts()).toEqual([0, 2])
         await dispatch({ type: 'history.undo' })
         expect(counts()).toEqual([0, 1])
@@ -548,6 +553,7 @@ async function integration(name: typeof cases[number]) {
         expect(counts()).toEqual([0, 2])
         expect(renderer.refreshLayerScope).toHaveBeenCalledTimes(9)
         expect(scans).toHaveBeenCalledTimes(3)
+        expect(renderer.trackEdit).toHaveBeenCalledTimes(3)
 
         const { Studio } = await import('../editors/model/studio')
         const replacement = new VoxelDocument()

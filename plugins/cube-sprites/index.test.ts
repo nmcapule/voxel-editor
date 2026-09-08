@@ -1,8 +1,9 @@
-import { expect, test } from 'bun:test'
+import { expect, spyOn, test } from 'bun:test'
 import * as THREE from 'three'
 import { chunkId, PADDED_SIZE, VoxelDocument } from '../../src/shared/voxel/document'
 import { CubeSprites, packChunk, patchPhysicalShader } from './index'
 import { DEFAULT_SETTINGS } from '../../src/shared/rendering/settings'
+import type { PreviewFrame } from '../../src/shared/rendering/contracts'
 
 test('sprite cells preserve palette indices and visible layers, and cull enclosed cells across chunk seams', () => {
   const document = new VoxelDocument({ x: 32, y: 16, z: 16 })
@@ -73,7 +74,7 @@ test('PBR batches, toggles, live material edits and borrowed texture ownership',
   materials[7].map = materials[7].envMap = map
   materials[7].visible = false
   materials[12].transmission = 0.8
-  const frame = { renderer: { shadowMap: {} } as THREE.WebGLRenderer, camera: new THREE.OrthographicCamera(),
+  const frame: PreviewFrame = { renderer: { shadowMap: {} } as THREE.WebGLRenderer, camera: new THREE.OrthographicCamera(),
     light: new THREE.DirectionalLight(), settings: { ...DEFAULT_SETTINGS, shadows: false }, materials, width: 32, height: 32 }
   expect(frame.settings.pbrMaterials).toBe(true)
   sprites.prepare(frame)
@@ -85,24 +86,60 @@ test('PBR batches, toggles, live material edits and borrowed texture ownership',
   expect(meshes[0].material.envMap).toBe(map)
   expect(meshes[0].material.visible).toBe(true)
   const geometry = meshes[0].geometry, material = meshes[0].material, version = material.version
-  sprites.prepare(frame)
-  expect(material.version).toBe(version)
+  const retained = meshes.map(mesh => ({ material: mesh.material, geometry: mesh.geometry, voxel: mesh.geometry.getAttribute('voxel') }))
+  const stats = { ...sprites.stats }, paddedChunk = spyOn(model, 'paddedChunk')
+  let geometryDisposals = 0, materialDisposals = 0
+  for (const entry of retained) {
+    entry.geometry.addEventListener('dispose', () => geometryDisposals++)
+    entry.material.addEventListener('dispose', () => materialDisposals++)
+  }
+  const cheap = Reflect.get(sprites, 'material') as THREE.ShaderMaterial
+  expect(cheap.transparent).toBe(false)
+  expect(cheap.depthWrite).toBe(true)
+  for (const reducedQuality of [true, false, true, undefined]) {
+    frame.reducedQuality = reducedQuality
+    sprites.prepare(frame)
+    expect(sprites.stats).toEqual(stats)
+    expect(paddedChunk).not.toHaveBeenCalled()
+    expect(geometryDisposals).toBe(0)
+    expect(materialDisposals).toBe(0)
+    expect(material.version).toBe(version)
+    expect(meshes.map(mesh => mesh.castShadow)).toEqual([true, false])
+    meshes.forEach((mesh, i) => {
+      expect(sprites.root.children[i]).toBe(mesh)
+      expect(mesh.geometry).toBe(retained[i].geometry)
+      expect(mesh.geometry.getAttribute('voxel')).toBe(retained[i].voxel)
+      expect<THREE.Material>(mesh.material).toBe(reducedQuality ? cheap : retained[i].material)
+    })
+  }
+  paddedChunk.mockRestore()
   materials[7].roughness = 0.23; materials[7].ior = 1.8
   materials[7].needsUpdate = true
+  frame.reducedQuality = true
   sprites.prepare(frame)
   expect(material.roughness).toBe(0.23)
   expect(material.ior).toBe(1.8)
+  expect(material.map).toBe(map)
+  expect(material.envMap).toBe(map)
+  expect<THREE.Material>(meshes[0].material).toBe(cheap)
+  frame.reducedQuality = undefined
+  sprites.prepare(frame)
+  expect(meshes[0].material).toBe(material)
   expect(meshes[0].geometry).toBe(geometry)
+  expect(sprites.stats.chunkUpdates).toBe(stats.chunkUpdates)
+  frame.reducedQuality = true
   materials[7].opacity = 0.5
   materials[7].needsUpdate = true
   sprites.prepare(frame)
   expect(sprites.root.children[0]).not.toBe(meshes[0])
   expect((sprites.root.children[0] as THREE.Mesh).castShadow).toBe(false)
+  expect((sprites.root.children[0] as THREE.Mesh).material).toBe(cheap)
   const alphaMesh = sprites.root.children[0]
   materials[7].transmission = 0.9
   materials[7].needsUpdate = true
   sprites.prepare(frame)
   expect(sprites.root.children[0]).not.toBe(alphaMesh)
+  frame.reducedQuality = undefined
   frame.settings.pbrMaterials = false
   sprites.prepare(frame)
   expect(sprites.root.children).toHaveLength(1)
@@ -119,4 +156,68 @@ test('PBR batches, toggles, live material edits and borrowed texture ownership',
   expect(disposed).toBe(false)
   for (const material of materials) material.dispose()
   map.dispose()
+})
+
+test('cheap initial frames and dirty edits retain physical packing until the actual PBR preference changes', () => {
+  const model = new VoxelDocument()
+  model.setVoxel(1, 1, 1, 7); model.setVoxel(2, 1, 1, 12); model.setVoxel(20, 1, 1, 7)
+  const sprites = new CubeSprites(model)
+  Reflect.get(sprites, 'viewBake').prepare = () => false
+  Reflect.get(sprites, 'shadowBake').prepare = () => { throw new Error('Cheap frames must skip the shadow bake') }
+  const materials = model.materials.map(() => new THREE.MeshPhysicalMaterial())
+  materials[12].transmission = 0.8
+  const frame: PreviewFrame = { renderer: { shadowMap: {} } as THREE.WebGLRenderer, camera: new THREE.OrthographicCamera(),
+    light: new THREE.DirectionalLight(), settings: { ...DEFAULT_SETTINGS, shadows: false }, materials,
+    width: 32, height: 32, reducedQuality: true }
+  const cheap = Reflect.get(sprites, 'material') as THREE.ShaderMaterial
+  sprites.prepare(frame)
+  const initial = sprites.root.children.slice() as THREE.Mesh<THREE.InstancedBufferGeometry>[]
+  expect(initial).toHaveLength(3)
+  expect(initial.every(mesh => mesh.material === cheap)).toBe(true)
+  expect(initial.map(mesh => mesh.castShadow)).toEqual([true, false, true])
+  // The opaque voxel's face against glass must remain exposed, even on a cheap frame.
+  expect(initial[0].geometry.getAttribute('voxel').array[0] >>> 20 & 2).toBe(0)
+  const updates = sprites.stats.chunkUpdates, untouched = initial[2]
+  let disposed = 0
+  initial[0].geometry.addEventListener('dispose', () => disposed++)
+  model.setVoxel(3, 1, 1, 7)
+  sprites.markDirty([0])
+  sprites.prepare(frame)
+  expect(sprites.stats.chunkUpdates).toBe(updates + 1)
+  expect(sprites.stats.instances).toBe(4)
+  expect(disposed).toBe(1)
+  expect(sprites.root.children).toContain(untouched)
+  const edited = sprites.root.children.slice() as THREE.Mesh<THREE.InstancedBufferGeometry>[]
+  expect(edited.every(mesh => mesh.material === cheap)).toBe(true)
+  frame.reducedQuality = false
+  sprites.prepare(frame)
+  expect(sprites.stats.chunkUpdates).toBe(updates + 1)
+  edited.forEach(mesh => {
+    const index = mesh.geometry.getAttribute('voxel').array[0] >>> 12 & 255
+    expect(mesh.material).toBe(Reflect.get(sprites, 'physical').get(index).material)
+    expect(mesh.castShadow).toBe(index !== 12)
+  })
+  frame.reducedQuality = true
+  frame.settings.pbrMaterials = false
+  sprites.prepare(frame)
+  expect(sprites.stats.chunkUpdates).toBe(updates + 3)
+  expect(sprites.root.children).toHaveLength(2)
+  expect((sprites.root.children as THREE.Mesh[]).every(mesh => mesh.material === cheap && mesh.castShadow)).toBe(true)
+  const opaque = sprites.root.children.slice()
+  frame.reducedQuality = undefined
+  sprites.prepare(frame)
+  expect(sprites.root.children).toEqual(opaque)
+  expect(sprites.stats.chunkUpdates).toBe(updates + 3)
+  frame.reducedQuality = true
+  frame.settings.pbrMaterials = true
+  sprites.prepare(frame)
+  expect(sprites.stats.chunkUpdates).toBe(updates + 5)
+  expect(sprites.root.children).toHaveLength(3)
+  expect((sprites.root.children as THREE.Mesh[]).every(mesh => mesh.material === cheap)).toBe(true)
+  frame.reducedQuality = undefined
+  sprites.prepare(frame)
+  expect(sprites.stats.chunkUpdates).toBe(updates + 5)
+  expect((sprites.root.children as THREE.Mesh[]).every(mesh => mesh.material instanceof THREE.MeshPhysicalMaterial)).toBe(true)
+  sprites.dispose()
+  for (const material of materials) material.dispose()
 })

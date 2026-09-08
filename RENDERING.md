@@ -121,6 +121,31 @@ unchanged geometry, and matching restored pixels with AO, glass, grids, and shad
 Pixel reduction is not an FPS claim: measure frame times and transition costs on target
 hardware; software-GPU checks only establish rendering correctness.
 
+**Auto simplify rendering** is a default-off browser preference shared by both Render
+panels, stored under `voxel-studio-auto-simplify-rendering`, not in project settings or
+undo history. During camera movement and editing it disables realtime PBR, shadows,
+AO and miniature photography on live frames only. Glass temporarily becomes opaque
+palette color. Selection feedback and authored materials/maps remain unchanged.
+Cube sprites swaps draw materials without repacking geometry. Shadow residency and
+pending shadow updates are retained while shadow rendering is skipped.
+
+The existing gesture owners and 150 ms settling delay also cover programmatic camera
+changes and committed keyboard/bulk edits. Edits hold a separate owner until the
+adapter's mesh work finishes; superseded or abandoned completions cannot release a
+newer edit. Hover and selection-only commands do not start edit ownership.
+Progressive PBR pauses sampling and defers new builds while showing the cheap raster.
+An in-flight build may finish while paused; valid scene/BVH resources remain reusable.
+Changes still invalidate/update tracing normally, and settling restores the latest
+requested settings, not a snapshot from gesture start. An unchanged converged trace
+is re-presented without consuming another sample. Progressive previews retain normal
+DPR. PNG captures and inspection bypass simplification; capture completion restores
+the current live policy even if the toggle or interaction changed during encoding.
+
+Run `transparencyTest.runAutoSimplifyChecks()` in `/tests/transparency.html` for live
+pass suppression, pixel-identical full-quality captures/restoration in both projections,
+wheel/edit settling, and progressive pause/resume without camera-only BVH rebuilds.
+These checks establish correctness, not a hardware-independent performance gain.
+
 Skybox presets generate a 256x128 linear equirectangular texture for the background
 and traced environment, with a 64-pixel-face PMREM for realtime materials. Ambient
 scales sky illumination and reflections; the hemisphere is disabled in sky mode.

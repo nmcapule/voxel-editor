@@ -69,10 +69,11 @@ export function runCubeSpritePbrChecks() {
   const actual = new Uint8Array(128 * 128 * 4), expected = new Uint8Array(actual.length)
   const results: object[] = []
   let unmapped: Uint8Array | undefined
-  const render = (sprite: boolean, pixels: Uint8Array) => {
+  const render = (sprite: boolean, pixels: Uint8Array, reducedQuality = false) => {
     sprites.root.visible = sprite; reference.visible = !sprite
-    if (sprite) sprites.prepare({ renderer, camera, light, settings, materials, width: 128, height: 128 })
-    renderer.shadowMap.enabled = settings.shadows
+    if (sprite) sprites.prepare({ renderer, camera, light, settings: reducedQuality ? { ...settings, shadows: false } : settings,
+      materials, width: 128, height: 128, reducedQuality })
+    renderer.shadowMap.enabled = !reducedQuality && settings.shadows
     renderer.shadowMap.needsUpdate = true
     pipeline.render(camera, target)
     renderer.readRenderTargetPixels(target, 0, 0, 128, 128, pixels)
@@ -137,12 +138,19 @@ export function runCubeSpritePbrChecks() {
     const updates = sprites.stats.chunkUpdates
     render(true, actual); render(true, expected)
     check(sprites.stats.chunkUpdates === updates && difference(actual, expected) === 0, 'Unchanged PBR frames must retain instances and pixels')
+    const full = actual.slice()
+    render(true, actual, true)
+    check(difference(actual, full) > 0.05 && pipeline.lastFrame.layers === 0, 'Cheap shading must render glass as opaque palette sprites')
+    render(true, expected)
+    check(difference(expected, full) === 0, 'Normal prepare must restore physical pixels after a cheap frame')
+    render(true, expected, true)
+    check(difference(actual, expected) === 0 && sprites.stats.chunkUpdates === updates, 'Cheap/full/cheap must retain packing and cheap pixels')
     settings.pbrMaterials = false
     render(true, expected)
-    check(difference(actual, expected) > 0.05 && sprites.stats.chunkUpdates > updates, 'Toggle off must restore stylized opaque rendering')
+    check(difference(actual, expected) === 0 && sprites.stats.chunkUpdates > updates, 'Retained physical packing must shade identically to repacked opaque sprites')
     settings.pbrMaterials = true
     render(true, expected)
-    check(difference(actual, expected) === 0, 'Toggle on must restore physical pixels')
+    check(difference(full, expected) === 0, 'Toggle on must restore physical pixels')
     return results
   } finally {
     clearReference(); sprites.dispose(); pipeline.dispose(); target.dispose()

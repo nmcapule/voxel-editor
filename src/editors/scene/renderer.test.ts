@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from 'bun:test'
+import { expect, mock, spyOn, test } from 'bun:test'
 import * as THREE from 'three'
 import { chunkId, VoxelDocument } from '../../shared/voxel/document'
 import { meshChunk } from '../../shared/voxel/mesher'
@@ -29,7 +29,7 @@ function rendererProbe(document: SceneDocument) {
     diagnostics: { meshJobs: 0, chunkReads: 0, uploads: 0, staleResults: 0, matrixUpdates: 0 },
     host: { getSceneViewport: () => viewport, getSceneShadowVolume: (receivers: THREE.Box3[], bounds: THREE.Box3) => sceneShadowVolume(viewport.camera, bounds, receivers, viewport.shadowMatrix, viewport.groundY),
       applyEnvironment(material: THREE.MeshStandardMaterial) { Viewport.prototype.applyEnvironment.call({ environment: viewport.environment, scene: viewport.scene, settings: document.data.settings } as Viewport, material) },
-      setSceneContent() {}, setSettings() {}, invalidateSceneContent() {}, setSceneInteraction() {}, setRasterInteraction() {} },
+      setSceneContent() {}, setSettings() {}, invalidateSceneContent() {}, setSceneInteraction() {}, setRasterInteraction() {}, trackEdit: mock(() => {}) },
     callbacks: { onError(message: string) { throw new Error(message) }, onStats() {} }, updateGizmo() {}, schedule() {},
   })
 }
@@ -148,8 +148,13 @@ test('streaming reuses geometry across cells and TRS commands, queues are bounde
     const instance = doc.data.instances[0]
     const otherMatrix = probe.entries.get(doc.data.instances[1].id).matrix
     const matrixUpdates = probe.diagnostics.matrixUpdates
+    probe.host.trackEdit.mockClear()
+    probe.refresh(doc.execute({ type: 'selection.set', ids: [instance.id] }))
+    expect(probe.host.trackEdit).not.toHaveBeenCalled()
+    probe.refresh(doc.execute({ type: 'selection.set', ids: [] }))
     const change = doc.execute({ type: 'instances.transform', transforms: [{ id: instance.id, rotation: instance.rotation, scale: instance.scale, position: { x: 50, y: 2, z: 0 } }] })
     probe.refresh(change); probe.reconcile()
+    expect(probe.host.trackEdit).toHaveBeenCalledTimes(1)
     expect(probe.queue).toHaveLength(0)
     expect(probe.geometryBytes).toBe(bytes)
     expect(probe.diagnostics.uploads).toBe(uploads)
@@ -545,7 +550,7 @@ test('fitting scenes reach the tracer as complete ordinary geometry; oversized p
     render() { rasters++ }, resetFps() {}, stopPathTracingSamples() {}, startPathTracingSamples() { samples++ },
     requestPathTraceRebuild() { this.pathTracingRevision++; this.pathTracingBuildRequested = true; this.pathTracingReady = false },
     async ensurePathTracer() {
-      const tracer = { dispose() {}, async setSceneAsync(scene: THREE.Scene) {
+      const tracer = { dispose() {}, setCamera() {}, async setSceneAsync(scene: THREE.Scene) {
         builds++
         scene.traverse(object => expect((object as THREE.InstancedMesh).isInstancedMesh).not.toBe(true))
         const mesh = scene.children.flatMap(object => object.children).find(object => object instanceof THREE.Mesh) as THREE.Mesh

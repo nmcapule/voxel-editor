@@ -244,6 +244,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
   function applyStudioEffects(command: RemoteCommand, outcome: StudioOutcome, source: CommandSource) {
     if (disposed) return
     const effects = outcome.effects
+    if (effects.documentReplaced || effects.dirtyChunks?.length) renderer.viewport.trackEdit()
     syncStudioState(command)
     if (command.type === 'tool.set' || command.type === 'tool.paintMode' || command.type === 'tool.auxiliary' || command.type === 'clipboard.paste.begin') {
       renderer.setToolState(activeTool, paintMode, auxiliaryTool)

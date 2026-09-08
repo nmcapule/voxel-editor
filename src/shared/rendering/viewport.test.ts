@@ -175,7 +175,10 @@ test('bounded stage fitting preserves local cameras, light position and guide ge
 function photoProbe() {
   const calls: string[] = []
   const pathTracer = {
-    samples: 128, pausePathTracing: false, reset: mock(), setCamera: mock(), dispose: mock(),
+    samples: 128, pausePathTracing: false,
+    reset: mock(function (this: { samples: number }) { this.samples = 0 }),
+    setCamera: mock(), updateMaterials: mock(), updateLights: mock(), updateEnvironment: mock(),
+    setSceneAsync: mock(async (_scene: THREE.Scene, _camera: THREE.Camera, _options: unknown) => {}), dispose: mock(),
     renderSample: mock(function (this: { samples: number; pausePathTracing: boolean }) {
       calls.push(this.pausePathTracing ? 'present trace' : 'sample trace')
       if (!this.pausePathTracing) this.samples++
@@ -185,13 +188,15 @@ function photoProbe() {
     scene: new THREE.Scene(), camera: new THREE.PerspectiveCamera(),
     sceneContent: { root: new THREE.Group(), stage: 'bounded', bounds: new THREE.Box3(new THREE.Vector3(-1, 0, -1), new THREE.Vector3(1, 2, 1)), onViewportChange() {}, whenReady: async () => {} },
     settings: { ...DEFAULT_SETTINGS, tiltShift: true }, renderMode: true,
-    captures: 0, syncRasterResolution() { return false },
+    captures: 0, autoSimplifyRendering: false, editGeneration: 0, rasterInteractions: new Set(),
+    sceneInteraction: false, traceHidden: false, syncRasterResolution() { return false },
+    pathTracingBuildRunning: false, pathTracingBuildRequested: false, pathTracingFailed: false,
     pathTracingReady: true, presentationDirty: false, tiltShiftDirty: false, fullEpoch: 0, pathTracingRevision: 0,
-    hemisphere: new THREE.HemisphereLight(), sunlight: new THREE.DirectionalLight(), sunlightTarget: new THREE.Object3D(),
+    hemisphere: new THREE.HemisphereLight(), sunlight: Object.assign(new THREE.DirectionalLight(), { castShadow: true }), sunlightTarget: new THREE.Object3D(),
     callbacks: {}, resetFps() {}, recordFrame() {},
     renderer: { shadowMap: { enabled: true, needsUpdate: false }, getContext: () => ({ isContextLost: () => false }),
-      domElement: { width: 160, height: 80, toBlob(callback: (blob: Blob) => void) { calls.push('encode'); callback(new Blob(['png'])) } } },
-    raster: { ambientOcclusion: { enabled: true }, render() { calls.push('raster') } },
+      domElement: { width: 160, height: 80, setAttribute() {}, toBlob(callback: (blob: Blob) => void) { calls.push('encode'); callback(new Blob(['png'])) } } },
+    raster: { pbrMaterials: true, ambientOcclusion: { enabled: true }, readBuffer: { width: 160, height: 80 }, render() { calls.push('raster') } },
     tiltShift: { render: mock((_renderer: unknown, settings: ViewSettings) => { calls.push(`effect ${settings.tiltShiftFocus}`) }) },
     pathTracer, getView: () => ({ name: 'stable' }),
   })
@@ -200,7 +205,7 @@ function photoProbe() {
 
 test('opaque culling is passed only to live primary frames outside captures and progressive previews', () => {
   const { probe } = photoProbe(), cullOpaque = mock(() => new Set<THREE.Mesh>())
-  const render = mock(), secondary = { render: mock() }
+  const render = mock(), secondary = { ambientOcclusion: { enabled: true }, render: mock() }
   probe.sceneContent.cullOpaque = cullOpaque
   probe.raster.render = render
   probe.settings.pathTracing = false
@@ -356,7 +361,7 @@ function resolutionProbe(dpr = 2) {
   Object.assign(probe, {
     renderMode: false, settings: { ...DEFAULT_SETTINGS, pathTracing: false, tiltShift: false },
     rasterInteractions: new Set(), normalPixelRatio: ratio, host: { clientWidth: size.x, clientHeight: size.y },
-    controls: { target: new THREE.Vector3() }, cameraChanged: mock(), invalidateSceneContent: mock(),
+    controls: { target: new THREE.Vector3(), mouseButtons: {}, touches: {} }, cameraChanged: mock(), invalidateSceneContent: mock(),
     syncRasterResolution: Reflect.get(Viewport.prototype, 'syncRasterResolution'), getView: Viewport.prototype.getView,
   })
   Object.assign(probe.renderer, {
@@ -366,13 +371,16 @@ function resolutionProbe(dpr = 2) {
     setSize: mock((width: number, height: number) => { size.set(width, height); updateCanvas() }),
     getDrawingBufferSize: (target: THREE.Vector2) => target.set(canvas.width, canvas.height),
   })
-  probe.raster.setSize = mock()
-  probe.raster.render = mock()
+  probe.raster.readBuffer = { width: canvas.width, height: canvas.height }
+  probe.raster.setSize = mock((width: number, height: number) => { Object.assign(probe.raster.readBuffer, { width, height }) })
+  const draws: boolean[][] = []
+  probe.raster.render = mock(() => { draws.push([probe.raster.pbrMaterials, probe.raster.ambientOcclusion.enabled, probe.renderer.shadowMap.enabled, probe.sunlight.castShadow]) })
   probe.sceneContent.onViewportChange = mock()
   return {
-    probe, pathTracer, frames, timers,
+    probe, pathTracer, frames, timers, draws,
     frame() { const entry = frames.entries().next().value; if (entry) { frames.delete(entry[0]); entry[1](0) } },
     settle() { for (const [id, callback] of [...timers]) { timers.delete(id); callback() } },
+    async microtasks() { for (let i = 0; i < 4; i++) await Promise.resolve() },
     restore() {
       globalThis.requestAnimationFrame = request; globalThis.cancelAnimationFrame = cancel
       timeout.mockRestore(); clear.mockRestore()
@@ -381,6 +389,489 @@ function resolutionProbe(dpr = 2) {
     },
   }
 }
+
+test('auto simplify opt-out leaves raster quality and progressive sampling unchanged during gestures', async () => {
+  const h = resolutionProbe(), { probe, pathTracer } = h
+  probe.renderMode = probe.settings.tiltShift = true
+  probe.sceneContent.whenReady = mock(async () => {})
+  try {
+    probe.setAutoSimplifyRendering(false)
+    probe.trackEdit()
+    await h.microtasks()
+    probe.setRasterInteraction('controls', true)
+    h.frame()
+    expect(probe.simplifyRendering).toBe(false)
+    expect(probe.pathTracingPaused).toBe(false)
+    expect(probe.sceneContent.whenReady).not.toHaveBeenCalled()
+    expect(probe.renderer.getPixelRatio()).toBe(1)
+    expect(h.draws).toEqual([[true, true, true, true]])
+    expect(probe.tiltShift.render).toHaveBeenCalledTimes(1)
+    probe.settings.pathTracing = true
+    pathTracer.samples = 127
+    probe.startPathTracingSamples(false)
+    h.frame()
+    expect(pathTracer.renderSample).toHaveBeenCalledTimes(1)
+    expect(pathTracer.samples).toBe(128)
+    expect(pathTracer.reset).not.toHaveBeenCalled()
+    expect(probe.renderer.getPixelRatio()).toBe(2)
+  } finally { h.restore() }
+})
+
+test('auto simplify reduces only live shading and restores latest settings or mid-drag opt-out at DPR 1', () => {
+  const h = resolutionProbe(1), { probe } = h
+  probe.renderMode = probe.settings.tiltShift = true
+  const saved = { ...probe.settings }, canonical = probe.settings
+  const prepare = mock()
+  probe.sceneContent.prepareRaster = prepare
+  try {
+    probe.setAutoSimplifyRendering(true)
+    probe.setRasterInteraction('model', true)
+    h.frame()
+    expect(probe.simplifyRendering).toBe(true)
+    expect(h.draws.at(-1)).toEqual([false, false, false, false])
+    expect(probe.tiltShift.render).not.toHaveBeenCalled()
+    expect(prepare.mock.calls.at(-1)?.[0]).toMatchObject({ reducedQuality: true, width: 161, height: 81,
+      settings: { ...saved, shadows: false, ambientOcclusion: false } })
+    expect(probe.settings).toBe(canonical)
+    expect(probe.settings).toEqual(saved)
+    expect(probe.raster.pbrMaterials && probe.raster.ambientOcclusion.enabled && probe.renderer.shadowMap.enabled && probe.sunlight.castShadow).toBe(true)
+
+    probe.setSettings({ ...saved, pbrMaterials: false, ambientOcclusion: false, shadows: false, tiltShiftFocus: 0.8 })
+    h.frame()
+    probe.setRasterInteraction('model', false)
+    h.frame()
+    expect(probe.tiltShift.render).not.toHaveBeenCalled()
+    h.settle(); h.frame()
+    expect(probe.simplifyRendering).toBe(false)
+    expect(h.draws.at(-1)).toEqual([false, false, false, false])
+    expect(prepare.mock.calls.at(-1)?.[0].settings).toBe(probe.settings)
+    expect(probe.tiltShift.render).toHaveBeenLastCalledWith(probe.renderer, probe.settings)
+    expect(probe.settings.tiltShiftFocus).toBe(0.8)
+
+    probe.setRasterInteraction('model', true)
+    probe.setSettings({ ...probe.settings, pbrMaterials: true, ambientOcclusion: true, shadows: true })
+    h.frame()
+    expect(h.draws.at(-1)).toEqual([false, false, false, false])
+    probe.setAutoSimplifyRendering(false)
+    h.frame()
+    expect(probe.rasterInteractions.has('model')).toBe(true)
+    expect(probe.simplifyRendering).toBe(false)
+    expect(h.draws.at(-1)).toEqual([true, true, true, true])
+    expect(probe.tiltShift.render).toHaveBeenCalledTimes(2)
+    expect(probe.renderer.setPixelRatio).not.toHaveBeenCalled()
+  } finally { h.restore() }
+})
+
+test('auto simplify retains overlapping owners and restarts the single wheel settle timer', () => {
+  const h = resolutionProbe(), { probe } = h
+  try {
+    probe.setAutoSimplifyRendering(true)
+    probe.setRasterInteraction('model', true)
+    probe.setRasterInteraction('model', true)
+    probe.setRasterInteraction('focus', true)
+    probe.setRasterInteraction('controls', true)
+    probe.setRasterInteraction('controls', false)
+    probe.setRasterInteraction('model', false)
+    expect(h.timers.size).toBe(0)
+    expect(probe.rasterInteractions).toEqual(new Set(['focus']))
+    h.frame()
+    expect(h.draws.at(-1)).toEqual([false, false, false, false])
+    probe.setRasterInteraction('focus', false)
+    const previous = probe.rasterRestoreTimer
+    probe.setRasterInteraction('controls', true)
+    expect(h.timers.has(previous)).toBe(false)
+    probe.setRasterInteraction('controls', false)
+    expect(h.timers.size).toBe(1)
+    expect(probe.rasterRestoreTimer).not.toBe(previous)
+    h.frame()
+    expect(probe.simplifyRendering).toBe(true)
+    expect(h.draws.at(-1)).toEqual([false, false, false, false])
+    h.settle(); h.frame()
+    expect(h.timers.size).toBe(0)
+    expect(probe.simplifyRendering).toBe(false)
+    expect(h.draws.at(-1)).toEqual([true, true, true, true])
+    expect(probe.sceneContent.onViewportChange).not.toHaveBeenCalled()
+    expect(probe.invalidateSceneContent).not.toHaveBeenCalled()
+  } finally { h.restore() }
+})
+
+test('simplified frames retain shadow invalidation raised during preview preparation', () => {
+  const h = resolutionProbe(), { probe } = h
+  probe.sceneContent.prepareRaster = () => { probe.renderer.shadowMap.needsUpdate = true }
+  probe.raster.render = () => { probe.renderer.shadowMap.needsUpdate = false }
+  try {
+    probe.setAutoSimplifyRendering(true)
+    probe.setRasterInteraction('model', true)
+    h.frame()
+    expect(probe.renderer.shadowMap.needsUpdate).toBe(true)
+    probe.setRasterInteraction('model', false)
+    h.settle(); h.frame()
+    expect(probe.renderer.shadowMap.needsUpdate).toBe(false)
+  } finally { h.restore() }
+})
+
+test('trackEdit checks readiness after synchronous mutation and only the latest edit releases quality', async () => {
+  const h = resolutionProbe(), { probe } = h
+  const first = Promise.withResolvers<void>(), latest = Promise.withResolvers<void>()
+  let ready = Promise.resolve()
+  probe.sceneContent.whenReady = mock(() => ready)
+  try {
+    probe.setAutoSimplifyRendering(true)
+    probe.trackEdit()
+    expect(probe.sceneContent.whenReady).not.toHaveBeenCalled()
+    ready = first.promise
+    await h.microtasks()
+    expect(probe.sceneContent.whenReady.mock.results[0].value).toBe(first.promise)
+    probe.trackEdit()
+    probe.trackEdit()
+    ready = latest.promise
+    await h.microtasks()
+    expect(probe.sceneContent.whenReady).toHaveBeenCalledTimes(2)
+    expect(probe.sceneContent.whenReady.mock.results[1].value).toBe(latest.promise)
+    first.resolve()
+    await h.microtasks()
+    h.frame()
+    expect(probe.rasterInteractions.has('edit')).toBe(true)
+    expect(h.timers.size).toBe(0)
+    expect(h.draws.at(-1)).toEqual([false, false, false, false])
+    latest.resolve()
+    await h.microtasks()
+    expect(probe.rasterInteractions.has('edit')).toBe(false)
+    expect(h.timers.size).toBe(1)
+    h.frame()
+    expect(probe.simplifyRendering).toBe(true)
+    h.settle(); h.frame()
+    expect(h.draws.at(-1)).toEqual([true, true, true, true])
+  } finally { h.restore() }
+})
+
+test('trackEdit releases failed readiness and ignores completion after the editor is cleared', async () => {
+  const h = resolutionProbe(), { probe } = h
+  const failed = Promise.withResolvers<void>(), abandoned = Promise.withResolvers<void>()
+  probe.sceneContent.whenReady = mock(() => failed.promise)
+  probe.rebuildStage = mock()
+  try {
+    probe.setAutoSimplifyRendering(true)
+    probe.trackEdit()
+    await h.microtasks()
+    failed.reject(new Error('mesh failed'))
+    await h.microtasks()
+    expect(probe.rasterInteractions.size).toBe(0)
+    expect(h.timers.size).toBe(1)
+    h.settle(); h.frame()
+    expect(probe.simplifyRendering).toBe(false)
+    probe.sceneContent.whenReady = () => abandoned.promise
+    probe.trackEdit()
+    await h.microtasks()
+    probe.setSceneContent(undefined)
+    h.frame()
+    expect(probe.content).toBeUndefined()
+    expect(probe.simplifyRendering).toBe(false)
+    expect(probe.rasterInteractions.size).toBe(0)
+    expect(h.timers.size).toBe(0)
+    abandoned.resolve()
+    await h.microtasks()
+    probe.trackEdit()
+    expect(probe.rasterInteractions.size).toBe(0)
+    expect(h.timers.size).toBe(0)
+    expect(h.frames.size).toBe(0)
+  } finally { h.restore() }
+})
+
+test('camera changes pulse auto simplify but hover-style render requests neither start nor prolong it', () => {
+  const h = resolutionProbe(), { probe } = h
+  probe.cameraChanged = Reflect.get(Viewport.prototype, 'cameraChanged')
+  try {
+    probe.setAutoSimplifyRendering(true)
+    probe.render(); h.frame()
+    expect(probe.simplifyRendering).toBe(false)
+    expect(h.timers.size).toBe(0)
+    probe.cameraChanged(); h.frame()
+    expect(probe.simplifyRendering).toBe(true)
+    expect(probe.rasterInteractions.size).toBe(0)
+    const timer = probe.rasterRestoreTimer
+    probe.render(); probe.render(); h.frame()
+    expect(probe.rasterRestoreTimer).toBe(timer)
+    expect(h.timers.size).toBe(1)
+    expect(probe.sceneContent.onViewportChange).toHaveBeenCalledTimes(1)
+    h.settle(); h.frame()
+    probe.render(); h.frame()
+    expect(probe.simplifyRendering).toBe(false)
+    expect(h.timers.size).toBe(0)
+    expect(h.draws.at(-1)).toEqual([true, true, true, true])
+  } finally { h.restore() }
+})
+
+test('auto simplify preserves a converged tracer and BVH, then re-presents without sample 129 after all pauses end', () => {
+  const h = resolutionProbe(), { probe, pathTracer } = h
+  const worker = { dispose: mock() }
+  probe.pathTracingWorker = worker
+  probe.renderMode = probe.settings.pathTracing = true
+  try {
+    probe.setAutoSimplifyRendering(true)
+    probe.setRasterInteraction('model', true)
+    h.frame()
+    expect(probe.traceHidden).toBe(true)
+    expect(probe.pathTracingPaused).toBe(true)
+    expect(probe.pathTracingReady).toBe(true)
+    expect(probe.renderer.getPixelRatio()).toBe(2)
+    expect(h.draws.at(-1)).toEqual([false, false, false, false])
+    probe.setSceneInteraction(true)
+    probe.setRasterInteraction('model', false)
+    h.frame()
+    expect(pathTracer.renderSample).not.toHaveBeenCalled()
+    h.settle(); h.frame()
+    expect(probe.simplifyRendering).toBe(false)
+    expect(probe.pathTracingPaused).toBe(true)
+    expect(pathTracer.renderSample).not.toHaveBeenCalled()
+    probe.setSceneInteraction(false)
+    h.frame()
+    expect(probe.traceHidden).toBe(false)
+    expect(pathTracer.renderSample).toHaveBeenCalledTimes(1)
+    expect(pathTracer.samples).toBe(128)
+    expect(pathTracer.pausePathTracing).toBe(false)
+    expect(h.frames.size).toBe(0)
+    expect(pathTracer.reset).not.toHaveBeenCalled()
+    expect(pathTracer.setSceneAsync).not.toHaveBeenCalled()
+    expect(pathTracer.dispose).not.toHaveBeenCalled()
+    expect(worker.dispose).not.toHaveBeenCalled()
+    expect(probe.pathTracer).toBe(pathTracer)
+    expect(probe.pathTracingWorker).toBe(worker)
+    expect(probe.pathTracingRevision).toBe(0)
+  } finally { h.restore() }
+})
+
+test('paused progressive rendering cancels sampling but still uploads and resets before resuming at final settle', () => {
+  const h = resolutionProbe(), { probe, pathTracer } = h
+  probe.renderMode = probe.settings.pathTracing = true
+  pathTracer.samples = 64
+  try {
+    probe.setAutoSimplifyRendering(true)
+    probe.startPathTracingSamples(false)
+    const scheduled = probe.pathTracingFrame, staleFrame = h.frames.get(scheduled)!
+    probe.setRasterInteraction('controls', true)
+    expect(h.frames.has(scheduled)).toBe(false)
+    expect(probe.pathTracingFrame).toBeUndefined()
+    staleFrame(0)
+    h.frame()
+    probe.updatePathTracing('materials', 'lights', 'environment', 'camera')
+    expect(pathTracer.updateMaterials).toHaveBeenCalledTimes(1)
+    expect(pathTracer.updateLights).toHaveBeenCalledTimes(1)
+    expect(pathTracer.updateEnvironment).toHaveBeenCalledTimes(1)
+    expect(pathTracer.setCamera).toHaveBeenCalledWith(probe.camera)
+    expect(pathTracer.reset).toHaveBeenCalledTimes(1)
+    expect(pathTracer.samples).toBe(0)
+    expect(probe.pathTracingReady).toBe(true)
+    expect(probe.pathTracingFrame).toBeUndefined()
+    probe.render(); h.frame()
+    probe.setRasterInteraction('controls', false)
+    h.frame()
+    expect(pathTracer.renderSample).not.toHaveBeenCalled()
+    h.settle(); h.frame(); h.frame()
+    expect(pathTracer.samples).toBe(1)
+    expect(pathTracer.reset).toHaveBeenCalledTimes(1)
+    expect(pathTracer.setSceneAsync).not.toHaveBeenCalled()
+    expect(pathTracer.dispose).not.toHaveBeenCalled()
+    expect(probe.traceHidden).toBe(false)
+  } finally { h.restore() }
+})
+
+test('opting out before the queued simplified frame restores a converged trace at DPR 1 without another event', () => {
+  const h = resolutionProbe(1), { probe, pathTracer } = h
+  probe.renderMode = probe.settings.pathTracing = true
+  try {
+    probe.setAutoSimplifyRendering(true)
+    probe.setRasterInteraction('model', true)
+    expect(probe.pathTracingPaused).toBe(true)
+    expect(pathTracer.renderSample).not.toHaveBeenCalled()
+    probe.setAutoSimplifyRendering(false)
+    h.frame()
+    expect(probe.pathTracingPaused).toBe(false)
+    expect(probe.traceHidden).toBe(false)
+    expect(pathTracer.renderSample).toHaveBeenCalledTimes(1)
+    expect(pathTracer.samples).toBe(128)
+    expect(pathTracer.reset).not.toHaveBeenCalled()
+    expect(h.frames.size).toBe(0)
+    expect(probe.renderer.setPixelRatio).not.toHaveBeenCalled()
+  } finally { h.restore() }
+})
+
+test('an in-flight BVH build completing while simplified stays ready without starting a sample', async () => {
+  const h = resolutionProbe(), { probe, pathTracer } = h
+  const ready = Promise.withResolvers<void>()
+  probe.renderMode = probe.settings.pathTracing = true
+  probe.pathTracingReady = false
+  probe.pathTracingBuildRequested = true
+  pathTracer.setSceneAsync.mockImplementationOnce(() => ready.promise)
+  try {
+    const building = probe.buildPathTrace()
+    await h.microtasks()
+    expect(pathTracer.setSceneAsync).toHaveBeenCalledTimes(1)
+    probe.setAutoSimplifyRendering(true)
+    probe.setRasterInteraction('controls', true)
+    ready.resolve()
+    await building
+    expect(probe.pathTracingReady).toBe(true)
+    expect(probe.pathTracingBuildRunning).toBe(false)
+    expect(probe.pathTracingBuildRequested).toBe(false)
+    expect(probe.pathTracingFrame).toBeUndefined()
+    expect(probe.pathTracer).toBe(pathTracer)
+    expect(pathTracer.setCamera).toHaveBeenCalledWith(probe.camera)
+    h.frame()
+    probe.setRasterInteraction('controls', false)
+    h.frame()
+    expect(pathTracer.renderSample).not.toHaveBeenCalled()
+    h.settle(); h.frame(); h.frame()
+    expect(pathTracer.samples).toBe(1)
+    expect(pathTracer.setSceneAsync).toHaveBeenCalledTimes(1)
+    expect(pathTracer.dispose).not.toHaveBeenCalled()
+  } finally { h.restore() }
+})
+
+test('final capture release resumes deferred builds and hidden converged traces even with simplification off', async () => {
+  for (const pendingBuild of [false, true]) {
+    const h = resolutionProbe(1), { probe, pathTracer } = h
+    const ready = Promise.withResolvers<void>()
+    probe.renderMode = probe.settings.pathTracing = true
+    probe.sceneContent.whenReady = () => ready.promise
+    try {
+      if (!pendingBuild) {
+        probe.setAutoSimplifyRendering(true)
+        probe.setRasterInteraction('controls', true)
+        probe.setAutoSimplifyRendering(false)
+      }
+      const capturing = probe.capture()
+      if (pendingBuild) probe.requestPathTraceRebuild()
+      probe.contentBecameReady()
+      expect(pathTracer.setSceneAsync).not.toHaveBeenCalled()
+      ready.resolve()
+      await capturing
+      expect(probe.captures).toBe(0)
+      expect(h.frames.size).toBeGreaterThan(0)
+      h.frame()
+      await h.microtasks()
+      if (pendingBuild) {
+        expect(pathTracer.setSceneAsync).toHaveBeenCalledTimes(1)
+        expect(probe.pathTracingReady).toBe(true)
+        h.frame()
+        expect(pathTracer.samples).toBe(1)
+      } else {
+        expect(probe.traceHidden).toBe(false)
+        expect(pathTracer.samples).toBe(128)
+        expect(pathTracer.reset).not.toHaveBeenCalled()
+        expect(h.frames.size).toBe(0)
+      }
+    } finally { h.restore() }
+  }
+})
+
+test('superseded builds wait for both interaction settle and mesh readiness, then build only the latest state', async () => {
+  const h = resolutionProbe(), { probe, pathTracer } = h
+  const first = Promise.withResolvers<void>(), versions: number[] = []
+  let ready = true
+  probe.renderMode = probe.settings.pathTracing = true
+  probe.pathTracingReady = false
+  probe.pathTracingBuildRequested = true
+  probe.sceneContent.isReady = () => ready
+  probe.scene.userData.version = 0
+  pathTracer.setSceneAsync.mockImplementation(async scene => {
+    versions.push(scene.userData.version)
+    if (versions.length === 1) await first.promise
+  })
+  const build = spyOn(probe, 'buildPathTrace')
+  try {
+    const building = probe.buildPathTrace()
+    await h.microtasks()
+    probe.setAutoSimplifyRendering(true)
+    probe.setRasterInteraction('model', true)
+    probe.scene.userData.version = 1
+    probe.requestPathTraceRebuild()
+    probe.scene.userData.version = 2
+    probe.requestPathTraceRebuild()
+    first.resolve()
+    await building
+    probe.contentBecameReady(); h.frame()
+    expect(versions).toEqual([0])
+    expect(probe.pathTracingBuildRequested).toBe(true)
+    expect(probe.pathTracingReady).toBe(false)
+    expect(pathTracer.renderSample).not.toHaveBeenCalled()
+    ready = false
+    probe.setRasterInteraction('model', false)
+    h.settle(); h.frame()
+    expect(versions).toEqual([0])
+    ready = true
+    probe.contentBecameReady()
+    await build.mock.results.at(-1)?.value
+    expect(versions).toEqual([0, 2])
+    expect(build).toHaveBeenCalledTimes(2)
+    expect(probe.pathTracingReady).toBe(true)
+    expect(probe.pathTracingBuildRequested).toBe(false)
+    expect(probe.pathTracingFailed).toBe(false)
+    expect(pathTracer.reset).toHaveBeenCalledTimes(1)
+    h.frame()
+    expect(pathTracer.samples).toBe(1)
+  } finally { build.mockRestore(); h.restore() }
+})
+
+test('overlapping captures render requested quality at full DPR and restore simplification after encoding failure', async () => {
+  const h = resolutionProbe(), { probe } = h
+  const encodes: ((blob: Blob | null) => void)[] = [], prepare = mock()
+  probe.renderMode = probe.settings.tiltShift = true
+  const settings = { ...probe.settings }
+  probe.sceneContent.prepareRaster = prepare
+  probe.renderer.domElement.toBlob = (callback: (blob: Blob | null) => void) => encodes.push(callback)
+  try {
+    probe.setAutoSimplifyRendering(true)
+    probe.setRasterInteraction('model', true)
+    h.frame()
+    expect(h.draws).toEqual([[false, false, false, false]])
+    expect(probe.renderer.getPixelRatio()).toBe(1)
+    const first = probe.capture(), second = probe.capture().catch((error: Error) => error)
+    await h.microtasks()
+    expect(encodes).toHaveLength(2)
+    expect(probe.captures).toBe(2)
+    expect(h.draws.slice(1)).toEqual([[true, true, true, true], [true, true, true, true]])
+    expect(prepare.mock.calls.at(-1)?.[0]).toMatchObject({ reducedQuality: false, settings, width: 322, height: 162 })
+    expect(probe.tiltShift.render).toHaveBeenCalledTimes(2)
+    encodes[0](new Blob(['png']))
+    expect((await first).view.viewport).toEqual({ width: 322, height: 162 })
+    expect(probe.captures).toBe(1)
+    expect(probe.renderer.getPixelRatio()).toBe(2)
+    probe.render(); h.frame()
+    expect(h.draws.at(-1)).toEqual([true, true, true, true])
+    encodes[1](null)
+    expect((await second).message).toContain('Could not capture')
+    expect(probe.captures).toBe(0)
+    expect(probe.renderer.getPixelRatio()).toBe(1)
+    h.frame()
+    expect(h.draws.at(-1)).toEqual([false, false, false, false])
+    expect(probe.tiltShift.render).toHaveBeenCalledTimes(3)
+    expect(probe.settings).toEqual(settings)
+  } finally { h.restore() }
+})
+
+test('capture effect failure at DPR 1 restores live simplification without losing requested quality on retry', async () => {
+  const h = resolutionProbe(1), { probe } = h
+  probe.renderMode = probe.settings.tiltShift = true
+  try {
+    probe.setAutoSimplifyRendering(true)
+    probe.setRasterInteraction('model', true)
+    h.frame()
+    probe.tiltShift.render.mockImplementationOnce(() => { throw new Error('effect failed') })
+    await expect(probe.capture()).rejects.toThrow('effect failed')
+    expect(probe.captures).toBe(0)
+    expect(h.draws.at(-1)).toEqual([true, true, true, true])
+    h.frame()
+    expect(h.draws.at(-1)).toEqual([false, false, false, false])
+    expect(probe.simplifyRendering).toBe(true)
+    await expect(probe.capture()).resolves.toHaveProperty('blob')
+    expect(h.draws.at(-1)).toEqual([true, true, true, true])
+    h.frame()
+    expect(h.draws.at(-1)).toEqual([false, false, false, false])
+    expect(probe.tiltShift.render).toHaveBeenCalledTimes(2)
+    expect(probe.renderer.setPixelRatio).not.toHaveBeenCalled()
+  } finally { h.restore() }
+})
 
 test('raster gestures coalesce, overlap, settle once, and never notify camera or scene dependencies', () => {
   for (const dpr of [0.75, 1, 1.5, 2, 3]) {
@@ -761,6 +1252,7 @@ test('capture rejects tracer and effect failures while restoring pause and keepi
 
 test('exact full-scene capture filters the raster snapshot then restores and filters the accumulated trace paused', async () => {
   const { probe, calls, pathTracer } = photoProbe()
+  probe.render = mock()
   const geometry = new THREE.BoxGeometry(), environment = new THREE.Texture(), savedEnvironment = new THREE.Texture()
   const material = new THREE.MeshStandardMaterial({ envMap: savedEnvironment, envMapIntensity: 0.7, envMapRotation: new THREE.Euler(0, 0.3, 0) })
   const full = new THREE.Group(), parent = new THREE.Scene(), root = probe.sceneContent.root
@@ -914,7 +1406,7 @@ test('realtime PBR toggles invalidate shadows without changing progressive traci
     expect(probe.pathTracingRevision).toBe(0)
     expect(pathTracer.reset).not.toHaveBeenCalled()
     expect(probe.hemisphere.intensity).toBe(0)
-    const raster = { pbrMaterials: true, render() {
+    const raster = { pbrMaterials: true, ambientOcclusion: { enabled: true }, render() {
       expect(raster.pbrMaterials).toBe(pbrMaterials)
       expect(probe.hemisphere.intensity).toBe(pbrMaterials ? 0 : probe.settings.ambient)
     } }

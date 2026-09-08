@@ -86,8 +86,11 @@ export class Viewport {
   performanceMonitor?: { onFps(fps?: number): void; onRender(milliseconds: number): void }
   private raster: RasterPipeline
   private rasterFrame?: number
-  private rasterInteractions = new Set<'controls' | 'focus' | 'model' | 'scene'>()
+  private rasterInteractions = new Set<'controls' | 'focus' | 'model' | 'scene' | 'camera' | 'edit'>()
   private rasterRestoreTimer?: ReturnType<typeof setTimeout>
+  private autoSimplifyRendering = false
+  private editGeneration = 0
+  private traceHidden = false
   private captures = 0
   private normalPixelRatio = Math.min(devicePixelRatio, 2)
   private contextLost = false
@@ -262,7 +265,7 @@ export class Viewport {
   }
 
   /** Idempotent ownership: touch starts can repeat and editor drags can overlap camera focus. */
-  setRasterInteraction(source: 'controls' | 'focus' | 'model' | 'scene', active: boolean) {
+  setRasterInteraction(source: 'controls' | 'focus' | 'model' | 'scene' | 'camera' | 'edit', active: boolean) {
     if (this.disposed || this.contextLost) return
     if (active) {
       if (this.rasterInteractions.has(source)) return
@@ -281,10 +284,37 @@ export class Viewport {
   }
 
   private clearRasterInteractions() {
+    this.editGeneration++
     this.rasterInteractions.clear()
     clearTimeout(this.rasterRestoreTimer)
     this.rasterRestoreTimer = undefined
     this.render()
+  }
+
+  setAutoSimplifyRendering(enabled: boolean) {
+    if (this.autoSimplifyRendering === enabled) return
+    this.autoSimplifyRendering = enabled
+    this.render()
+  }
+
+  private get simplifyRendering() {
+    return this.autoSimplifyRendering && (this.rasterInteractions.size > 0 || this.rasterRestoreTimer !== undefined)
+  }
+
+  private get pathTracingPaused() { return this.sceneInteraction || this.simplifyRendering }
+
+  /** Call before committed edits; readiness is checked after their synchronous invalidation. */
+  trackEdit() {
+    if (!this.autoSimplifyRendering || this.disposed || this.contextLost || !this.sceneContent) return
+    const content = this.sceneContent, generation = ++this.editGeneration
+    this.setRasterInteraction('edit', true)
+    const finish = () => {
+      if (generation === this.editGeneration && content === this.sceneContent) this.setRasterInteraction('edit', false)
+    }
+    // Adapters report mesh failures; a rejection must still release the temporary quality override.
+    void Promise.resolve().then(() => {
+      if (generation === this.editGeneration && content === this.sceneContent) return content.whenReady()
+    }).then(finish, finish)
   }
 
   /** Pixel-only changes must not notify camera listeners, invalidate picks, or rebuild scene detail. */
@@ -312,7 +342,7 @@ export class Viewport {
   }
 
   private pathTracingEnabled() {
-    return !!this.sceneContent && (!this.worldScale || !!this.sceneContent.prepareFullDetail) && !this.sceneInteraction && this.renderMode && this.settings.pathTracing && !this.previewSelected() && !this.pathTracingFailed && !this.contextLost && !this.disposed
+    return !!this.sceneContent && (!this.worldScale || !!this.sceneContent.prepareFullDetail) && this.renderMode && this.settings.pathTracing && !this.previewSelected() && !this.pathTracingFailed && !this.contextLost && !this.disposed
   }
 
   private stopPathTracingSamples() {
@@ -326,11 +356,13 @@ export class Viewport {
     if (!this.pathTracer || !this.pathTracingEnabled() || !this.pathTracingReady) return
     this.stopPathTracingSamples()
     if (reset) { this.pathTracer.reset(); this.presentationDirty = true }
+    if (this.pathTracingPaused || this.captures > 0) return
+    if (this.pathTracer.samples >= 128) return
     this.resetFps()
     let reportedSamples = -1
     const sample = () => {
       this.pathTracingFrame = undefined
-      if (!this.pathTracer || !this.pathTracingEnabled() || !this.pathTracingReady) return
+      if (!this.pathTracer || !this.pathTracingEnabled() || !this.pathTracingReady || this.pathTracingPaused || this.captures > 0) return
       try {
         const previousSamples = Math.floor(this.pathTracer.samples)
         const monitor = this.performanceMonitor, started = monitor ? performance.now() : 0
@@ -383,7 +415,7 @@ export class Viewport {
     this.stopPathTracingSamples()
     this.render()
     if (this.sceneContent && this.worldScale && !this.sceneContent.prepareFullDetail && this.renderMode && this.settings.pathTracing) this.callbacks.onPathTracingStatus?.('Scene raster only (no full-detail adapter)')
-    if (!this.pathTracingEnabled()) return
+    if (!this.pathTracingEnabled() || this.pathTracingPaused || this.captures > 0) return
     if (!this.contentReady()) {
       this.callbacks.onPathTracingStatus?.('Updating mesh')
       return
@@ -393,17 +425,17 @@ export class Viewport {
 
   /** Resume a deferred build after the content adapter drains its work queue. */
   contentBecameReady() {
-    if (this.pathTracingBuildRequested && this.pathTracingEnabled() && this.contentReady()) void this.buildPathTrace()
+    if (this.pathTracingBuildRequested && this.pathTracingEnabled() && !this.pathTracingPaused && !this.captures && this.contentReady()) void this.buildPathTrace()
   }
 
   private async buildPathTrace() {
-    if (this.pathTracingBuildRunning) return
+    if (this.pathTracingBuildRunning || this.pathTracingPaused || this.captures > 0) return
     this.pathTracingBuildRunning = true
     let buildingTracer: WebGLPathTracer | undefined
     let buildingRevision = this.pathTracingRevision
     try {
       this.syncRasterResolution()
-      while (this.pathTracingEnabled() && this.pathTracingBuildRequested && this.contentReady()) {
+      while (this.pathTracingEnabled() && !this.pathTracingPaused && !this.captures && this.pathTracingBuildRequested && this.contentReady()) {
         const revision = this.pathTracingRevision
         buildingRevision = revision
         this.pathTracingBuildRequested = false
@@ -439,14 +471,14 @@ export class Viewport {
         })
         this.pathTracingReady = this.pathTracingEnabled() && revision === this.pathTracingRevision
           && !this.pathTracingBuildRequested && this.contentReady()
-        if (this.pathTracingReady) this.sceneCameraDirty = false
+        if (this.pathTracingReady) { tracer.setCamera(this.camera); this.sceneCameraDirty = false }
       }
     } catch (error) {
       if (!this.contextLost && (!buildingTracer || buildingTracer === this.pathTracer) && buildingRevision === this.pathTracingRevision && this.pathTracingEnabled()) this.failPathTracing(error)
     } finally {
       this.pathTracingBuildRunning = false
     }
-    if (this.pathTracingEnabled() && this.pathTracingBuildRequested && this.contentReady()) void this.buildPathTrace()
+    if (this.pathTracingEnabled() && !this.pathTracingPaused && !this.captures && this.pathTracingBuildRequested && this.contentReady()) void this.buildPathTrace()
     else if (this.pathTracingEnabled() && this.pathTracingReady && !this.pathTracingBuildRequested && this.contentReady()) this.startPathTracingSamples()
   }
 
@@ -500,6 +532,7 @@ export class Viewport {
   }
 
   private cameraChanged() {
+    if (this.autoSimplifyRendering) { this.setRasterInteraction('camera', true); this.setRasterInteraction('camera', false) }
     if (this.worldScale) this.sceneCameraDirty = true
     if (this.worldScale && this.camera instanceof THREE.PerspectiveCamera) {
       // Scene-scale depth precision without sacrificing close-up voxel editing.
@@ -738,8 +771,7 @@ export class Viewport {
   setSceneInteraction(active: boolean) {
     if (this.sceneInteraction === active) return
     this.sceneInteraction = active
-    if (active) { this.stopPathTracingSamples(); this.render() }
-    else if (this.pathTracingReady && this.pathTracingEnabled()) this.startPathTracingSamples(false)
+    this.render()
   }
 
   private releaseSceneDetail() {
@@ -892,9 +924,12 @@ export class Viewport {
     this.fpsIdleTimer = setTimeout(() => this.resetFps(), 750)
   }
 
-  private renderRaster(camera = this.camera, raster = this.raster, shadows = !this.pathTracingEnabled(), live = false) {
+  private renderRaster(camera = this.camera, raster = this.raster, shadows = !this.pathTracingEnabled() || this.pathTracingPaused, live = false) {
     if (this.contextLost) return
-    raster.pbrMaterials = this.settings.pbrMaterials || this.previewSelected()
+    const reduced = live && camera === this.camera && raster === this.raster && !this.captures && this.simplifyRendering
+    const pbr = raster.pbrMaterials, ao = raster.ambientOcclusion.enabled
+    raster.pbrMaterials = this.previewSelected() || this.settings.pbrMaterials && !reduced
+    raster.ambientOcclusion.enabled = this.settings.ambientOcclusion && !reduced
     // FXAA washes out pixel-wide triangle edges; keep the topology inspection view sharp.
     if (raster === this.raster) raster.antialias = !this.settings.meshTriangles || this.renderMode || this.worldScale
     const shadowMap = this.renderer.shadowMap
@@ -905,15 +940,18 @@ export class Viewport {
       const direction = camera.getWorldDirection(new THREE.Vector3()).applyAxisAngle(new THREE.Vector3(0, 1, 0), -this.scene.backgroundRotation.y)
       this.scene.background = skyColor(this.settings.skybox, direction)
     }
-    const enabled = shadowMap.enabled, needsUpdate = shadowMap.needsUpdate, castShadow = this.sunlight.castShadow
+    const enabled = shadowMap.enabled, castShadow = this.sunlight.castShadow
+    let needsUpdate = shadowMap.needsUpdate
     const ambient = this.hemisphere.intensity
     // Light shadow counts also switch shaders, preventing cached-map sampling in trace previews.
-    shadowMap.enabled = this.sunlight.castShadow = this.settings.shadows && shadows
+    shadowMap.enabled = this.sunlight.castShadow = this.settings.shadows && shadows && !reduced
     // Lambert materials do not sample the sky environment. Keep this raster-only light out of tracing.
     if (!raster.pbrMaterials) this.hemisphere.intensity = this.settings.ambient
     try {
-      this.sceneContent?.prepareRaster?.({ renderer: this.renderer, camera, light: this.sunlight, settings: this.settings,
+      this.sceneContent?.prepareRaster?.({ renderer: this.renderer, camera, light: this.sunlight,
+        settings: reduced ? { ...this.settings, shadows: false, ambientOcclusion: false } : this.settings, reducedQuality: !!reduced,
         width: raster.readBuffer.width, height: raster.readBuffer.height })
+      needsUpdate ||= shadowMap.needsUpdate
       // Only scheduled live frames opt in. Captures and tracer/inspection previews stay complete.
       const cullOpaque = live && camera === this.camera && raster === this.raster && !this.captures
         && !this.pathTracingEnabled() && !this.pathTracingBuildRunning && !this.previewSelected()
@@ -921,21 +959,24 @@ export class Viewport {
       raster.render(camera, undefined, cullOpaque)
     }
     finally {
+      raster.pbrMaterials = pbr
+      raster.ambientOcclusion.enabled = ao
       this.hemisphere.intensity = ambient
       this.scene.background = background
-      if (!shadowMap.enabled) shadowMap.needsUpdate = needsUpdate
+      if (!shadowMap.enabled) shadowMap.needsUpdate ||= needsUpdate
       shadowMap.enabled = enabled
       this.sunlight.castShadow = castShadow
     }
     this.rasterError = undefined
     if (raster === this.raster) {
       this.presentationDirty = false
-      if (!this.pathTracingEnabled()) this.recordFrame()
+      this.traceHidden = this.pathTracingEnabled()
+      if (!this.pathTracingEnabled() || this.pathTracingPaused) this.recordFrame()
     }
   }
 
-  private applyTiltShift() {
-    if (this.renderMode && this.settings.tiltShift && this.settings.tiltShiftStrength > 0) {
+  private applyTiltShift(live = false) {
+    if (!(live && !this.captures && this.simplifyRendering) && this.renderMode && this.settings.tiltShift && this.settings.tiltShiftStrength > 0) {
       this.tiltShift ??= new TiltShift()
       this.tiltShift.render(this.renderer, this.settings)
     }
@@ -949,26 +990,29 @@ export class Viewport {
       if (pause) tracer.pausePathTracing = true
       tracer.renderSample()
       this.applyTiltShift()
-      if (pause || tracer.samples > 0) this.presentationDirty = false
+      if (pause || tracer.samples > 0) { this.presentationDirty = false; this.traceHidden = false }
     } finally { tracer.pausePathTracing = paused }
   }
 
   render() {
     if (this.disposed || this.contextLost) return
     this.syncRasterResolution()
-    const traced = this.pathTracingEnabled() && this.pathTracingReady
-    if (traced && !this.tiltShiftDirty) return
+    if (this.pathTracingPaused && this.pathTracingEnabled()) { this.stopPathTracingSamples(); this.traceHidden = true }
+    const traced = this.pathTracingEnabled() && this.pathTracingReady && !this.pathTracingPaused
+    if (traced && !this.tiltShiftDirty && !this.traceHidden) return
     if (!traced) this.presentationDirty = true
     if (this.rasterFrame !== undefined) return
     this.rasterFrame = requestAnimationFrame(() => {
       this.rasterFrame = undefined
       if (this.disposed || this.contextLost) return
-      const traced = this.pathTracingEnabled() && this.pathTracingReady
-      if (traced && !this.tiltShiftDirty) return
+      this.contentBecameReady()
+      const traced = this.pathTracingEnabled() && this.pathTracingReady && !this.pathTracingPaused
+      if (traced && !this.tiltShiftDirty && !this.traceHidden) return
       try {
         const monitor = this.performanceMonitor, started = monitor ? performance.now() : 0
-        if (traced && !this.presentationDirty) this.renderPathTrace(true)
-        else { this.renderRaster(this.camera, this.raster, !this.pathTracingEnabled(), true); this.applyTiltShift() }
+        if (traced && this.traceHidden && this.pathTracingFrame === undefined) this.startPathTracingSamples(false)
+        if (traced && (!this.presentationDirty || this.pathTracer!.samples >= 1)) this.renderPathTrace(true)
+        else { this.renderRaster(this.camera, this.raster, !this.pathTracingEnabled() || this.pathTracingPaused, true); this.applyTiltShift(true) }
         monitor?.onRender(performance.now() - started)
       }
       catch (error) {
@@ -984,12 +1028,15 @@ export class Viewport {
    * The bounded adapter rejects oversized/missing dependencies; no partial PNG is returned. */
   async capture(exact = false) {
     this.captures++
+    this.stopPathTracingSamples()
     try {
       if (this.syncRasterResolution()) this.render()
       return await this.captureImage(exact)
     } finally {
       this.captures--
-      if (this.syncRasterResolution()) this.render()
+      const resized = this.syncRasterResolution()
+      if (!this.captures && this.pathTracer && this.pathTracer.samples < 128) this.startPathTracingSamples(false)
+      if (resized || this.autoSimplifyRendering || this.traceHidden || this.pathTracingBuildRequested) this.render()
     }
   }
 
@@ -1027,8 +1074,8 @@ export class Viewport {
         this.scene.add(prepared.root)
         this.renderer.shadowMap.needsUpdate = true
       }
-      if (prepared || this.presentationDirty || !this.pathTracingEnabled() || !this.pathTracingReady) {
-        this.renderRaster(this.camera, this.raster, !!prepared || !this.pathTracingEnabled())
+      if (prepared || this.presentationDirty || this.traceHidden || this.pathTracingPaused || !this.pathTracingEnabled() || !this.pathTracingReady) {
+        this.renderRaster(this.camera, this.raster, !!prepared || this.traceHidden || this.pathTracingPaused || !this.pathTracingEnabled())
         this.applyTiltShift()
       } else if (this.tiltShiftDirty) this.renderPathTrace(true)
     } finally {
@@ -1049,7 +1096,7 @@ export class Viewport {
       const blob = await new Promise<Blob>((resolve, reject) => this.renderer.domElement.toBlob(blob => blob ? resolve(blob) : reject(new Error('Could not capture the viewport.')), 'image/png'))
       return { blob, view }
     } finally {
-      if (prepared && content === this.sceneContent && epoch === this.fullEpoch && this.pathTracingEnabled() && this.pathTracingReady && this.pathTracer) {
+      if (prepared && content === this.sceneContent && epoch === this.fullEpoch && this.pathTracingEnabled() && !this.pathTracingPaused && this.pathTracingReady && this.pathTracer) {
         // Restore the trace even when PNG encoding fails, without consuming a sample.
         this.renderPathTrace(true)
       }

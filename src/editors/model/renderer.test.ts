@@ -88,7 +88,7 @@ test('captures flush current camera/material pixels without waiting for RAF', as
 test('progressive raster previews suppress maps and preserve pending updates and renderer state', () => {
   const shadowMap = { enabled: true, needsUpdate: true }, sunlight = { castShadow: true }
   let expected = false, fail = false, frames = 0
-  const raster = { render() {
+  const raster = { ambientOcclusion: { enabled: true }, render() {
     expect(shadowMap.enabled).toBe(expected)
     expect(sunlight.castShadow).toBe(expected)
     shadowMap.needsUpdate = false
@@ -96,7 +96,7 @@ test('progressive raster previews suppress maps and preserve pending updates and
   } }
   const probe = Object.assign(Object.create(Viewport.prototype), {
     renderer: { shadowMap }, scene: new Scene(), sunlight, hemisphere: { intensity: 1.2 }, raster, settings: { ...DEFAULT_SETTINGS }, renderMode: true,
-    sceneContent: { stage: 'bounded' },
+    sceneContent: { stage: 'bounded' }, sceneInteraction: false, autoSimplifyRendering: false,
     recordFrame() { frames++ },
   })
   for (const ready of [false, true]) for (const dirty of [false, true]) for (const throws of [false, true]) {

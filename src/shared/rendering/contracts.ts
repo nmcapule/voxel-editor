@@ -50,6 +50,9 @@ export interface PreviewFrame {
   camera: THREE.Camera
   light: THREE.DirectionalLight
   settings: ViewSettings
+  /** Temporary cheap live shading only; retain PBR packing/resources and restore on the
+   * next normal prepare. settings.pbrMaterials remains authoritative; host disables shadows. */
+  reducedQuality?: boolean
   /** Borrowed live palette, including maps and Standard environment bindings. Never dispose;
    * cloned preview materials must set visible=true because host surfaces are hidden. */
   materials?: readonly THREE.MeshPhysicalMaterial[]

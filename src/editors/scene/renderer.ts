@@ -401,7 +401,7 @@ export class SceneRenderer {
     this.bounds.copy(bounds)
     this.selection = new Set(this.document.selection)
     this.updateGizmo()
-    if (this.active && dependenciesChanged) this.host.invalidateSceneContent()
+    if (this.active && dependenciesChanged) { this.host.trackEdit(); this.host.invalidateSceneContent() }
     if (this.active && boundsChanged) this.host.setSceneContent(this.content)
     if (this.active && this.appliedSettings !== this.document.data.settings) {
       this.appliedSettings = this.document.data.settings

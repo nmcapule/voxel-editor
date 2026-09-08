@@ -157,6 +157,13 @@ data uses tabular figures.
   150 ms settling delay. Only the canvas becomes softer; interface controls remain
   sharp. PNG captures and Progressive PBR retain normal resolution. Hover-only
   previews and sidebar controls do not activate this interaction policy.
+- Both Render tabs offer a default-off **Auto simplify rendering** checkbox next to
+  Performance monitor, remembered in this browser and shared across editors. Help
+  explains that camera movement and editing temporarily disable realtime PBR,
+  shadows, AO and miniature photography, pause progressive PBR, and make glass
+  opaque. Restore the latest requested quality after editing meshes settle and
+  150 ms without interaction. Keep the individual quality checkboxes unchanged;
+  PNG captures retain requested quality. No extra status overlay or animation.
 - Realtime shadow maps omit opaque silhouettes from transmissive and
   alpha-transparent voxels. Progressive PBR traces their transmitted light;
   opaque materials continue to cast direct shadows onto other authored geometry in both modes.

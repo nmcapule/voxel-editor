@@ -326,7 +326,7 @@ export class CubeSprites implements ModelPreviewRenderer {
     this.palette.needsUpdate = true
   }
 
-  prepare({ renderer, camera, light, settings, width, height, materials }: PreviewFrame) {
+  prepare({ renderer, camera, light, settings, width, height, materials, reducedQuality }: PreviewFrame) {
     if (this.disposed) throw new Error('Cube sprites is disposed.')
     if (!(camera instanceof THREE.OrthographicCamera)) throw new Error('Cube sprites requires an orthographic camera.')
     const pbr = settings.pbrMaterials
@@ -397,6 +397,7 @@ export class CubeSprites implements ModelPreviewRenderer {
         geometry.boundingBox = new THREE.Box3(new THREE.Vector3(), new THREE.Vector3(CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE))
         geometry.boundingSphere = geometry.boundingBox.getBoundingSphere(new THREE.Sphere())
         const mesh = new THREE.Mesh(geometry, pbr ? this.physical.get(index)!.material : this.material)
+        mesh.userData.fullMaterial = mesh.material
         const chunk = chunkCoords(id)
         mesh.position.set(chunk.x * CHUNK_SIZE - this.document.dimensions.x / 2, chunk.y * CHUNK_SIZE, chunk.z * CHUNK_SIZE - this.document.dimensions.z / 2)
         mesh.receiveShadow = true
@@ -408,6 +409,10 @@ export class CubeSprites implements ModelPreviewRenderer {
       this.chunks.set(id, meshes)
     }
     this.dirty.clear()
+    // Both shaders read the same voxel attribute; quality changes only the draw material.
+    for (const meshes of this.chunks.values()) for (const mesh of meshes) {
+      mesh.material = reducedQuality ? this.material : mesh.userData.fullMaterial
+    }
     this.stats.instanceBytes = this.stats.instances * 4
     this.viewBake.prepare(renderer, camera, width, height)
     light.updateWorldMatrix(true, false); light.target.updateWorldMatrix(true, false)

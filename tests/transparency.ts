@@ -6,7 +6,7 @@ import { faceViews, projectFaces } from '../src/shared/voxel/projections'
 import { inspectionViews, type InspectionView } from '../src/editors/model/inspection'
 import { VoxelRenderer, type RendererCallbacks } from '../src/editors/model/renderer'
 import { DEFAULT_SETTINGS, type ViewSettings } from '../src/shared/rendering/settings'
-import { runRenderingChecks, runRendererStateChecks, runPathTracingChecks, runTiltShiftChecks, runInteractionDprChecks } from './rendering'
+import { runRenderingChecks, runRendererStateChecks, runPathTracingChecks, runTiltShiftChecks, runInteractionDprChecks, runAutoSimplifyChecks } from './rendering'
 import { runSkyboxChecks } from './skybox'
 import { runOcclusionChecks, runOcclusionBenchmark } from './occlusion'
 
@@ -243,6 +243,7 @@ Object.assign(window, { transparencyTest: {
   runPathTracingChecks: (samples = 16) => runPathTracingChecks(renderer, settings, errors, samples),
   runTiltShiftChecks: () => runTiltShiftChecks(renderer, settings, errors),
   runInteractionDprChecks: () => runInteractionDprChecks(renderer, settings, errors),
+  runAutoSimplifyChecks: () => runAutoSimplifyChecks(renderer, settings, errors),
   runSkyboxChecks: (samples = 8) => runSkyboxChecks(renderer, settings, errors, samples),
   runOcclusionChecks: () => runOcclusionChecks(renderer, settings, errors),
   runOcclusionBenchmark: () => runOcclusionBenchmark(renderer, settings, errors),

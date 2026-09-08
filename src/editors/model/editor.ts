@@ -1364,7 +1364,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
       showToolPopup(tool)
       return
     }
-    if (key === 'l' && !renderMode) {
+    if (key === 'r' && !renderMode) {
       event.preventDefault()
       closeToolPopups()
       setTool('layer')
@@ -1372,7 +1372,6 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
       return
     }
     if (key === 'f') { event.preventDefault(); void dispatchApplicationCommand({ type: 'view.frame' }).catch(commandFailed) }
-    if (key === 'r') { event.preventDefault(); toggleRenderMode() }
     if (event.key === '?') { welcome.hidden = false }
   })
 

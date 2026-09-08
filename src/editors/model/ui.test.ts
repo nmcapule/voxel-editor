@@ -42,4 +42,6 @@ test('Volume groups Paint, Fill, Eyedropper and Erase; Sculpt retains only Push/
   expect(markup).toContain('<kbd>W 4</kbd>')
   expect(markup).not.toContain('<kbd>S 3</kbd>')
   expect(markup).toContain('aria-label="Expand Volume options"')
+  expect(markup).toContain('<small id="layer-tool-mode">Layer 1</small></span><kbd>R</kbd>')
+  expect(markup).not.toContain('Render mode (R)')
 })

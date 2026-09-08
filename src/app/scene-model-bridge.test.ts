@@ -664,6 +664,25 @@ async function integration(name: typeof cases[number]) {
       await choose('paint')
       expect(controller.activeTool).toBe('paint')
       expect(controller.paintMode).toBe('fill')
+      const popup = Object.assign(new ElementStub(), { showPopover: mock(), querySelector: () => null })
+      Object.assign(modelNode('.tool-dock button[data-tool-popup="layer"]'), { popoverTargetElement: popup, focus() {} })
+      const key = async (key: string) => {
+        await dom.querySelector('.studio').emit('keydown', { key, target: { closest: () => null }, preventDefault() {} })
+        await state()
+      }
+      await key('l')
+      expect(controller.activeTool).toBe('paint')
+      for (const shortcut of ['r', 'R']) {
+        await key(shortcut)
+        expect(controller.activeTool).toBe('layer')
+        expect(controller.renderMode).toBe(false)
+      }
+      expect(popup.showPopover).toHaveBeenCalledTimes(2)
+      await dispatch({ type: 'renderMode.set', enabled: true })
+      await key('r')
+      expect(controller.renderMode).toBe(true)
+      expect(popup.showPopover).toHaveBeenCalledTimes(2)
+      await dispatch({ type: 'renderMode.set', enabled: false })
     } else {
       const shell = dom.querySelector('.studio'), nameInput = modelNode('#project-name')
       const captureGate = capturePause = gate()

@@ -35,7 +35,7 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
           <button type="button" data-action="redo" aria-label="Redo" title="Redo (Ctrl/Command Shift Z)">${icon('redo')}</button>
           <span class="instrument-rule"></span>
           <button type="button" data-action="frame" aria-label="Frame model" title="Frame model (F)">${icon('frame')}</button>
-          <button type="button" data-action="render" aria-label="Toggle render mode" aria-pressed="false" title="Render mode (R)">${icon('render')}</button>
+          <button type="button" data-action="render" aria-label="Toggle render mode" aria-pressed="false" title="Render mode">${icon('render')}</button>
           <button type="button" data-action="panel" aria-label="Open stage settings" aria-expanded="false" title="Stage settings">${icon('sliders')}</button>
         </div>
       </div>
@@ -124,7 +124,7 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
         </div>
         <div class="tool-slot">
           <button type="button" class="tool-expand" data-tool-popup="layer" popovertarget="layer-panel" aria-label="Expand Layer options" title="Layer options">${icon('chevron')}</button>
-          <button type="button" data-tool="layer" aria-pressed="false">${icon('layers')}<span class="tool-label"><strong>Layer</strong><small id="layer-tool-mode">Layer 1</small></span><kbd>L</kbd></button>
+          <button type="button" data-tool="layer" aria-pressed="false">${icon('layers')}<span class="tool-label"><strong>Layer</strong><small id="layer-tool-mode">Layer 1</small></span><kbd>R</kbd></button>
         </div>
       </nav>
 

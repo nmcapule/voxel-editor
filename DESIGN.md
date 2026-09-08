@@ -227,7 +227,8 @@ data uses tabular figures.
   the retained Select, Volume, or Sculpt tool; a following number-row key chooses
   Q 1-4 for Point, Surface, Texture, Body; W 1 Paint, W 2 Fill, W 3 Eyedropper,
   W 4 Erase; S 1 Push/Pull, S 2 Move. Selecting a primary
-  category by keyboard opens its popup; L selects Layer and opens its manager.
+  category by keyboard opens its popup; R selects Layer and opens its manager.
+  Model Render mode is toggled from the toolbar, not a keyboard shortcut.
 - Push/Pull previews every affected voxel in cobalt when pulling and red when
   pushing; Move remains cobalt. The clicked face determines direction, not scope:
   all selected regions reshape from their own directional fronts, retaining

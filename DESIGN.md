@@ -112,9 +112,11 @@ data uses tabular figures.
   without changing render mode or camera. Model sliders preview during dragging;
   scene sliders update on release or keyboard changes as one undoable command.
 - Both Render tabs place a native **Skybox** select immediately before **Backdrop**.
-  **Solid color** is the default; Daylight, Overcast, Sunset, and Night relabel the
-  color control **Ground color** without resetting it or the lighting controls.
+  **Solid color** is the default; Daylight, Overcast, Sunset, and Night hide the
+  backdrop color control without resetting it or the lighting controls.
   Show the short Ambient, Key light, and Light angle explanation only for active skies.
+- Render mode and PNG captures show authored geometry against the selected backdrop
+  or sky, without an automatic ground plane. The editing grid remains an edit-only guide.
 - The optional voxel face grid traces exposed unit-cell boundaries in adaptive
   graphite or porcelain. Like the editing grid, it disappears in Render mode.
 - The editing grid covers the guide floor and rear side planes. Camera-side
@@ -130,7 +132,7 @@ data uses tabular figures.
   previews and sidebar controls do not activate this interaction policy.
 - Realtime shadow maps omit opaque silhouettes from transmissive and
   alpha-transparent voxels. Progressive PBR traces their transmitted light;
-  opaque materials continue to cast direct ground shadows in both modes.
+  opaque materials continue to cast direct shadows onto other authored geometry in both modes.
 - Realtime PBR scales neutral environment lighting with metalness: matte
   materials avoid an added brightness wash while metals retain reflected color
   outside direct highlights.

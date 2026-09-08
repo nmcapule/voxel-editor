@@ -772,8 +772,7 @@ export async function runPathTracingChecks(renderer: VoxelRenderer, settings: Vi
       for (const [name, ambient, light] of [['dark', 0, 0], ['ambient only', 1.2, 0], ['directional only', 0, 2.4]] as const) {
         renderer.setSettings({ ...options, ambient, light })
         if (!viewport.renderMode) renderer.setRenderMode(true)
-        // Keep the corner probe on the background rather than the lit stage floor.
-        ;(Reflect.get(viewport, 'ground') as Object3D).visible = false
+        check(!viewport.scene.children.some(object => object instanceof THREE.Mesh), 'Render mode must not add automatic ground geometry')
         viewport.requestPathTraceRebuild()
         await until(() => {
           check(errors.length === errorStart && !Reflect.get(viewport, 'pathTracingFailed'), errors.slice(errorStart).join('\n') || 'Actual path tracing failed')

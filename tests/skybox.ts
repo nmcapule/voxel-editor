@@ -1,7 +1,7 @@
 // Dedicated /tests/transparency.html session; run sequentially with the other GPU suites.
 // Start transparencyTest.runSkyboxChecks() without holding CDP; poll window.skyboxChecks.
 // Imports are deferred so loading the harness does not start GPU checks.
-import type { DataTexture, DirectionalLight, HemisphereLight, Mesh, MeshPhysicalMaterial, WebGLRenderTarget } from 'three'
+import type { DataTexture, DirectionalLight, HemisphereLight, MeshPhysicalMaterial, WebGLRenderTarget } from 'three'
 import type { WebGLPathTracer } from 'three-gpu-pathtracer'
 import type { VoxelRenderer } from '../src/editors/model/renderer'
 import type { SkyboxPreset, ViewSettings } from '../src/shared/rendering/settings'
@@ -64,7 +64,7 @@ export async function runSkyboxChecks(renderer: VoxelRenderer, settings: ViewSet
   const saved = {
     document: Reflect.get(renderer, 'document') as InstanceType<typeof VoxelDocument>, settings: { ...viewport.settings },
     view: renderer.getView(), renderMode: viewport.renderMode, width: host.style.width, height: host.style.height,
-    ratio: webgl.getPixelRatio(), groundVisible: (Reflect.get(viewport, 'ground') as Mesh).visible,
+    ratio: webgl.getPixelRatio(),
     selection: [...(Reflect.get(renderer, 'selection') as Map<number, { x: number; y: number; z: number }>).values()],
     floating: Reflect.get(renderer, 'floatingSelection') as boolean,
   }
@@ -89,11 +89,15 @@ export async function runSkyboxChecks(renderer: VoxelRenderer, settings: ViewSet
   let environments = 0
   const configured = new Set<WebGLPathTracer>()
   const probeMaterial = new THREE.MeshPhysicalMaterial({ metalness: 0.65 })
+  const receiver = new THREE.Mesh(new THREE.PlaneGeometry(64, 64), new THREE.MeshPhysicalMaterial({ color: '#305070', roughness: 1 }))
+  receiver.name = 'Skybox recovery test receiver'
+  receiver.rotation.x = -Math.PI / 2
+  receiver.position.y = -0.03
+  receiver.receiveShadow = true
   const options: ViewSettings = { ...settings, skybox: 'solid', background: '#305070', ambient: 1.2, light: 2.4, lightAzimuth: 0,
     projection: 'orthographic', pathTracing: false, ambientOcclusion: false, shadows: false,
     grid: false, faceGrid: false, meshVertices: false, meshTriangles: false, tiltShift: false }
   const presets = ['solid', 'daylight', 'overcast', 'sunset', 'night'] as const
-  const ground = () => Reflect.get(viewport, 'ground') as Mesh
   const sky = () => Reflect.get(viewport, 'skyTexture') as DataTexture | undefined
   const environment = () => Reflect.get(viewport, 'environmentTarget') as WebGLRenderTarget
   const materials = () => Reflect.get(renderer, 'materials') as MeshPhysicalMaterial[]
@@ -108,7 +112,6 @@ export async function runSkyboxChecks(renderer: VoxelRenderer, settings: ViewSet
     const tracer = Reflect.get(viewport, 'pathTracer') as WebGLPathTracer | undefined
     if (tracer) tracer.pausePathTracing = true
     renderer.setSettings({ ...viewport.settings, ...patch })
-    ground().visible = false
     const { skybox, projection, pathTracing, ambient, light, lightAzimuth } = viewport.settings
     report.current = `${stage}: ${skybox}/${projection}/${pathTracing ? 'PBR' : 'raster'}, ambient=${ambient}, light=${light}, angle=${lightAzimuth}`
   }
@@ -194,10 +197,11 @@ export async function runSkyboxChecks(renderer: VoxelRenderer, settings: ViewSet
     }
     probeMaterial.envMap = null; probeMaterial.envMapIntensity = -1; probeMaterial.envMapRotation.set(1, 2, 3)
     viewport.applyEnvironment(probeMaterial)
-    for (const material of [...[40, 41, 42].map(index => materials()[index]), probeMaterial, ground().material as MeshPhysicalMaterial]) {
-      const intensity = preset ? ambient / Math.PI : material === ground().material ? 0 : 0.2 + material.metalness * 0.5
+    for (const material of [...[40, 41, 42].map(index => materials()[index]), probeMaterial, receiver.material]) {
+      const intensity = preset ? ambient / Math.PI : 0.2 + material.metalness * 0.5
       check(material.envMap === viewport.environment && Math.abs(material.envMapIntensity - intensity) < 1e-10 && material.envMapRotation.equals(scene.environmentRotation), 'Live materials and applyEnvironment must update map, intensity and rotation')
     }
+    check(!scene.children.some(object => object instanceof THREE.Mesh), 'Viewport must not add automatic ground geometry')
     const version = probeMaterial.version, count = environments
     viewport.applyEnvironment(probeMaterial)
     check(probeMaterial.version === version && environments === count, 'Applying unchanged environment state must be idempotent')
@@ -209,7 +213,7 @@ export async function runSkyboxChecks(renderer: VoxelRenderer, settings: ViewSet
   })
   const tracedRepeat = (before: ImageData, after: ImageData) => {
     const delta = difference(before.data, after.data)
-    // This fixture's upper 16 rows miss both the blocks and the recovery ground.
+    // This fixture's upper 16 rows miss both the blocks and the test-owned receiver.
     // Keep deterministic sky pixels strict rather than diluting a mismatch in noise.
     const background = difference(before.data.subarray(0, before.width * 16 * 4), after.data.subarray(0, after.width * 16 * 4))
     check(background.max <= 2, `Restored PBR background differs: ${JSON.stringify(background)}`)
@@ -238,7 +242,6 @@ export async function runSkyboxChecks(renderer: VoxelRenderer, settings: ViewSet
     await bounded(renderer.whenMeshIdle(), 'skybox fixture meshes')
     renderer.setView({ position: { x: 0, y: 22, z: 42 }, target: { x: 0, y: 6, z: 0 }, up: { x: 0, y: 1, z: 0 }, zoom: 1, orthographicSpan: 38, fov: 45 })
     renderer.setRenderMode(true)
-    ground().visible = false
   }
   let contextControl = webgl.getContext().getExtension('WEBGL_lose_context')
   const restoreContext = async () => {
@@ -248,6 +251,12 @@ export async function runSkyboxChecks(renderer: VoxelRenderer, settings: ViewSet
   }
   try {
     watch(viewport, 'createEnvironment', (original, args) => { environments++; return original(...args) })
+    // The fixture owns its material; follow the same environment updates as authored meshes.
+    watch(renderer, 'syncViewport', (original, args) => {
+      const value = original(...args)
+      viewport.applyEnvironment(receiver.material)
+      return value
+    })
     // renderPathTrace restores pausePathTracing in finally. Cap outside that scope,
     // otherwise it undoes the pause and PNG encoding races the next accumulation.
     watch(viewport, 'renderPathTrace', (original, args) => {
@@ -335,6 +344,7 @@ export async function runSkyboxChecks(renderer: VoxelRenderer, settings: ViewSet
 
     await run('empty sky coverage, raster/PBR sample parity and whole-sky rotation', async () => {
       await load(new VoxelDocument())
+      viewport.scene.traverseVisible(object => check(!(object instanceof THREE.Mesh), 'Empty Render mode must contain no automatic ground geometry'))
       const results = []
       for (const projection of ['perspective', 'orthographic'] as const) {
         set({ projection, pathTracing: false })
@@ -379,12 +389,11 @@ export async function runSkyboxChecks(renderer: VoxelRenderer, settings: ViewSet
     await run('context restoration rebinds the selected sky in raster and PBR', async () => {
       if (!contextControl) return { skipped: 'WEBGL_lose_context is unavailable' }
       await load(fixture)
+      viewport.content!.root.add(receiver)
       set({ skybox: 'sunset', lightAzimuth: 37, ambient: 1.8 })
-      ground().visible = true
       const results = []
       for (const pathTracing of [false, true]) {
         set({ pathTracing })
-        ground().visible = true
         const before = pathTracing ? await traced() : (await idle(), pixels())
         const source = sky(), target = environment(), tracer = Reflect.get(viewport, 'pathTracer'), count = environments
         contextControl = webgl.getContext().getExtension('WEBGL_lose_context')
@@ -419,6 +428,9 @@ export async function runSkyboxChecks(renderer: VoxelRenderer, settings: ViewSet
       if (webgl.getContext().isContextLost() || Reflect.get(viewport, 'contextLost')) await restoreContext()
     } catch (error) { report.errors.push(`context cleanup: ${String(error)}`) }
     for (const restore of restores.reverse()) restore()
+    receiver.removeFromParent()
+    receiver.geometry.dispose()
+    receiver.material.dispose()
     probeMaterial.dispose()
     try {
       renderer.setDocument(saved.document)
@@ -429,7 +441,6 @@ export async function runSkyboxChecks(renderer: VoxelRenderer, settings: ViewSet
       webgl.setPixelRatio(saved.ratio)
       await bounded(renderer.whenMeshIdle(), 'restored host meshes')
       renderer.setRenderMode(saved.renderMode)
-      ground().visible = saved.groundVisible
     } catch (error) {
       host.style.width = saved.width; host.style.height = saved.height
       report.errors.push(`host cleanup: ${String(error)}`)

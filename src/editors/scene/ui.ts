@@ -162,10 +162,10 @@ export function mountSceneUI(root: HTMLElement, host: SceneUIHost, keyboardRoot:
           <p id="scene-tilt-shift-band-help" class="scene-note">Focus runs from 0% at the top to 100% at the bottom. Sharp band width is a percentage of image height.</p>
         </div>
         <label class="select-row"><span>Skybox</span><select data-scene-setting="skybox">${Object.entries(SKYBOX_PRESETS).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}</select></label>
-        <label class="color-row"><span id="scene-background-label">Backdrop</span><input type="color" data-scene-setting="background"></label>
+        <label id="scene-background-label" class="color-row"><span>Backdrop</span><input type="color" data-scene-setting="background"></label>
         ${([['ambient', 'Ambient light', 0, 3, 0.1], ['light', 'Key light', 0, 5, 0.1], ['lightAzimuth', 'Light angle', -180, 180, 1]] as const).map(([key, label, min, max, step]) => `<label class="range-row"><span>${label}<output id="scene-output-${key}"></output></span><input type="range" data-scene-setting="${key}" aria-label="${label}" min="${min}" max="${max}" step="${step}"></label>`).join('')}
         <p id="scene-skybox-help" class="scene-note" hidden>Ambient scales sky lighting and reflections. Key light controls the sun or moon. Light angle rotates the sky and light.</p>
-        ${([['ambientOcclusion', 'Ambient occlusion'], ['shadows', 'Ground shadows'], ['grid', 'Editing grid']] as const).map(([key, label]) => `<label class="toggle-row"><span>${label}</span><input type="checkbox" data-scene-setting="${key}"></label>`).join('')}
+        ${([['ambientOcclusion', 'Ambient occlusion'], ['shadows', 'Shadows'], ['grid', 'Editing grid']] as const).map(([key, label]) => `<label class="toggle-row"><span>${label}</span><input type="checkbox" data-scene-setting="${key}"></label>`).join('')}
         <label class="scene-field scene-capture-quality">Capture quality<select id="scene-capture-quality" aria-describedby="scene-capture-help"><option value="viewport">Viewport detail</option><option value="full">Full-scene detail</option></select></label>
         <p id="scene-capture-help" class="scene-note">Viewport detail uses the current rendered detail. Full-scene detail prepares every visible scene layer at full voxel detail. Preflight may reject it above 1,000,000 triangles or a 96 MiB estimated peak budget. If rejected, choose Viewport detail or reduce the scene.</p>
         ${button('capture', 'Capture PNG', 'camera', 'id="scene-capture" class="primary full"')}
@@ -608,7 +608,7 @@ export function mountSceneUI(root: HTMLElement, host: SceneUIHost, keyboardRoot:
       updateSettingOutput(input)
     }
     $('#scene-tilt-shift-controls').hidden = !data.settings.tiltShift
-    $('#scene-background-label').textContent = data.settings.skybox === 'solid' ? 'Backdrop' : 'Ground color'
+    $('#scene-background-label').hidden = data.settings.skybox !== 'solid'
     $('#scene-skybox-help').hidden = data.settings.skybox === 'solid'
     $<HTMLInputElement>('#scene-snap').disabled = busy
     $<HTMLSelectElement>('#scene-capture-quality').disabled = busy

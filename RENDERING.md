@@ -51,6 +51,10 @@ composited linear background, preserving material maps, transmission and roughne
 Source materials and scene visibility are restored before returning, including failures.
 Inspection uses its own offscreen pipeline without changing the live camera or canvas.
 
+Render mode and PNG captures include only authored geometry, with no automatic
+ground plane or shadow catcher. Editing grids remain edit-only guides. Shadow and
+lighting regressions use explicit test-owned receivers, not viewport-owned floors.
+
 Raster camera gestures, animated focus, model tool drags, and scene marquee/transform
 drags temporarily cap drawing-buffer DPR at 1. Normal quality remains
 `min(devicePixelRatio, 2)` and returns in a scheduled frame 150 ms after the last
@@ -234,7 +238,7 @@ including offscreen shadow/reflection contributors. The adapter expands instance
 into ordinary world-space meshes grouped by material before BVH preparation; it
 never hands adaptive instancing to the tracer as a supposedly complete scene.
 Both tracing and full-scene capture require at most **1,000,000 expanded triangles**
-(including two stage triangles) and a **96 MiB conservative estimated peak**.
+and a **96 MiB conservative estimated peak**.
 `sceneDetailBudget` and `expandSceneDetail` in `src/editors/scene/renderer.ts` are authoritative:
 
 ```text
@@ -245,7 +249,7 @@ peakBytes = sourceBytes + 16 MiB + triangles * 2048
 The estimate covers retained source buffers, expanded/baked/merged arrays, BVH worker
 copies and GPU tables, material tables, and new viewport-dependent trace targets.
 `viewportPixels` is drawing-buffer width times height, not CSS pixel area.
-The material-entry guard is 65,534, with the stage included in preflight. The memory
+The material-entry guard is 65,534; preflight counts authored geometry only. The memory
 ceiling rejects far below the triangle ceiling; 1M is not an admitted workload
 promise. Staging must also fit the 128 MiB geometry budget alongside live adaptive
 resources. Existing host raster targets and the raw cache are separate, so 96 MiB
@@ -255,7 +259,7 @@ is not total page/GPU memory. `Viewport.prepareSceneContent` rechecks the adapte
 `0.75 * min(1, sqrt(1_000_000 / viewportPixels))`; sampling stops at 128 completed
 samples. Budget, dependency, or tracing failures report realtime **Raster fallback**.
 Adaptive raster may reduce detail under pressure. Its shadow working set uses a
-receiver-scoped light-space volume, including the visible ground and relevant
+receiver-scoped light-space volume, including visible authored receivers and relevant
 offscreen casters without making every scene instance resident. The query extends
 through scene depth rather than imposing an arbitrary shadow-distance cutoff.
 Streaming, budget failures, or omitted contributors are reported rather than

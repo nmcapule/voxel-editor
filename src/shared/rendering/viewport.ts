@@ -98,7 +98,6 @@ export class Viewport {
   private skyTexture?: THREE.DataTexture
   private grid?: THREE.Group
   private limits?: THREE.Box3Helper
-  private ground?: THREE.Mesh
   private hemisphere = new THREE.HemisphereLight(0xffffff, 0x8c91a0, 1.2)
   private sunlight = new THREE.DirectionalLight(0xffffff, 2.4)
   private sunlightTarget = new THREE.Object3D()
@@ -126,7 +125,6 @@ export class Viewport {
   private fullEpoch = 0
   private fullViewportPixels = 0
   private traceScene?: THREE.Scene
-  private traceGround?: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
   private sceneInteraction = false
   private sceneCameraDirty = false
   private callbacks: ViewportCallbacks
@@ -167,8 +165,8 @@ export class Viewport {
   }
 
   /** Materials borrow the viewport-owned map; versions also invalidate transparency clones. */
-  applyEnvironment(material: THREE.MeshStandardMaterial, ground = false) {
-    const intensity = this.settings.skybox === 'solid' ? ground ? 0 : realtimeEnvironmentIntensity(material.metalness) : this.settings.ambient / Math.PI
+  applyEnvironment(material: THREE.MeshStandardMaterial) {
+    const intensity = this.settings.skybox === 'solid' ? realtimeEnvironmentIntensity(material.metalness) : this.settings.ambient / Math.PI
     const rotation = this.scene.environmentRotation
     if (material.envMap !== this.environment || material.envMapIntensity !== intensity || !material.envMapRotation.equals(rotation)) {
       material.envMap = this.environment
@@ -452,9 +450,6 @@ export class Viewport {
     this.pathTracer = undefined
     this.traceScene?.clear()
     this.traceScene = undefined
-    this.traceGround?.geometry.dispose()
-    this.traceGround?.material.dispose()
-    this.traceGround = undefined
   }
 
   private failPathTracing(error: unknown) {
@@ -515,7 +510,6 @@ export class Viewport {
     this.renderMode = enabled
     this.updateWorkspaceGridVisibility()
     if (this.limits) this.limits.visible = this.settings.grid && !enabled
-    if (this.ground) this.ground.visible = enabled
     this.sceneContent?.onViewportChange()
     if (enabled && this.settings.pathTracing) {
       this.pathTracingFailed = false
@@ -556,12 +550,6 @@ export class Viewport {
     this.renderer.shadowMap.enabled = settings.shadows
     this.updateWorkspaceGridVisibility()
     if (this.limits) this.limits.visible = settings.grid && !this.renderMode
-    if (this.ground) {
-      this.ground.visible = this.renderMode
-      ;(this.ground.material as THREE.MeshStandardMaterial).color.set(settings.background).offsetHSL(0, -0.04, -0.035)
-      ;(this.ground.material as THREE.Material).needsUpdate = true
-      this.applyEnvironment(this.ground.material as THREE.MeshStandardMaterial, true)
-    }
     const stageSize = this.stageBounds.getSize(new THREE.Vector3())
     const center = this.stageBounds.getCenter(new THREE.Vector3())
     if (!this.worldScale) center.y = this.stageBounds.min.y
@@ -635,7 +623,6 @@ export class Viewport {
       this.limits.geometry.dispose()
       ;(this.limits.material as THREE.Material).dispose()
     }
-    if (this.ground) { this.scene.remove(this.ground); this.ground.geometry.dispose(); (this.ground.material as THREE.Material).dispose() }
     const sceneBounds = this.stageBounds
     const stageSize = sceneBounds.getSize(new THREE.Vector3())
     const center = sceneBounds.getCenter(new THREE.Vector3())
@@ -669,15 +656,6 @@ export class Viewport {
     limitsMaterial.depthWrite = false
     this.limits.visible = this.settings.grid && !this.renderMode
     this.scene.add(this.grid, this.limits)
-    this.ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(size * 2, size * 2),
-      new THREE.MeshStandardMaterial({ color: this.settings.background, roughness: 1, envMap: this.environmentTarget.texture, envMapIntensity: 0 }),
-    )
-    this.ground.rotation.x = -Math.PI / 2
-    this.ground.position.set(center.x, sceneBounds.min.y - 0.03, center.z)
-    this.ground.receiveShadow = true
-    this.ground.visible = this.renderMode
-    this.scene.add(this.ground)
     this.sunlightTarget.position.copy(this.worldScale ? center : new THREE.Vector3(center.x, sceneBounds.min.y + stageSize.y / 3, center.z))
     this.setSettings(this.settings)
   }
@@ -710,14 +688,8 @@ export class Viewport {
     if (!this.settings.shadows) return
     const shadow = this.sunlight.shadow, camera = shadow.camera
     const texel = Math.max((camera.right - camera.left) / shadow.mapSize.x, (camera.top - camera.bottom) / shadow.mapSize.y)
-    let groundBounds: THREE.Box3 | undefined
-    if (this.ground?.visible) {
-      this.ground.updateWorldMatrix(true, false)
-      this.ground.geometry.computeBoundingBox()
-      groundBounds = this.ground.geometry.boundingBox!.clone().applyMatrix4(this.ground.matrixWorld)
-    }
     return sceneShadowVolume(this.camera, occupied, receivers, camera.matrixWorldInverse,
-      this.ground?.visible ? this.ground.position.y : undefined, texel * (Math.abs(shadow.radius) + 1) + Math.abs(shadow.normalBias), groundBounds)
+      undefined, texel * (Math.abs(shadow.radius) + 1) + Math.abs(shadow.normalBias))
   }
 
   /** Borrow one content root. Adapters own activation, input hooks and saved views. */
@@ -784,7 +756,7 @@ export class Viewport {
       try {
         if (prepared.scope !== 'full-scene' || !Number.isSafeInteger(prepared.triangles) || prepared.triangles > 1_000_000 || !Number.isFinite(prepared.peakBytes) || prepared.peakBytes > 96 * 1024 * 1024) throw new Error('Full-scene adapter exceeded its declared budget.')
         const materials = new Set<THREE.Material>()
-        let triangles = 2
+        let triangles = 0
         prepared.root.traverse(object => {
           if ((object as THREE.InstancedMesh).isInstancedMesh || (object as THREE.BatchedMesh).isBatchedMesh) throw new Error('The tracer requires ordinary expanded meshes, not instancing.')
           if (object instanceof THREE.Mesh) {
@@ -813,15 +785,6 @@ export class Viewport {
     const light = this.sunlight.clone()
     light.target = this.sunlightTarget.clone()
     scene.add(light, light.target)
-    if (this.ground?.visible) {
-      const source = this.ground as THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
-      const ground = new THREE.Mesh(source.geometry.clone(), source.material.clone())
-      ground.material.envMap = null
-      Object.assign(ground.material, { castShadow: this.settings.shadows })
-      ground.position.copy(source.position); ground.quaternion.copy(source.quaternion); ground.scale.copy(source.scale)
-      ground.receiveShadow = true
-      scene.add(ground); this.traceGround = ground
-    }
     this.traceScene = scene
     return scene
   }
@@ -1084,7 +1047,7 @@ export class Viewport {
       raster.setSize(512, 512)
       raster.renderToScreen = false
       // No await while scene visibility is overridden.
-      for (const object of [this.grid, this.limits, this.ground]) if (object) visibility.set(object, object.visible)
+      for (const object of [this.grid, this.limits]) if (object) visibility.set(object, object.visible)
       this.sceneContent?.root.traverse(object => {
         if (object.userData.editorOverlay || object instanceof THREE.Line || object instanceof THREE.Points) visibility.set(object, object.visible)
       })
@@ -1140,7 +1103,7 @@ export class Viewport {
     this.controls.dispose()
     this.raster.dispose()
     this.tiltShift?.dispose()
-    for (const object of [this.grid, this.limits, this.ground]) object?.traverse(child => {
+    for (const object of [this.grid, this.limits]) object?.traverse(child => {
       if (!(child instanceof THREE.Mesh || child instanceof THREE.Line)) return
       child.geometry.dispose()
       for (const material of Array.isArray(child.material) ? child.material : [child.material]) material.dispose()

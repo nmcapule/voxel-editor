@@ -2,7 +2,7 @@
 // Start without awaiting CDP: import('/tests/recovery.ts').then(m =>
 //   m.runRecoveryChecks(transparencyTest.renderer, transparencyTest.settings)).
 // Poll window.recoveryChecks (finite waits, incremental results).
-import type { DirectionalLight, MeshPhysicalMaterial, Object3D, WebGLRenderTarget } from 'three'
+import type { DirectionalLight, MeshPhysicalMaterial, MeshStandardMaterial, Object3D, WebGLRenderTarget } from 'three'
 import type { WebGLPathTracer } from 'three-gpu-pathtracer'
 import type { RasterPipeline } from '../src/shared/rendering/raster-pipeline'
 import type { VoxelRenderer } from '../src/editors/model/renderer'
@@ -134,6 +134,15 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
     for (let z = min[2]; z < max[2]; z++) for (let y = min[1]; y < max[1]; y++) for (let x = min[0]; x < max[0]; x++) document.setVoxel(x, y, z, material)
   }
   const options: ViewSettings = { ...settings, projection: 'orthographic', pathTracing: false, ambientOcclusion: false, grid: false, faceGrid: false, shadows: true, background: '#b8b8b8', ambient: 0.2, light: 3, lightAzimuth: 0 }
+  // Explicit scene geometry, not a viewport stage: keep the existing shadow probes at y=-0.03.
+  const receiver = new THREE.Mesh(new THREE.PlaneGeometry(64, 64), new THREE.MeshStandardMaterial({
+    color: new THREE.Color(options.background).offsetHSL(0, -0.04, -0.035), roughness: 1,
+  }))
+  receiver.name = 'Shadow recovery test receiver'
+  receiver.rotation.x = -Math.PI / 2
+  receiver.position.y = -0.03
+  receiver.receiveShadow = true
+  restores.push(() => { receiver.removeFromParent(); receiver.geometry.dispose(); receiver.material.dispose() })
   const load = async (document: InstanceType<typeof VoxelDocument>) => {
     renderer.setRenderMode(false)
     renderer.setSettings(options)
@@ -270,6 +279,7 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
     Object.assign(suspended.materials[42], { metalness: 0, roughness: 1, opacity: 1, transmission: 0, emissiveIntensity: 0 })
     fill(suspended, 42, [14, 6, 14], [18, 8, 18])
     await load(suspended)
+    viewport.content!.root.add(receiver)
     await run('shadow cache skips camera and hover; light geometry and toggle invalidate', async () => {
       let shadowDraws = 0
       // onBeforeShadow is an actual depth draw, unlike shadowMap.render's early-return calls.
@@ -375,7 +385,7 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
         const shadowed = pixels(), warmDraws = shadowDraws, cachedMap = sunlight.shadow.map
         const effect = mean(roi(reference, [-5.2, -0.03, 0])) - mean(roi(shadowed, [-5.2, -0.03, 0]))
         check(warmDraws > 0 && cachedMap && !webgl.shadowMap.needsUpdate, 'Positive control must populate a clean real shadow map')
-        check(effect > 25, `Cached shadow must visibly darken the ground probe: ${effect}`)
+        check(effect > 25, `Cached shadow must visibly darken the authored receiver probe: ${effect}`)
 
         // Hold real async results, not scene data or shader output, until each RAF preview is observed.
         watch(tracer, 'setSceneAsync', (original, args) => {
@@ -455,7 +465,7 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
       }
     })
 
-    await run('shadows control changes fixed-seed actual traced ground samples', async () => {
+    await run('shadows control changes fixed-seed actual traced receiver samples', async () => {
       renderer.setSettings({ ...options, pathTracing: true })
       if (!viewport.renderMode) renderer.setRenderMode(true)
       const tracer = await ready()
@@ -472,7 +482,8 @@ export async function runRecoveryChecks(renderer: VoxelRenderer, settings: ViewS
         images.push(image)
         const materials = Reflect.get(renderer, 'materials') as MeshPhysicalMaterial[]
         const pathCastShadow = Reflect.get(materials[42], 'castShadow') as boolean
-        const sourceMaterials = Reflect.get(tracer, '_materials') as MeshPhysicalMaterial[]
+        const sourceMaterials = Reflect.get(tracer, '_materials') as MeshStandardMaterial[]
+        check(sourceMaterials.includes(receiver.material), 'Test-owned receiver must be present in the path-traced scene')
         const materialIndex = sourceMaterials.indexOf(materials[42])
         check(materialIndex >= 0, 'Opaque caster must be present in the path-traced scene')
         // three-gpu-pathtracer MaterialsTexture: 47 RGBA texels/material, shadow at texel 14.g.

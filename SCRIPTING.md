@@ -89,7 +89,7 @@ With document dimensions `X,Y,Z`, pixel `u` increases right and `v` increases do
 
 Isometric images are 512 x 512 orthographic raster renders with scene lighting and materials, not exact voxel-color maps or progressive path-traced renders. All look down from +Y: front-right uses +X/+Z, front-left -X/+Z, back-right +X/-Z, back-left -X/-Z. Inspection images exclude editing overlays and leave the interactive camera untouched. Face images include `pixelAxes`; isometric images use `direction` without a per-pixel voxel mapping.
 
-Each isometric image fits the entire visible model independently of selection, with a small margin and the configured background. The ground plane is excluded. Offscreen rendering leaves the live viewport and progressive samples untouched.
+Each isometric image fits the entire visible model independently of selection, with a small margin and the configured background. No automatic ground plane is added. Offscreen rendering leaves the live viewport and progressive samples untouched.
 
 Use targeted `composition.get` bounds/layers for exact depth, interior, or layer questions that these images cannot answer, rather than dumping the whole model for visual understanding. Results are ordered by layer and then Z/Y/X, scan at most one million cells per response, and return `nextCursor` until complete.
 
@@ -146,7 +146,7 @@ The runtime validator in `src/editors/model/protocol.ts` is the authoritative ar
 `daylight`, `overcast`, `sunset`, or `night`. Older project snapshots, local recovery,
 scene manifests, and child-model settings default a missing `skybox` to `solid`.
 Changing the preset preserves `background`, lighting, camera, and tilt-shift values.
-With a sky active, `background` is the ground color; Ambient scales sky lighting
+With a sky active, `background` is retained for Solid color mode; no ground plane is added. Ambient scales sky lighting
 and reflections, Key light controls the sun or moon, and Light angle rotates both.
 
 `settings.update` accepts the saved miniature-photography fields `tiltShift`

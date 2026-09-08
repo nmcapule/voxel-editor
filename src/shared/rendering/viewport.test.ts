@@ -72,8 +72,7 @@ test('bounded stage fitting preserves local cameras, light position and guide ge
   try {
     expect(probe.grid.children).toHaveLength(5)
     expect(probe.limits.box.equals(bounds)).toBe(true)
-    expect(probe.ground.geometry.parameters).toMatchObject({ width: 128, height: 128 })
-    expect(probe.ground.position.toArray()).toEqual([0, -0.03, 0])
+    expect(probe.scene.children.some((object: THREE.Object3D) => object instanceof THREE.Mesh)).toBe(false)
     expect(probe.sunlightTarget.position.toArray()).toEqual([0, 16, 0])
     expect(probe.createCamera('perspective')).toMatchObject({ near: 0.1, far: 2000, fov: 34 })
     expect(probe.createCamera('orthographic')).toMatchObject({ near: -1000, far: 2000 })
@@ -118,6 +117,40 @@ function photoProbe() {
   })
   return { probe, calls, pathTracer }
 }
+
+test('render mode, stage rebuilds and captures never add a floor to either workspace', async () => {
+  const { probe } = photoProbe()
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial())
+  mesh.castShadow = mesh.receiveShadow = true
+  probe.sceneContent.root.add(mesh); probe.scene.add(probe.sceneContent.root)
+  Object.assign(probe, { settings: { ...DEFAULT_SETTINGS, pathTracing: false, tiltShift: false }, render() {} })
+  try {
+    for (const stage of ['bounded', 'world']) {
+      probe.sceneContent.stage = stage
+      for (const enabled of [false, true, false, true]) {
+        probe.setRenderMode(enabled)
+        probe.rebuildStage()
+        probe.setSettings({ ...probe.settings, background: '#abcdef', grid: true })
+        expect(probe.grid.visible).toBe(!enabled)
+        expect(probe.limits.visible).toBe(!enabled)
+        expect(probe.scene.children).toEqual([probe.sceneContent.root, probe.grid, probe.limits])
+        expect(mesh.castShadow && mesh.receiveShadow).toBe(true)
+        await expect(probe.capture()).resolves.toHaveProperty('blob')
+        const traceRoot = probe.sceneContent.root.clone()
+        const trace = probe.createTraceScene({ root: traceRoot })
+        expect(trace.children.filter((object: THREE.Object3D) => object instanceof THREE.Mesh)).toEqual([])
+        expect(traceRoot.children).toHaveLength(1)
+        probe.disposePathTracer()
+      }
+    }
+  } finally {
+    probe.scene.traverse((object: THREE.Object3D) => {
+      if (object instanceof THREE.Mesh || object instanceof THREE.Line) {
+        object.geometry.dispose(); (object.material as THREE.Material).dispose()
+      }
+    })
+  }
+})
 
 function resolutionProbe(dpr = 2) {
   const { probe, pathTracer } = photoProbe()
@@ -623,11 +656,13 @@ test('procedural skies are deterministic, linear, seam-safe and oriented +Y towa
 
 test('sky changes own resources, update tracing and preserve maps on intensity/rotation changes', () => {
   const { probe } = photoProbe()
+  const material = new THREE.MeshStandardMaterial()
+  probe.sceneContent.onViewportChange = () => probe.applyEnvironment(material)
   const changes: string[][] = [], targets: THREE.WebGLRenderTarget[] = []
   Object.assign(probe, {
     render() {}, updatePathTracing(...values: string[]) { changes.push(values) },
     createEnvironment() { const target = new THREE.WebGLRenderTarget(16, 16); targets.push(target); return target },
-    ambientEnvironment: new THREE.Texture(), ground: new THREE.Mesh(new THREE.PlaneGeometry(), new THREE.MeshStandardMaterial()),
+    ambientEnvironment: new THREE.Texture(),
   })
   probe.replaceEnvironment('solid')
   const room = probe.environmentTarget, roomDisposed = mock()
@@ -650,8 +685,8 @@ test('sky changes own resources, update tracing and preserve maps on intensity/r
     expect(probe.environmentTarget).toBe(target)
     expect(changes.at(-1)).toEqual(['environment', 'lights'])
     expect(probe.scene.backgroundRotation.y).toBeCloseTo(-Math.PI / 2)
-    expect(probe.ground.material.envMapIntensity).toBeCloseTo(0.5 / Math.PI)
-    expect(probe.ground.material.envMapRotation.equals(probe.scene.environmentRotation)).toBe(true)
+    expect(material.envMapIntensity).toBeCloseTo(0.5 / Math.PI)
+    expect(material.envMapRotation.equals(probe.scene.environmentRotation)).toBe(true)
     const trace = probe.createTraceScene({ root: new THREE.Group() })
     expect(trace.background).toBe(source)
     expect(trace.environmentRotation.equals(probe.scene.environmentRotation)).toBe(true)
@@ -663,7 +698,7 @@ test('sky changes own resources, update tracing and preserve maps on intensity/r
     expect(probe.scene.background).toEqual(new THREE.Color(probe.settings.background))
     expect(probe.hemisphere.intensity).toBe(0.5)
     expect(probe.sunlight.color.getHex()).toBe(0xffffff)
-    expect(probe.ground.material.envMapIntensity).toBe(0)
+    expect(material.envMapIntensity).toBe(0.2)
     expect(probe.scene.environmentRotation.y).toBe(0)
     probe.contextLost = true
     probe.setSettings({ ...probe.settings, skybox: 'night' })
@@ -673,15 +708,14 @@ test('sky changes own resources, update tracing and preserve maps on intensity/r
     probe.replaceEnvironment(probe.settings.skybox)
     probe.setSettings(probe.settings)
     expect(targets).toHaveLength(4)
-    expect(probe.ground.material.envMap).toBe(probe.environment)
+    expect(material.envMap).toBe(probe.environment)
     probe.sceneContent.stage = 'world'
     probe.invalidateSceneContent = mock()
     probe.setSettings({ ...probe.settings, skybox: 'daylight' })
     expect(probe.invalidateSceneContent).toHaveBeenCalledTimes(1)
   } finally {
     probe.skyTexture?.dispose(); probe.environmentTarget.dispose(); probe.ambientEnvironment.dispose()
-    probe.ground.geometry.dispose(); probe.ground.material.dispose()
-    probe.traceGround?.geometry.dispose(); probe.traceGround?.material.dispose()
+    material.dispose()
   }
 })
 

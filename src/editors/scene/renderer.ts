@@ -81,7 +81,7 @@ export function sceneDetailBudget(triangles: number, materials: number, sourceBy
   if (![triangles, materials, sourceBytes, pixels].every(n => Number.isFinite(n) && n >= 0)) throw new Error('Invalid full-scene budget inputs')
   const peakBytes = sourceBytes + 16 * 1024 * 1024 + triangles * 2048 + materials * 8192 + Math.min(pixels, 1_000_000) * 48
   if (!Number.isSafeInteger(triangles) || triangles > SCENE_DETAIL_TRIANGLES) throw new Error('Full-scene detail exceeds the 1,000,000-triangle limit. Use adaptive raster or reduce the scene.')
-  if (materials > 65534) throw new Error('Full-scene detail exceeds the tracer\'s 16-bit material limit (one slot reserved for the stage).')
+  if (materials > 65534) throw new Error('Full-scene detail exceeds the tracer\'s 16-bit material limit.')
   if (peakBytes > SCENE_DETAIL_PEAK_BYTES) throw new Error(`Full-scene detail needs an estimated ${(peakBytes / 1048576).toFixed(1)} MiB peak; the limit is 96 MiB. Use adaptive raster or reduce the scene/resolution.`)
   return { triangles, peakBytes, sourceBytes }
 }
@@ -93,7 +93,7 @@ interface DetailPart { geometry: THREE.BufferGeometry; material: THREE.MeshPhysi
 export function expandSceneDetail(parts: DetailPart[], pixels = 0, shadows = true): PreparedSceneContent {
   const groups = new Map<THREE.MeshPhysicalMaterial, { parts: DetailPart[]; vertices: number }>()
   const sources = new Set<THREE.BufferGeometry>(), buffers = new Set<ArrayBufferLike>()
-  let triangles = 2, sourceBytes = 0
+  let triangles = 0, sourceBytes = 0
   for (const part of parts) {
     const vertices = part.geometry.index?.count ?? part.geometry.getAttribute('position').count
     if (vertices % 3) throw new Error('Invalid full-scene triangle data')
@@ -109,7 +109,7 @@ export function expandSceneDetail(parts: DetailPart[], pixels = 0, shadows = tru
       }
     }
   }
-  const budget = sceneDetailBudget(triangles, groups.size + 1, sourceBytes, pixels)
+  const budget = sceneDetailBudget(triangles, groups.size, sourceBytes, pixels)
   const root = new THREE.Group()
   let geometryBytes = 0, disposed = false
   try {
@@ -486,7 +486,7 @@ export class SceneRenderer {
     const surfaces = new Set<Surface>(), materials = new Set<string>()
     const counts = new Map<AssetState, number>()
     for (const entry of this.entries.values()) counts.set(entry.asset, (counts.get(entry.asset) ?? 0) + 1)
-    let triangles = 2
+    let triangles = 0
     for (const [asset, count] of counts) for (const id of asset.chunks.keys()) {
       const surface = this.surfaces.get(this.key(asset, id, 1))
       if (!surface) { if (requireComplete) throw new Error('Full-scene dependencies are incomplete'); continue }
@@ -494,7 +494,7 @@ export class SceneRenderer {
       for (const part of surface.parts) { triangles += part.triangles * count; materials.add(part.materialKey) }
     }
     const canvas = this.host.getSceneViewport().canvas
-    return sceneDetailBudget(triangles, materials.size + 1, [...surfaces].reduce((sum, surface) => sum + surface.bytes, 0), canvas.width * canvas.height)
+    return sceneDetailBudget(triangles, materials.size, [...surfaces].reduce((sum, surface) => sum + surface.bytes, 0), canvas.width * canvas.height)
   }
 
   async prepareFullDetail(signal: AbortSignal): Promise<PreparedSceneContent> {

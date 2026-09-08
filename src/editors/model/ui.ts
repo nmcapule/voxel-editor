@@ -217,13 +217,13 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
             <p id="tilt-shift-band-help" class="panel-note">Focus runs from 0% at the top to 100% at the bottom. Sharp band width is a percentage of image height.</p>
           </div>
           <label class="select-row"><span>Skybox</span><select id="skybox">${Object.entries(SKYBOX_PRESETS).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}</select></label>
-          <label class="color-row"><span id="background-label">Backdrop</span><input id="background" type="color"></label>
+          <label id="background-label" class="color-row"><span>Backdrop</span><input id="background" type="color"></label>
           <label class="range-row"><span>Ambient <output id="ambient-output">1.2</output></span><input id="ambient" aria-label="Ambient light" type="range" min="0" max="3" value="1.2" step="0.1"></label>
           <label class="range-row"><span>Key light <output id="light-output">2.4</output></span><input id="light" aria-label="Key light" type="range" min="0" max="5" value="2.4" step="0.1"></label>
           <label class="range-row"><span>Light angle <output id="azimuth-output">42°</output></span><input id="azimuth" aria-label="Light angle" type="range" min="-180" max="180" value="42" step="1"></label>
           <p id="skybox-help" class="panel-note" hidden>Ambient scales sky lighting and reflections. Key light controls the sun or moon. Light angle rotates the sky and light.</p>
           <label class="toggle-row"><span>Ambient occlusion</span><input id="ambient-occlusion" type="checkbox"></label>
-          <label class="toggle-row"><span>Ground shadows</span><input id="shadows" type="checkbox"></label>
+          <label class="toggle-row"><span>Shadows</span><input id="shadows" type="checkbox"></label>
           <label class="toggle-row"><span>Editing grid</span><input id="grid" type="checkbox"></label>
           <label class="toggle-row"><span>Voxel face grid</span><input id="face-grid" type="checkbox"></label>
           <label class="toggle-row" title="Show the merged mesh's vertices in edit mode"><span>Mesh vertices</span><input id="mesh-vertices" type="checkbox"></label>

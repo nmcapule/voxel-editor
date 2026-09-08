@@ -671,7 +671,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
   function renderSettings() {
     app.querySelector<HTMLSelectElement>('#projection')!.value = settings.projection
     app.querySelector<HTMLSelectElement>('#skybox')!.value = settings.skybox
-    app.querySelector('#background-label')!.textContent = settings.skybox === 'solid' ? 'Backdrop' : 'Ground color'
+    app.querySelector<HTMLElement>('#background-label')!.hidden = settings.skybox !== 'solid'
     app.querySelector<HTMLElement>('#skybox-help')!.hidden = settings.skybox === 'solid'
     app.querySelector<HTMLInputElement>('#background')!.value = settings.background
     app.querySelector<HTMLInputElement>('#ambient')!.value = String(settings.ambient)

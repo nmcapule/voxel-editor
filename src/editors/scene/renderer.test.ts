@@ -478,7 +478,7 @@ test('expanded full detail includes distant contributors, uses independent mater
   const detail = expandSceneDetail([{ geometry, material, matrix: new THREE.Matrix4() }, { geometry, material, matrix: new THREE.Matrix4().makeTranslation(8000, 10, 0) }], 320 * 240)
   const generator = new PathTracingSceneGenerator(detail.root)
   try {
-    expect(detail.scope).toBe('full-scene'); expect(detail.triangles).toBe(26)
+    expect(detail.scope).toBe('full-scene'); expect(detail.triangles).toBe(24)
     expect(detail.root.children).toHaveLength(1)
     const mesh = detail.root.children[0] as THREE.Mesh
     expect((mesh as THREE.InstancedMesh).isInstancedMesh).toBeUndefined()

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { relative, resolve } from 'node:path'
 import { chunkId, VoxelDocument } from '../src/shared/voxel/document'
 import { decodeProjectSnapshot, encodeProjectSnapshot } from '../src/shared/voxel/snapshot'
-import { DEFAULT_SETTINGS } from '../src/shared/rendering/settings'
+import { DEFAULT_SETTINGS, SKYBOX_PRESETS, type SkyboxPreset } from '../src/shared/rendering/settings'
 import { createModelServer, PROJECT_ROOT } from './model-server'
 import { MAX_REQUEST_BYTES } from './http'
 import { type ModelSummary } from '../src/shared/library/types'
@@ -88,6 +88,21 @@ test('persists lossless layered/material/black snapshots and versions across dat
   library = start()
   expect(await (await request(`/${created.id.toUpperCase()}`)).json()).toEqual({ ...updated, snapshot })
   expect(await (await request()).json()).toEqual({ models: [updated], tags: ['updated'], total: 1 })
+})
+
+test.each(Object.keys(SKYBOX_PRESETS) as SkyboxPreset[])('persists the %s skybox through model saves and updates', async skybox => {
+  const authored = { ...snapshot, settings: { ...snapshot.settings, skybox } }
+  const response = await save({ snapshot: authored, tags: [] })
+  expect(response.status).toBe(201)
+  const created = await response.json()
+  expect((await (await request(`/${created.id}`)).json()).snapshot).toEqual(authored)
+  const updated = { ...authored, settings: { ...authored.settings, skybox: skybox === 'solid' ? 'sunset' : 'solid' } }
+  const update = await save({ snapshot: updated, tags: [], version: created.version }, `/${created.id}`, 'PUT')
+  expect(update.status).toBe(200)
+  expect((await update.json()).version).toBe(2)
+  await library.close()
+  library = start()
+  expect((await (await request(`/${created.id}`)).json()).snapshot).toEqual(updated)
 })
 
 test('thumbnails are lazy, persistent PNGs; HEAD is read-only and cache hits never select snapshots', async () => {

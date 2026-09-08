@@ -1,6 +1,6 @@
 @import '../../shared/ui/base.css';
 
-.model-editor { position: absolute; inset: 0; pointer-events: none; anchor-scope: all; }
+.model-editor { position: absolute; inset: 0; pointer-events: none; anchor-scope: all; --tool-dock-bottom: max(18px, env(safe-area-inset-bottom)); --tool-popup-bottom: calc(var(--tool-dock-bottom) + 124px); }
 .model-editor > :not(.top-chrome) { pointer-events: auto; }
 .model-editor[data-tool="select"] .viewport canvas { cursor: crosshair; }
 .model-editor[data-tool="paint"] .viewport canvas { cursor: crosshair; }
@@ -73,7 +73,7 @@
   position: absolute;
   z-index: 6;
   left: 50%;
-  bottom: 94px;
+  bottom: var(--tool-popup-bottom);
   min-height: 48px;
   padding: 8px 13px 8px 16px;
   border-radius: 15px;
@@ -97,24 +97,41 @@
 :where(.model-editor) .fill-depth input { width: 46px; height: 26px; padding: 0 4px; border: 1px solid #d7dcdb; border-radius: 6px; background: var(--paper); color: var(--ink); text-align: center; font-size: 0.7rem; font-variant-numeric: tabular-nums; }
 :where(.model-editor) #paint-tool-swatch { flex: 0 0 7px; width: 7px; height: 7px; border: 1px solid rgba(32, 38, 44, 0.2); border-radius: 50%; }
 :where(.model-editor) .tool-dock button[aria-pressed="true"] #paint-tool-swatch { border-color: rgba(255, 255, 255, 0.6); }
+:where(.model-editor) .tool-dock { bottom: var(--tool-dock-bottom); }
+:where(.model-editor) .tool-slot { position: relative; flex: 1 1 0; min-width: 0; }
+:where(.model-editor) .tool-slot > button[data-tool] { width: 100%; }
+:where(.model-editor) .tool-dock .tool-expand {
+  position: absolute;
+  top: -48px;
+  left: 50%;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  padding: 0;
+  grid-template: 1fr / 1fr;
+  place-items: center;
+  gap: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--porcelain);
+  box-shadow: 0 3px 8px rgba(39, 53, 64, 0.09);
+  transform: translateX(-50%);
+}
+:where(.model-editor) .tool-expand > svg { width: 16px; height: 16px; transform: rotate(-90deg); }
 .model-editor:has(#select-tool-popup:popover-open) .tool-dock button[popovertarget="select-tool-popup"] { background: #ecefec; }
 .model-editor:has(#paint-tool-popup:popover-open) .tool-dock button[popovertarget="paint-tool-popup"] { background: #ecefec; }
 .model-editor:has(#sculpt-tool-popup:popover-open) .tool-dock button[popovertarget="sculpt-tool-popup"] { background: #ecefec; }
 .model-editor:has(.layer-panel:popover-open) .tool-dock button[popovertarget="layer-panel"] { background: #ecefec; }
-.model-editor:has(#select-tool-popup:popover-open) .tool-dock button[aria-pressed="true"][popovertarget="select-tool-popup"] { background: var(--cobalt); }
-.model-editor:has(#paint-tool-popup:popover-open) .tool-dock button[aria-pressed="true"][popovertarget="paint-tool-popup"] { background: var(--cobalt); }
-.model-editor:has(#sculpt-tool-popup:popover-open) .tool-dock button[aria-pressed="true"][popovertarget="sculpt-tool-popup"] { background: var(--cobalt); }
-.model-editor:has(.layer-panel:popover-open) .tool-dock button[aria-pressed="true"][popovertarget="layer-panel"] { background: var(--cobalt); }
-:where(.model-editor) .tool-dock button[data-tool="select"] { anchor-name: --select-tool; }
-:where(.model-editor) .tool-dock button[data-tool="paint"] { anchor-name: --paint-tool; }
-:where(.model-editor) .tool-dock button[data-tool="sculpt"] { anchor-name: --sculpt-tool; }
-:where(.model-editor) .tool-dock button[data-tool="layer"] { anchor-name: --layer-tool; }
+:where(.model-editor) .tool-expand[data-tool-popup="select"] { anchor-name: --select-tool; }
+:where(.model-editor) .tool-expand[data-tool-popup="paint"] { anchor-name: --paint-tool; }
+:where(.model-editor) .tool-expand[data-tool-popup="sculpt"] { anchor-name: --sculpt-tool; }
+:where(.model-editor) .tool-expand[data-tool-popup="layer"] { anchor-name: --layer-tool; }
 :where(.model-editor) .tool-popup {
   position: fixed;
-  inset: auto auto 94px 50%;
+  inset: auto auto var(--tool-popup-bottom) 50%;
   width: 240px;
   max-width: calc(100vw - 20px);
-  max-height: calc(100dvh - 112px - env(safe-area-inset-bottom));
+  max-height: calc(100dvh - var(--tool-popup-bottom) - 18px);
   margin: 0;
   padding: 8px;
   overflow-y: auto;
@@ -160,10 +177,10 @@
 }
 :where(.model-editor) .layer-panel {
   position: fixed;
-  inset: auto auto 94px 50%;
+  inset: auto auto var(--tool-popup-bottom) 50%;
   width: 326px;
   max-width: calc(100vw - 36px);
-  max-height: calc(100dvh - 130px);
+  max-height: calc(100dvh - var(--tool-popup-bottom) - 18px);
   margin: 0;
   padding: 8px;
   overflow: hidden;
@@ -230,7 +247,7 @@
 :where(.model-editor) .model-facts div + div { border-left: 1px solid var(--line); }
 :where(.model-editor) .model-facts span { color: var(--muted); font-size: 0.69rem; }
 :where(.model-editor) .model-facts strong { font-size: 1.15rem; font-variant-numeric: tabular-nums; }
-:where(.model-editor) .layer-list { max-height: min(360px, calc(100dvh - 230px)); display: grid; gap: 5px; overflow-y: auto; }
+:where(.model-editor) .layer-list { max-height: min(360px, calc(100dvh - var(--tool-popup-bottom) - 136px)); display: grid; gap: 5px; overflow-y: auto; }
 :where(.model-editor) .layer-row { min-height: 50px; padding: 5px 6px; display: grid; grid-template-columns: 22px minmax(0, 1fr) repeat(3, 32px); align-items: center; gap: 3px; border: 1px solid transparent; border-radius: 11px; }
 :where(.model-editor) .layer-row[data-active="true"] { border-color: #c8d6f2; background: #edf3ff; }
 :where(.model-editor) .layer-row > button { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--muted); }
@@ -310,6 +327,7 @@
 :where(.model-editor) .context-summary { display: none !important; }
 }
 @media (max-width: 840px) {
+.model-editor { --tool-dock-bottom: max(10px, env(safe-area-inset-bottom)); }
 @supports (left: anchor(center)) {
 :where(.model-editor) .tool-popup { left: clamp(130px, anchor(center), calc(100vw - 130px)); }
 }
@@ -317,14 +335,15 @@
 :where(.model-editor) .save-status { padding: 0 4px; }
 :where(.model-editor) .scene-status #mesh-status { display: none; }
 :where(.model-editor) .scene-status .status-rule:last-of-type { display: none; }
-:where(.model-editor) .context-dock { bottom: calc(90px + env(safe-area-inset-bottom)); width: max-content; max-width: calc(100vw - 20px); min-height: 40px; padding: 6px; flex-wrap: wrap; justify-content: center; gap: 4px; }
+:where(.model-editor) .context-dock { width: max-content; max-width: calc(100vw - 20px); min-height: 40px; padding: 6px; flex-wrap: wrap; justify-content: center; gap: 4px; }
 :where(.model-editor) .context-dock:has(> .fill-options[hidden]) { display: none; }
 :where(.model-editor) .context-summary { display: none !important; }
 :where(.model-editor) .tool-options { order: 2; }
 :where(.model-editor) .tool-options button { min-width: 44px; min-height: 44px; justify-content: center; }
 :where(.model-editor) .fill-depth { min-height: 44px; }
 :where(.model-editor) .tool-options kbd { display: none; }
-:where(.model-editor) .layer-panel { bottom: calc(82px + env(safe-area-inset-bottom)); width: calc(100vw - 20px); max-width: none; max-height: calc(100dvh - 108px); border-radius: 22px; }
+:where(.model-editor) .layer-panel { width: calc(100vw - 20px); max-width: none; border-radius: 22px; }
+.model-editor .stage-panel { bottom: var(--tool-popup-bottom); height: min(570px, calc(100dvh - var(--tool-popup-bottom) - 18px)); }
 :where(.model-editor) .palette-view-bar button { min-height: 44px; }
 :where(.model-editor) .palette-filter-bar button { min-height: 44px; }
 :where(.model-editor) .popup-material-grid { grid-template-columns: repeat(4, 44px); }

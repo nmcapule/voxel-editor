@@ -48,7 +48,8 @@ data uses tabular figures.
   The gallery expands on desktop and remains usable as a single-column overlay
   at 320 px, with close and search controls remaining visible while browsing.
 - Select, Place, Sculpt, and Layer sit bottom-center. Each tool shows its retained
-  state beneath its name and opens its popup from the tool bar.
+  state beneath its name. A separate circular expand button above each tool opens
+  its popup without changing the active tool; the main tile only activates it.
   Place's popup contains Paint, Volume, Eyedropper, and material selection; Place
   reuses the selection scope chosen under Select. Sculpt contains Push/Pull,
   Move, and Erase; Layer opens the layer manager and activates the owner of a
@@ -92,9 +93,10 @@ data uses tabular figures.
 
 - Active tools use solid cobalt with white labels and icons.
 - Hover states use a quiet neutral fill; disabled actions lower opacity.
-- On fine pointers, hovering Select, Place, Sculpt, or Layer opens its popup. A short
-  leave grace keeps the popup reachable across the anchor gap; click, keyboard,
-  and touch activation continue to use the native popover behavior.
+- Model tool popups open from their circular expand buttons, not from hovering or
+  tapping the main tool tiles. The expand buttons use 44 px targets and native
+  popover toggling and dismissal; tool keyboard shortcuts still activate and open.
+  Scene tools retain their existing click and fine-pointer hover popup behavior.
 - Keyboard focus uses a 3 px dark-cobalt outline with a 3 px offset.
 - Editing previews are spatial and transient. Render mode quiets editing
   chrome rather than replacing the workspace. It starts with the realtime

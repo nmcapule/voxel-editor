@@ -110,10 +110,22 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
       </aside>
 
       <nav class="tool-dock instrument" aria-label="Voxel tools">
-        <button type="button" data-tool="select" aria-pressed="false" popovertarget="select-tool-popup">${icon('select')}<span class="tool-label"><strong>Select</strong><small id="select-tool-mode">Point</small></span><kbd>Q</kbd></button>
-        <button type="button" data-tool="paint" aria-pressed="false" popovertarget="paint-tool-popup">${icon('paint')}<span class="tool-label"><strong>Place</strong><small><i id="paint-tool-swatch"></i><span id="paint-tool-mode">Paint</span></small></span><kbd>W</kbd></button>
-        <button type="button" data-tool="sculpt" aria-pressed="false" popovertarget="sculpt-tool-popup">${icon('push')}<span class="tool-label"><strong>Sculpt</strong><small id="sculpt-tool-mode">Push/Pull</small></span><kbd>S</kbd></button>
-        <button type="button" data-tool="layer" aria-pressed="false" popovertarget="layer-panel">${icon('layers')}<span class="tool-label"><strong>Layer</strong><small id="layer-tool-mode">Layer 1</small></span><kbd>L</kbd></button>
+        <div class="tool-slot">
+          <button type="button" class="tool-expand" data-tool-popup="select" popovertarget="select-tool-popup" aria-label="Expand Select options" title="Select options">${icon('chevron')}</button>
+          <button type="button" data-tool="select" aria-pressed="false">${icon('select')}<span class="tool-label"><strong>Select</strong><small id="select-tool-mode">Point</small></span><kbd>Q</kbd></button>
+        </div>
+        <div class="tool-slot">
+          <button type="button" class="tool-expand" data-tool-popup="paint" popovertarget="paint-tool-popup" aria-label="Expand Place options" title="Place options">${icon('chevron')}</button>
+          <button type="button" data-tool="paint" aria-pressed="false">${icon('paint')}<span class="tool-label"><strong>Place</strong><small><i id="paint-tool-swatch"></i><span id="paint-tool-mode">Paint</span></small></span><kbd>W</kbd></button>
+        </div>
+        <div class="tool-slot">
+          <button type="button" class="tool-expand" data-tool-popup="sculpt" popovertarget="sculpt-tool-popup" aria-label="Expand Sculpt options" title="Sculpt options">${icon('chevron')}</button>
+          <button type="button" data-tool="sculpt" aria-pressed="false">${icon('push')}<span class="tool-label"><strong>Sculpt</strong><small id="sculpt-tool-mode">Push/Pull</small></span><kbd>S</kbd></button>
+        </div>
+        <div class="tool-slot">
+          <button type="button" class="tool-expand" data-tool-popup="layer" popovertarget="layer-panel" aria-label="Expand Layer options" title="Layer options">${icon('chevron')}</button>
+          <button type="button" data-tool="layer" aria-pressed="false">${icon('layers')}<span class="tool-label"><strong>Layer</strong><small id="layer-tool-mode">Layer 1</small></span><kbd>L</kbd></button>
+        </div>
       </nav>
 
       <aside id="layer-panel" class="layer-panel instrument" popover aria-labelledby="layer-panel-title">

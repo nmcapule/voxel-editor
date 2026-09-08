@@ -118,7 +118,6 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
   const layerCounts = new Map<number, number>()
   const toolPopups = [...app.querySelectorAll<HTMLElement>('.tool-popup, .layer-panel')]
   let toastTimer: ReturnType<typeof setTimeout> | undefined
-  let hoverPopupTimer: ReturnType<typeof setTimeout> | undefined
   let shortcutPrefix: 'q' | 'w' | 's' | undefined
   let shortcutTimer: ReturnType<typeof setTimeout> | undefined
 
@@ -589,46 +588,14 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     for (const popup of toolPopups) if (popup.matches(':popover-open')) popup.hidePopover()
   }
 
-  function popupForTrigger(trigger: HTMLButtonElement) {
-    const id = trigger.getAttribute('popovertarget')
-    return id ? app.querySelector<HTMLElement>(`#${CSS.escape(id)}`) : null
-  }
-
   function showToolPopup(tool: Tool) {
-    clearHoverPopupTimer()
-    const trigger = app.querySelector<HTMLButtonElement>(`.tool-dock button[data-tool="${tool}"]`)
-    const popup = trigger && popupForTrigger(trigger)
-    if (!trigger || !popup) return
+    const trigger = app.querySelector<HTMLButtonElement>(`.tool-dock button[data-tool-popup="${tool}"]`)
+    const popup = trigger?.popoverTargetElement
+    if (!trigger || !(popup instanceof HTMLElement)) return
     trigger.focus({ preventScroll: true })
     if (!popup.matches(':popover-open')) popup.showPopover()
     ;(popup.querySelector<HTMLElement>('.tool-mode-list [aria-pressed="true"]')
       ?? popup.querySelector<HTMLElement>('button:not(:disabled), input:not(:disabled)'))?.focus({ preventScroll: true })
-  }
-
-  function clearHoverPopupTimer() {
-    if (hoverPopupTimer) clearTimeout(hoverPopupTimer)
-    hoverPopupTimer = undefined
-  }
-
-  function scheduleHoverPopupClose(trigger: HTMLButtonElement, popup: HTMLElement) {
-    clearHoverPopupTimer()
-    hoverPopupTimer = setTimeout(() => {
-      hoverPopupTimer = undefined
-      if (!trigger.matches(':hover') && !popup.matches(':hover, :focus-within') && popup.matches(':popover-open')) popup.hidePopover()
-    }, 140)
-  }
-
-  for (const trigger of app.querySelectorAll<HTMLButtonElement>('.tool-dock button[data-tool][popovertarget]')) {
-    const popup = popupForTrigger(trigger)
-    if (!popup) continue
-    on(trigger, 'pointerenter', event => {
-      if (event.pointerType !== 'mouse') return
-      clearHoverPopupTimer()
-      if (!popup.matches(':popover-open')) popup.showPopover()
-    })
-    on(trigger, 'pointerleave', event => { if (event.pointerType === 'mouse') scheduleHoverPopupClose(trigger, popup) })
-    on(popup, 'pointerenter', clearHoverPopupTimer)
-    on(popup, 'pointerleave', event => { if (event.pointerType === 'mouse') scheduleHoverPopupClose(trigger, popup) })
   }
 
   function setTool(tool: Tool) {
@@ -1082,6 +1049,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     }
     const toolButton = target.closest<HTMLButtonElement>('button[data-tool]')
     if (toolButton) {
+      closeToolPopups()
       setTool(toolButton.dataset.tool as Tool)
       return
     }
@@ -1396,7 +1364,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
           // The application drains its external queue first; standalone mounts drain here.
           await localQueue.dispatch({ command: { type: 'save.flush' }, source: 'ui', editorGeneration })
           disposed = true; contextChanged(); lifetime.abort()
-          clearTimeout(saveTimer); clearTimeout(toastTimer); clearTimeout(hoverPopupTimer); clearTimeout(shortcutTimer)
+          clearTimeout(saveTimer); clearTimeout(toastTimer); clearTimeout(shortcutTimer)
           modelLibrary.dispose(); renderer.dispose(); app.replaceChildren()
         } finally {
           if (!disposed) { app.inert = inert; viewportRoot.inert = viewportInert }

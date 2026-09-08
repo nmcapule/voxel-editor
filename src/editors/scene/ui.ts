@@ -155,6 +155,12 @@ export function mountSceneUI(root: HTMLElement, host: SceneUIHost, keyboardRoot:
         <label class="select-row"><span>Camera</span><select data-scene-setting="projection"><option value="orthographic">Orthographic</option><option value="perspective">Perspective</option></select></label>
         <label class="toggle-row"><span>Progressive PBR</span><input type="checkbox" data-scene-setting="pathTracing" aria-describedby="scene-pbr-help"></label>
         <p id="scene-pbr-help" class="scene-note">Progressive PBR uses full-scene detail in Render mode. Over-budget scenes fall back to adaptive raster.</p>
+        <label class="toggle-row"><span>Miniature photography</span><input type="checkbox" data-scene-setting="tiltShift" aria-describedby="scene-tilt-shift-help" aria-controls="scene-tilt-shift-controls"></label>
+        <p id="scene-tilt-shift-help" class="scene-note">A tilt-shift effect visible only in Render mode and included in PNG captures from Render mode.</p>
+        <div id="scene-tilt-shift-controls" hidden>
+          ${([['tiltShiftStrength', 'Blur strength'], ['tiltShiftFocus', 'Focus position'], ['tiltShiftWidth', 'Sharp band width']] as const).map(([key, label]) => `<label class="range-row"><span>${label}<output id="scene-output-${key}" for="scene-${key}"></output></span><input id="scene-${key}" type="range" data-scene-setting="${key}" aria-label="${label}" aria-describedby="scene-tilt-shift-band-help" min="0" max="1" step="0.01"></label>`).join('')}
+          <p id="scene-tilt-shift-band-help" class="scene-note">Focus runs from 0% at the top to 100% at the bottom. Sharp band width is a percentage of image height.</p>
+        </div>
         <label class="color-row"><span>Backdrop</span><input type="color" data-scene-setting="background"></label>
         ${([['ambient', 'Ambient light', 0, 3, 0.1], ['light', 'Key light', 0, 5, 0.1], ['lightAzimuth', 'Light angle', -180, 180, 1]] as const).map(([key, label, min, max, step]) => `<label class="range-row"><span>${label}<output id="scene-output-${key}"></output></span><input type="range" data-scene-setting="${key}" aria-label="${label}" min="${min}" max="${max}" step="${step}"></label>`).join('')}
         ${([['ambientOcclusion', 'Ambient occlusion'], ['shadows', 'Ground shadows'], ['grid', 'Editing grid']] as const).map(([key, label]) => `<label class="toggle-row"><span>${label}</span><input type="checkbox" data-scene-setting="${key}"></label>`).join('')}
@@ -597,9 +603,9 @@ export function mountSceneUI(root: HTMLElement, host: SceneUIHost, keyboardRoot:
       if (input instanceof HTMLInputElement && input.type === 'checkbox') input.checked = Boolean(data.settings[key])
       else if (document.activeElement !== input) input.value = String(data.settings[key])
       input.disabled = busy
-      const output = element.querySelector(`#scene-output-${key}`)
-      if (output) output.textContent = `${data.settings[key]}${key === 'lightAzimuth' ? ' deg' : ''}`
+      updateSettingOutput(input)
     }
+    $('#scene-tilt-shift-controls').hidden = !data.settings.tiltShift
     $<HTMLInputElement>('#scene-snap').disabled = busy
     $<HTMLSelectElement>('#scene-capture-quality').disabled = busy
     saveForm.querySelector('fieldset')!.disabled = busy
@@ -805,6 +811,21 @@ export function mountSceneUI(root: HTMLElement, host: SceneUIHost, keyboardRoot:
         }, kind === 'models' ? 'Inserting model...' : 'Opening scene...', $('#scene-library-message'))
       }
     } catch (error) { report(error) }
+  })
+
+  function updateSettingOutput(input: HTMLInputElement | HTMLSelectElement) {
+    const key = input.dataset.sceneSetting!
+    const output = element.querySelector(`#scene-output-${key}`)
+    if (!output) return
+    const text = key.startsWith('tiltShift') ? `${Math.round(Number(input.value) * 100)}%` : `${input.value}${key === 'lightAzimuth' ? ' deg' : ''}`
+    output.textContent = text
+    input.setAttribute('aria-valuetext', text)
+  }
+
+  on($('#scene-panel-render'), 'input', event => {
+    const input = event.target as HTMLInputElement
+    // Keep one undo entry per slider change; dragging only previews its numeric value.
+    if (!blocked() && input.type === 'range' && input.dataset.sceneSetting) updateSettingOutput(input)
   })
 
   on(element, 'change', event => {

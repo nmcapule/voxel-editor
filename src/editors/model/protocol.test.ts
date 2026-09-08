@@ -4,15 +4,69 @@ import { inspectionViews } from './inspection'
 import { PROTOCOL, SerialCommandQueue, parseRequest } from './protocol'
 import { decodeProjectSnapshot, encodeProjectSnapshot, parseProjectSnapshot } from '../../shared/voxel/snapshot'
 import { restoreProjectSnapshot, snapshotProject } from './storage'
-import { type ViewSettings } from '../../shared/rendering/settings'
+import { DEFAULT_SETTINGS } from '../../shared/rendering/settings'
 
-const settings: ViewSettings = {
-  background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42,
-  ambientOcclusion: true, shadows: true, grid: true, faceGrid: false, meshVertices: false, meshTriangles: false,
-  projection: 'orthographic', pathTracing: true,
-}
+const settings = { ...DEFAULT_SETTINGS }
 
 describe('scripting protocol', () => {
+  test('miniature photography patches accept only booleans and finite fractions', () => {
+    const parse = (patch: unknown) => parseRequest({ protocol: PROTOCOL, id: 'miniature', command: { type: 'settings.update', patch } }).command
+    for (const value of [false, true]) expect(parse({ tiltShift: value })).toEqual({ type: 'settings.update', patch: { tiltShift: value } })
+    for (const value of [null, 0, 1, NaN, 'false', 'true', [], {}]) expect(() => parse({ tiltShift: value })).toThrow('tiltShift must be a boolean')
+    for (const key of ['tiltShiftStrength', 'tiltShiftFocus', 'tiltShiftWidth']) {
+      for (const value of [0, 0.01, 0.5, 1]) expect(parse({ [key]: value })).toEqual({ type: 'settings.update', patch: { [key]: value } })
+      for (const value of [null, NaN, Infinity, -Infinity, -0.01, 1.01, true, false, '0.5', [], {}]) {
+        expect(() => parse({ [key]: value })).toThrow(`${key} must be a finite number from 0 to 1`)
+      }
+    }
+    for (const patch of [null, [], {}, { tiltShiftStrength: undefined }, { tiltShiftEnabled: true }]) expect(() => parse(patch)).toThrow()
+  })
+
+  test('miniature photography persists in project snapshots and local recovery with legacy defaults', () => {
+    expect(DEFAULT_SETTINGS).toMatchObject({ tiltShift: false, tiltShiftStrength: 0.5, tiltShiftFocus: 0.5, tiltShiftWidth: 0.3 })
+    const document = new VoxelDocument()
+    document.setVoxel(1, 2, 3, 5)
+    const enabled = { ...settings, tiltShift: true, tiltShiftStrength: 0.81, tiltShiftFocus: 0, tiltShiftWidth: 1 }
+    const snapshot = encodeProjectSnapshot(document, enabled), stored = snapshotProject(document, enabled)
+    const decoded = decodeProjectSnapshot(JSON.parse(JSON.stringify(snapshot)))
+    expect(decoded.settings).toEqual(enabled)
+    expect(encodeProjectSnapshot(decoded.document, decoded.settings)).toEqual(snapshot)
+    const recovered = restoreProjectSnapshot(structuredClone(stored))!
+    expect(recovered.settings).toEqual(enabled)
+    expect(snapshotProject(recovered.document, recovered.settings)).toEqual(stored)
+    expect(snapshot.version).toBe(1)
+    expect(stored.version).toBe(3)
+
+    const keys = ['tiltShift', 'tiltShiftStrength', 'tiltShiftFocus', 'tiltShiftWidth'] as const
+    for (const missing of [...keys.map(key => [key]), keys]) {
+      const legacy = structuredClone(snapshot), legacyStored = structuredClone(stored), expected = { ...enabled }
+      for (const key of missing) {
+        Reflect.deleteProperty(legacy.settings, key)
+        Reflect.deleteProperty(legacyStored.settings, key)
+        Reflect.set(expected, key, DEFAULT_SETTINGS[key])
+      }
+      expect(decodeProjectSnapshot(legacy).settings).toEqual(expected)
+      for (const version of [1, 2, 3] as const) expect(restoreProjectSnapshot({ ...legacyStored, version })!.settings).toEqual(expected)
+    }
+    for (const key of keys) for (const value of key === 'tiltShift' ? [null, 0, 'false', NaN, []] : [null, NaN, Infinity, -0.01, 1.01, '0.5', true, {}]) {
+      const invalid = { ...enabled, [key]: value }
+      expect(() => parseProjectSnapshot({ ...snapshot, settings: invalid })).toThrow(key)
+      expect(() => restoreProjectSnapshot({ ...stored, settings: invalid })).toThrow(key)
+    }
+    for (const key of ['background', 'ambient', 'light', 'lightAzimuth', 'ambientOcclusion', 'shadows', 'grid', 'faceGrid', 'projection', 'pathTracing']) {
+      const incomplete = structuredClone(snapshot)
+      Reflect.deleteProperty(incomplete.settings, key)
+      expect(() => parseProjectSnapshot(incomplete)).toThrow('snapshot.settings is incomplete')
+    }
+    const legacy = structuredClone(stored)
+    for (const key of keys) Reflect.deleteProperty(legacy.settings, key)
+    Object.assign(legacy.settings, { roughness: 0.4, metalness: 0.2 })
+    legacy.materials = undefined
+    const restored = restoreProjectSnapshot({ ...legacy, version: 1 })!
+    expect(restored.settings).toEqual(settings)
+    expect(restored.document.materials[5]).toMatchObject({ roughness: 0.4, metalness: 0.2 })
+  })
+
   test('mesh overlay settings updates accept only booleans', () => {
     for (const flag of ['meshVertices', 'meshTriangles'] as const) {
       const parse = (value: unknown) => parseRequest({ protocol: PROTOCOL, id: flag, command: { type: 'settings.update', patch: { [flag]: value } } }).command

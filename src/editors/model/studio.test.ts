@@ -2,24 +2,24 @@ import { describe, expect, test } from 'bun:test'
 import { VoxelDocument } from '../../shared/voxel/document'
 import { Studio, type StudioCommand } from './studio'
 import { StudioCommandError } from '../../shared/errors'
-import type { ViewSettings } from '../../shared/rendering/settings'
+import { DEFAULT_SETTINGS } from '../../shared/rendering/settings'
 
-const settings: ViewSettings = {
-  background: '#dfe7ec',
-  ambient: 1.2,
-  light: 2.4,
-  lightAzimuth: 42,
-  ambientOcclusion: true,
-  shadows: true,
-  grid: true,
-  faceGrid: false,
-  meshVertices: false,
-  meshTriangles: false,
-  projection: 'orthographic',
-  pathTracing: true,
-}
+const settings = { ...DEFAULT_SETTINGS }
 
 describe('studio command kernel', () => {
+  test('miniature settings preview and save without changing render mode, projection or voxel history', () => {
+    const studio = new Studio(new VoxelDocument(), settings)
+    const original = studio.document
+    for (const patch of [{ tiltShift: true }, { tiltShiftStrength: 0.7 }, { tiltShiftFocus: 0.2 }, { tiltShiftWidth: 0.4 }]) {
+      expect(studio.execute({ type: 'settings.update', patch })).toMatchObject({ changed: true, effects: { settingsChanged: true, save: true } })
+      expect(studio.renderMode).toBe(false)
+      expect(studio.settings.projection).toBe(settings.projection)
+      expect(studio.document).toBe(original)
+      expect(studio.canUndo).toBe(false)
+    }
+    expect(studio.settings).toMatchObject({ tiltShift: true, tiltShiftStrength: 0.7, tiltShiftFocus: 0.2, tiltShiftWidth: 0.4 })
+  })
+
   test('camera and transient editor activity do not invalidate a document revision', () => {
     const studio = new Studio(new VoxelDocument(), settings)
     studio.execute({ type: 'edit.setVoxels', voxels: [{ x: 1, y: 1, z: 1, color: 5 }] })

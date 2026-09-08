@@ -4,6 +4,7 @@ import { PathTracingSceneGenerator } from 'three-gpu-pathtracer/src/index.js'
 import { VoxelDocument, chunkId } from '../../shared/voxel/document'
 import { VoxelRenderer, traceGridRay, type RendererCallbacks } from './renderer'
 import { Viewport } from '../../shared/rendering/viewport'
+import { DEFAULT_SETTINGS } from '../../shared/rendering/settings'
 import { meshChunk } from '../../shared/voxel/mesher'
 
 test('inside-solid rays never expose an invalid action normal', () => {
@@ -296,8 +297,7 @@ test('installed material-local meshes and vertex overlays do not multiply path-t
 test('a model borrows one viewport, removes input hooks and jobs on unmount, and restores its own view on remount', () => {
   const canvas = Object.assign(new EventTarget(), { width: 320, height: 240 })
   let viewportDisposals = 0, hovers = 0, materialDisposals = 0
-  const settings = { background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42, ambientOcclusion: true,
-    shadows: true, grid: true, faceGrid: false, meshVertices: false, meshTriangles: false, projection: 'orthographic' as const, pathTracing: false }
+  const settings = { ...DEFAULT_SETTINGS, pathTracing: false }
   const view = { projection: 'orthographic' as const, position: { x: 4, y: 8, z: 12 }, target: { x: 0, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, orthographicSpan: 24, viewport: { width: 320, height: 240 } }
   const viewport = Object.assign(Object.create(Viewport.prototype), {
     renderer: { domElement: canvas, shadowMap: {} }, settings, renderMode: false,

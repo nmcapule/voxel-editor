@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
 import type { WebGLPathTracer } from 'three-gpu-pathtracer'
 import { RasterPipeline } from './raster-pipeline'
+import { TiltShift } from './tilt-shift'
 import type { ViewSettings } from './settings'
 import type { CameraSnapshot, SceneContent, PreparedSceneContent, ViewportCallbacks, Vector3Value as Vec3 } from './contracts'
 import { sceneShadowVolume, workspaceGridPositions, workspaceGridPlaneVisible } from './stage'
@@ -45,6 +46,8 @@ export class Viewport {
       if (this.rasterFrame !== undefined) cancelAnimationFrame(this.rasterFrame)
       this.rasterFrame = undefined
       this.disposePathTracer()
+      this.tiltShift?.dispose()
+      this.tiltShift = undefined
       this.releaseSceneDetail()
       this.callbacks.onPathTracingStatus?.('Graphics context lost')
     }, options)
@@ -75,6 +78,8 @@ export class Viewport {
   private contextLost = false
   private rasterError?: string
   private presentationDirty = true
+  private tiltShift?: TiltShift
+  private tiltShiftDirty = false
   private environmentTarget: THREE.WebGLRenderTarget
   private ambientEnvironment: THREE.DataTexture
   private grid?: THREE.Group
@@ -232,7 +237,7 @@ export class Viewport {
       if (!this.pathTracer || !this.pathTracingEnabled() || !this.pathTracingReady) return
       try {
         const previousSamples = Math.floor(this.pathTracer.samples)
-        this.pathTracer.renderSample()
+        this.renderPathTrace()
         const samples = Math.floor(this.pathTracer.samples)
         if (this.pathTracer.samples > 0) this.presentationDirty = false
         if (samples > previousSamples) this.recordFrame(samples - previousSamples)
@@ -437,6 +442,7 @@ export class Viewport {
 
   setSettings(settings: ViewSettings) {
     const previous = this.settings
+    this.tiltShiftDirty ||= (['tiltShift', 'tiltShiftStrength', 'tiltShiftFocus', 'tiltShiftWidth'] as const).some(key => settings[key] !== previous[key])
     const projectionChanged = settings.projection !== this.settings.projection
     const pathTracingChanged = settings.pathTracing !== this.settings.pathTracing
     const sceneDependenciesChanged = this.worldScale && (['background', 'ambient', 'light', 'lightAzimuth', 'shadows'] as const).some(key => settings[key] !== previous[key])
@@ -824,14 +830,40 @@ export class Viewport {
     }
   }
 
+  private applyTiltShift() {
+    if (this.renderMode && this.settings.tiltShift && this.settings.tiltShiftStrength > 0) {
+      this.tiltShift ??= new TiltShift()
+      this.tiltShift.render(this.renderer, this.settings)
+    }
+    this.tiltShiftDirty = false
+  }
+
+  private renderPathTrace(pause = false) {
+    const tracer = this.pathTracer!
+    const paused = tracer.pausePathTracing
+    try {
+      if (pause) tracer.pausePathTracing = true
+      tracer.renderSample()
+      this.applyTiltShift()
+      if (pause || tracer.samples > 0) this.presentationDirty = false
+    } finally { tracer.pausePathTracing = paused }
+  }
+
   render() {
-    if (this.disposed || this.contextLost || this.pathTracingEnabled() && this.pathTracingReady) return
-    this.presentationDirty = true
+    if (this.disposed || this.contextLost) return
+    const traced = this.pathTracingEnabled() && this.pathTracingReady
+    if (traced && !this.tiltShiftDirty) return
+    if (!traced) this.presentationDirty = true
     if (this.rasterFrame !== undefined) return
     this.rasterFrame = requestAnimationFrame(() => {
       this.rasterFrame = undefined
-      if (this.disposed || this.contextLost || this.pathTracingEnabled() && this.pathTracingReady) return
-      try { this.renderRaster() }
+      if (this.disposed || this.contextLost) return
+      const traced = this.pathTracingEnabled() && this.pathTracingReady
+      if (traced && !this.tiltShiftDirty) return
+      try {
+        if (traced && !this.presentationDirty) this.renderPathTrace(true)
+        else { this.renderRaster(); this.applyTiltShift() }
+      }
       catch (error) {
         if (this.renderer.getContext().isContextLost()) return
         const message = error instanceof Error ? error.message : 'Realtime rendering failed.'
@@ -877,7 +909,10 @@ export class Viewport {
         this.scene.add(prepared.root)
         this.renderer.shadowMap.needsUpdate = true
       }
-      if (prepared || this.presentationDirty || !this.pathTracingEnabled() || !this.pathTracingReady) this.renderRaster(this.camera, this.raster, !!prepared || !this.pathTracingEnabled())
+      if (prepared || this.presentationDirty || !this.pathTracingEnabled() || !this.pathTracingReady) {
+        this.renderRaster(this.camera, this.raster, !!prepared || !this.pathTracingEnabled())
+        this.applyTiltShift()
+      } else if (this.tiltShiftDirty) this.renderPathTrace(true)
     } finally {
       if (prepared && content) {
         this.scene.remove(prepared.root); parent?.add(prepared.root)
@@ -889,15 +924,15 @@ export class Viewport {
       if (overlays.length) this.render()
     }
     const view = this.getView()
-    const blob = await new Promise<Blob>((resolve, reject) => this.renderer.domElement.toBlob(blob => blob ? resolve(blob) : reject(new Error('Could not capture the viewport.')), 'image/png'))
-    if (prepared && content === this.sceneContent && epoch === this.fullEpoch && this.pathTracingEnabled() && this.pathTracingReady && this.pathTracer) {
-      // Restore the accumulated trace presentation after the exact raster snapshot,
-      // without resetting samples or consuming an extra sample at the 128-sample cap.
-      const paused = this.pathTracer.pausePathTracing
-      try { this.pathTracer.pausePathTracing = true; this.pathTracer.renderSample(); this.presentationDirty = false }
-      finally { this.pathTracer.pausePathTracing = paused }
+    try {
+      const blob = await new Promise<Blob>((resolve, reject) => this.renderer.domElement.toBlob(blob => blob ? resolve(blob) : reject(new Error('Could not capture the viewport.')), 'image/png'))
+      return { blob, view }
+    } finally {
+      if (prepared && content === this.sceneContent && epoch === this.fullEpoch && this.pathTracingEnabled() && this.pathTracingReady && this.pathTracer) {
+        // Restore the trace even when PNG encoding fails, without consuming a sample.
+        this.renderPathTrace(true)
+      }
     }
-    return { blob, view }
   }
 
   /** Synchronous offscreen raster views; never changes the live camera or canvas size. */
@@ -970,6 +1005,7 @@ export class Viewport {
     this.releaseSceneDetail()
     this.controls.dispose()
     this.raster.dispose()
+    this.tiltShift?.dispose()
     for (const object of [this.grid, this.limits, this.ground]) object?.traverse(child => {
       if (!(child instanceof THREE.Mesh || child instanceof THREE.Line)) return
       child.geometry.dispose()

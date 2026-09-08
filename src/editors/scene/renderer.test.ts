@@ -9,12 +9,12 @@ import { Viewport } from '../../shared/rendering/viewport'
 import { sceneShadowVolume } from '../../shared/rendering/stage'
 import { createScene, SceneDocument } from './document'
 import { encodeProjectSnapshot } from '../../shared/voxel/snapshot'
-import type { ViewSettings } from '../../shared/rendering/settings'
+import { DEFAULT_SETTINGS } from '../../shared/rendering/settings'
 import { SCENE_GEOMETRY_BUDGET, type SceneAsset, type SceneTransform } from './types'
 import { describeSceneChunk } from './chunks'
 import * as sceneStorage from './storage'
 
-const defaultSettings: ViewSettings = { background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42, ambientOcclusion: true, shadows: true, grid: true, faceGrid: false, meshVertices: false, meshTriangles: false, projection: 'orthographic', pathTracing: false }
+const defaultSettings = { ...DEFAULT_SETTINGS, pathTracing: false }
 
 function rendererProbe(document: SceneDocument) {
   const camera = new THREE.OrthographicCamera(-1000, 1000, 1000, -1000, 0.1, 10000)

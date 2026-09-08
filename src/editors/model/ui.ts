@@ -197,6 +197,12 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
           <div class="section-heading"><h2>Render</h2><span>Realtime / progressive</span></div>
           <label class="select-row"><span>Camera</span><select id="projection"><option value="orthographic">Orthographic</option><option value="perspective">Perspective</option></select></label>
           <label class="toggle-row"><span>Progressive PBR <output id="path-status" aria-live="polite">Ready</output></span><input id="path-tracing" type="checkbox" aria-label="Progressive PBR"></label>
+          <label class="toggle-row"><span>Miniature photography</span><input id="tilt-shift" type="checkbox" aria-describedby="tilt-shift-help" aria-controls="tilt-shift-controls"></label>
+          <p id="tilt-shift-help" class="panel-note">A tilt-shift effect visible only in Render mode and included in PNG captures from Render mode.</p>
+          <div id="tilt-shift-controls" hidden>
+            ${([['tiltShiftStrength', 'Blur strength', 0.5], ['tiltShiftFocus', 'Focus position', 0.5], ['tiltShiftWidth', 'Sharp band width', 0.3]] as const).map(([key, label, value]) => `<label class="range-row"><span>${label}<output id="${key}-output" for="${key}">${Math.round(value * 100)}%</output></span><input id="${key}" aria-label="${label}" aria-describedby="tilt-shift-band-help" type="range" min="0" max="1" value="${value}" step="0.01"></label>`).join('')}
+            <p id="tilt-shift-band-help" class="panel-note">Focus runs from 0% at the top to 100% at the bottom. Sharp band width is a percentage of image height.</p>
+          </div>
           <label class="color-row"><span>Backdrop</span><input id="background" type="color"></label>
           <label class="range-row"><span>Ambient <output id="ambient-output">1.2</output></span><input id="ambient" aria-label="Ambient light" type="range" min="0" max="3" value="1.2" step="0.1"></label>
           <label class="range-row"><span>Key light <output id="light-output">2.4</output></span><input id="light" aria-label="Key light" type="range" min="0" max="5" value="2.4" step="0.1"></label>

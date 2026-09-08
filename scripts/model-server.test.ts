@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { relative, resolve } from 'node:path'
 import { chunkId, VoxelDocument } from '../src/shared/voxel/document'
 import { decodeProjectSnapshot, encodeProjectSnapshot } from '../src/shared/voxel/snapshot'
+import { DEFAULT_SETTINGS } from '../src/shared/rendering/settings'
 import { createModelServer, PROJECT_ROOT } from './model-server'
 import { MAX_REQUEST_BYTES } from './http'
 import { type ModelSummary } from '../src/shared/library/types'
@@ -23,11 +24,7 @@ document.setVoxel(1, 2, 3, 6)
 upper.name = 'Hidden layer'
 upper.visible = false
 upper.locked = true
-const snapshot = encodeProjectSnapshot(document, {
-  background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42,
-  ambientOcclusion: true, shadows: true, grid: true, faceGrid: false, meshVertices: false, meshTriangles: false,
-  projection: 'orthographic', pathTracing: true,
-})
+const snapshot = encodeProjectSnapshot(document, { ...DEFAULT_SETTINGS })
 
 let directory: string
 let library: ReturnType<typeof createModelServer>

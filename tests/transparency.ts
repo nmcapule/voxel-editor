@@ -5,8 +5,8 @@ import type { Object3D } from 'three'
 import { faceViews, projectFaces } from '../src/shared/voxel/projections'
 import { inspectionViews, type InspectionView } from '../src/editors/model/inspection'
 import { VoxelRenderer, type RendererCallbacks } from '../src/editors/model/renderer'
-import type { ViewSettings } from '../src/shared/rendering/settings'
-import { runRenderingChecks, runRendererStateChecks, runPathTracingChecks } from './rendering'
+import { DEFAULT_SETTINGS, type ViewSettings } from '../src/shared/rendering/settings'
+import { runRenderingChecks, runRendererStateChecks, runPathTracingChecks, runTiltShiftChecks } from './rendering'
 
 const host = document.createElement('div')
 host.style.cssText = 'width:100vw;height:100vh'
@@ -18,9 +18,7 @@ const callbacks = new Proxy({
   onPathTracingStatus: (message: string) => { status = message },
 }, { get: (target, key) => target[key as keyof typeof target] ?? (() => {}) }) as unknown as RendererCallbacks
 const settings: ViewSettings = {
-  background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42,
-  ambientOcclusion: false, shadows: false, grid: false, faceGrid: false, meshVertices: false, meshTriangles: false,
-  projection: 'perspective', pathTracing: true,
+  ...DEFAULT_SETTINGS, ambientOcclusion: false, shadows: false, grid: false, projection: 'perspective',
 }
 const renderer = new VoxelRenderer(host, new VoxelDocument(), settings, callbacks)
 const viewport = renderer.viewport
@@ -241,6 +239,7 @@ Object.assign(window, { transparencyTest: {
   runRenderingChecks: () => runRenderingChecks(renderer, settings, errors),
   runRendererStateChecks: () => runRendererStateChecks(renderer),
   runPathTracingChecks: (samples = 16) => runPathTracingChecks(renderer, settings, errors, samples),
+  runTiltShiftChecks: () => runTiltShiftChecks(renderer, settings, errors),
   get status() { return status },
 } })
 await scene('pool')

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { chunkCoords, VoxelDocument } from '../src/shared/voxel/document'
 import { encodeProjectSnapshot } from '../src/shared/voxel/snapshot'
+import { DEFAULT_SETTINGS } from '../src/shared/rendering/settings'
 import { parseSceneManifest } from '../src/editors/scene/document'
 import type { SceneManifest } from '../src/editors/scene/types'
 import * as storage from '../src/editors/scene/storage'
@@ -20,11 +21,7 @@ model.palette[80] = 0
 model.paletteOccupied[80] = model.paletteOccupied[81] = 1
 model.materials[80] = { name: 'Glass', roughness: 0.12, metalness: 0.3, emissiveIntensity: 0.4, opacity: 0.9, transmission: 0.7, ior: 1.4 }
 model.replaceChunk(0, [{ layerId: 1, data: bytes }])
-const project = encodeProjectSnapshot(model, {
-  background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42,
-  ambientOcclusion: true, shadows: true, grid: true, faceGrid: false, meshVertices: false, meshTriangles: false,
-  projection: 'orthographic', pathTracing: true,
-})
+const project = encodeProjectSnapshot(model, { ...DEFAULT_SETTINGS })
 function fixture(): SceneManifest {
   const { chunks: _chunks, ...metadata } = structuredClone(project)
   const assetIds = [crypto.randomUUID(), crypto.randomUUID()]

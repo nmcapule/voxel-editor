@@ -715,3 +715,67 @@ export async function runPathTracingChecks(renderer: VoxelRenderer, settings: Vi
     }
   })
 }
+
+export async function runTiltShiftChecks(renderer: VoxelRenderer, settings: ViewSettings, errors: string[]) {
+  return withViewport(renderer, 256, async () => {
+    const { VoxelDocument } = await import('../src/shared/voxel/document')
+    const document = new VoxelDocument()
+    document.palette[1] = 0xffffff; document.palette[2] = 0x101010
+    for (const index of [1, 2]) Object.assign(document.materials[index], { roughness: 1, metalness: 0, transmission: 0, opacity: 1 })
+    for (let x = 0; x < 32; x++) fill(document, x % 2 + 1, x, 0, 15, x + 1, 32, 16)
+    const viewport = renderer.viewport
+    const options: ViewSettings = { ...settings, pathTracing: false, ambientOcclusion: false, shadows: false,
+      grid: false, faceGrid: false, meshVertices: false, meshTriangles: false,
+      tiltShift: false, tiltShiftStrength: 1, tiltShiftFocus: 0.5, tiltShiftWidth: 0.2 }
+    const errorStart = errors.length
+    renderer.setDocument(document)
+    await renderer.whenMeshIdle()
+    const results = []
+    for (const projection of ['orthographic', 'perspective'] as const) {
+      options.projection = projection
+      renderer.setSettings(options)
+      renderer.setView({ position: { x: 0, y: 16, z: 64 }, target: { x: 0, y: 16, z: 0 }, up: { x: 0, y: 1, z: 0 }, zoom: 1, orthographicSpan: 38, fov: 34 })
+      renderer.setRenderMode(true)
+      const raw = await image(renderer)
+      renderer.setSettings({ ...options, tiltShift: true })
+      const blurred = await image(renderer)
+      const center = difference(patch(raw, 128, 128, 12), patch(blurred, 128, 128, 12))
+      const edge = difference(patch(raw, 128, 36, 12), patch(blurred, 128, 36, 12))
+      check(center.max <= 1, `${projection}: sharp band must preserve pixels: ${JSON.stringify(center)}`)
+      check(edge.mean > 3, `${projection}: outer band must visibly blur: ${JSON.stringify(edge)}`)
+      check(difference(blurred.data, (await image(renderer)).data).max === 0, 'Repeated PNG capture must not compound blur')
+      renderer.setSettings({ ...options, tiltShift: true, tiltShiftFocus: 36 / 256 })
+      check(difference(patch(raw, 128, 36, 12), patch(await image(renderer), 128, 36, 12)).max <= 1, 'Focus position must be measured from the top')
+      renderer.setSettings({ ...options, tiltShift: true, tiltShiftStrength: 0 })
+      check(difference(raw.data, (await image(renderer)).data).max === 0, 'Zero strength must preserve the original image')
+      renderer.setSettings({ ...options, tiltShift: true })
+      renderer.setRenderMode(false)
+      const editing = await image(renderer)
+      renderer.setSettings(options)
+      check(difference(editing.data, (await image(renderer)).data).max === 0, 'Edit mode must remain unfiltered')
+      results.push({ projection, center, edge })
+    }
+
+    renderer.setSettings({ ...options, pathTracing: true, tiltShift: true })
+    renderer.setRenderMode(true)
+    await until(() => Boolean(Reflect.get(viewport, 'pathTracer')) || Reflect.get(viewport, 'pathTracingFailed'), 'tilt-shift tracer initialization', 60000)
+    const tracer = Reflect.get(viewport, 'pathTracer')
+    check(tracer, errors.slice(errorStart).join('\n') || 'Tracer initialization failed')
+    await until(() => {
+      check(!Reflect.get(viewport, 'pathTracingFailed'), errors.slice(errorStart).join('\n'))
+      return Reflect.get(viewport, 'pathTracingReady') && tracer.samples >= 128
+    }, '128 miniature PBR samples, including low-resolution preview and fade', 180000)
+    check(tracer.samples === 128, 'PBR must stop at the existing sample cap')
+    const tracedBlur = await image(renderer)
+    renderer.setSettings({ ...options, pathTracing: true })
+    const tracedRaw = await image(renderer)
+    check(tracer.samples === 128, 'Changing the effect must not reset or consume PBR samples')
+    check(difference(tracedRaw.data, tracedBlur.data).mean > 1, 'The converged PBR image must contain tilt-shift blur')
+    renderer.setSettings({ ...options, pathTracing: true, tiltShift: true })
+    check(difference(tracedBlur.data, (await image(renderer)).data).max <= 1, 'Re-enabling tilt-shift must re-present the unfiltered trace')
+    check(difference(tracedBlur.data, (await image(renderer)).data).max <= 1, 'Capturing the trace twice must not compound blur')
+    check(errors.length === errorStart, errors.slice(errorStart).join('\n'))
+    check(viewport.renderer.getContext().getError() === 0, 'Tilt-shift must not introduce WebGL errors')
+    return { raster: results, samples: tracer.samples, tracedDifference: difference(tracedRaw.data, tracedBlur.data) }
+  })
+}

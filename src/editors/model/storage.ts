@@ -1,4 +1,4 @@
-import type { ViewSettings } from '../../shared/rendering/settings'
+import { DEFAULT_SETTINGS, parseSettings, type ViewSettings } from '../../shared/rendering/settings'
 import type { LibraryLink } from '../../shared/library/types'
 import { VoxelDocument, type Dimensions, type LayerChunkSnapshot, type PaletteMaterial, type VoxelLayer } from '../../shared/voxel/document'
 
@@ -77,9 +77,10 @@ export async function loadProject() {
 
 export function restoreProjectSnapshot(stored: StoredProject) {
   if (!stored || stored.version !== 1 && stored.version !== 2 && stored.version !== 3) return undefined
-  const legacy = stored.settings as ViewSettings & Partial<PaletteMaterial>
-  const materials = stored.materials ?? (legacy.roughness === undefined && legacy.metalness === undefined ? undefined
-    : Array.from({ length: 256 }, () => ({ roughness: legacy.roughness ?? 0.68, metalness: legacy.metalness ?? 0.02 })))
+  const { roughness, metalness, ...view } = stored.settings as ViewSettings & Partial<PaletteMaterial>
+  const settings = parseSettings({ ...DEFAULT_SETTINGS, ...view })
+  const materials = stored.materials ?? (roughness === undefined && metalness === undefined ? undefined
+    : Array.from({ length: 256 }, () => ({ roughness: roughness ?? 0.68, metalness: metalness ?? 0.02 })))
   const document = new VoxelDocument(stored.dimensions, stored.name, new Uint32Array(stored.palette), materials, stored.version >= 2 ? stored.layers : undefined, stored.activeLayerId, stored.paletteOccupied ? new Uint8Array(stored.paletteOccupied) : undefined)
   if (stored.version === 3) {
     const chunks = new Map<number, LayerChunkSnapshot[]>()
@@ -93,7 +94,7 @@ export function restoreProjectSnapshot(stored: StoredProject) {
   } else {
     for (const chunk of stored.chunks) document.replaceLegacyChunk(chunk.id, new Uint8Array(chunk.data), stored.version === 2 && chunk.layerData ? new Uint16Array(chunk.layerData) : undefined)
   }
-  return { document, settings: { ...stored.settings, meshVertices: stored.settings.meshVertices ?? false, meshTriangles: stored.settings.meshTriangles ?? false }, library: stored.library }
+  return { document, settings, library: stored.library }
 }
 
 export async function clearProject() {

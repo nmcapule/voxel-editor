@@ -51,6 +51,18 @@ composited linear background, preserving material maps, transmission and roughne
 Source materials and scene visibility are restored before returning, including failures.
 Inspection uses its own offscreen pipeline without changing the live camera or canvas.
 
+Miniature photography is an optional Render-mode finishing effect shared by raster and
+PBR, including low-resolution previews and PNG captures. `tilt-shift.ts` copies the
+completed canvas on the GPU and applies two nine-tap blur passes outside a horizontal
+sharp band. It filters display-referred ACES/sRGB values, not physical depth or HDR
+lighting, and does not change the camera. The two RGBA8 surfaces allocate lazily (about
+8 bytes per output pixel), resize with the drawing buffer, and release on context loss
+and disposal. Disabled/zero-strength and Edit-mode frames skip the copy and passes.
+Effect-only changes re-present the accumulated trace paused, including at the 128-sample
+cap, rather than resetting samples. Inspection and library thumbnails remain unfiltered.
+Run `transparencyTest.runTiltShiftChecks()` in `/tests/transparency.html` for GPU pixel
+checks of the focus band, both projections, current PNGs and converged PBR presentation.
+
 In the model editor, geometry/visibility/material-assignment changes request trace
 preparation after meshing.
 Color, scalar material properties and maps use material updates; lighting/background use

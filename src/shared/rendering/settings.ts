@@ -13,18 +13,23 @@ export interface ViewSettings {
   meshTriangles: boolean
   projection: 'orthographic' | 'perspective'
   pathTracing: boolean
+  tiltShift: boolean
+  tiltShiftStrength: number
+  tiltShiftFocus: number
+  tiltShiftWidth: number
 }
 
 export const DEFAULT_SETTINGS: ViewSettings = {
   background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42,
   ambientOcclusion: true, shadows: true, grid: true, faceGrid: false,
   meshVertices: false, meshTriangles: false, projection: 'orthographic', pathTracing: true,
+  tiltShift: false, tiltShiftStrength: 0.5, tiltShiftFocus: 0.5, tiltShiftWidth: 0.3,
 }
 
 export function settingsPatch(value: unknown): Partial<ViewSettings> {
   const input = record(value, 'command.patch')
   const patch: Partial<ViewSettings> = {}
-  const allowed = new Set(['background', 'ambient', 'light', 'lightAzimuth', 'ambientOcclusion', 'shadows', 'grid', 'faceGrid', 'meshVertices', 'meshTriangles', 'projection', 'pathTracing'])
+  const allowed = new Set(Object.keys(DEFAULT_SETTINGS))
   for (const key of Object.keys(input)) if (!allowed.has(key)) throw invalid(`Unknown setting: ${key}.`)
   if (input.background !== undefined) {
     const background = stringValue(input.background, 'command.patch.background', 7)
@@ -41,6 +46,10 @@ export function settingsPatch(value: unknown): Partial<ViewSettings> {
   if (input.meshVertices !== undefined) patch.meshVertices = booleanValue(input.meshVertices, 'command.patch.meshVertices')
   if (input.meshTriangles !== undefined) patch.meshTriangles = booleanValue(input.meshTriangles, 'command.patch.meshTriangles')
   if (input.pathTracing !== undefined) patch.pathTracing = booleanValue(input.pathTracing, 'command.patch.pathTracing')
+  if (input.tiltShift !== undefined) patch.tiltShift = booleanValue(input.tiltShift, 'command.patch.tiltShift')
+  for (const key of ['tiltShiftStrength', 'tiltShiftFocus', 'tiltShiftWidth'] as const) {
+    if (input[key] !== undefined) patch[key] = numberValue(input[key], `command.patch.${key}`, 0, 1)
+  }
   if (input.projection !== undefined) patch.projection = oneOf(input.projection, 'command.patch.projection', ['orthographic', 'perspective'] as const)
   if (!Object.keys(patch).length) throw invalid('command.patch must change at least one setting.')
   return patch
@@ -51,5 +60,5 @@ export function parseSettings(value: unknown): ViewSettings {
   const patch = settingsPatch(input)
   const required = ['background', 'ambient', 'light', 'lightAzimuth', 'ambientOcclusion', 'shadows', 'grid', 'faceGrid', 'projection', 'pathTracing'] as const
   if (required.some(property => patch[property] === undefined)) throw invalid('snapshot.settings is incomplete.')
-  return { meshVertices: false, meshTriangles: false, ...patch } as ViewSettings
+  return { ...DEFAULT_SETTINGS, ...patch }
 }

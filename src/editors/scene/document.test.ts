@@ -6,13 +6,9 @@ import { createScene, instanceMatrix, parseSceneAsset, parseSceneManifest, Scene
 import { deactivateSceneRecovery, getSceneChunkCacheStats, hasSceneBlob, loadSceneAsset, loadSceneChunk, loadSceneRecovery, putSceneAsset, putSceneBlob, saveSceneDocumentRecovery, saveSceneRecovery } from './storage'
 import { describeSceneChunk, validateSceneChunkDescriptor } from './chunks'
 import type { SceneAsset, SceneChunk, SceneCommand, SceneInstance, SceneManifest } from './types'
-import type { ViewSettings } from '../../shared/rendering/settings'
+import { DEFAULT_SETTINGS } from '../../shared/rendering/settings'
 
-const settings: ViewSettings = {
-  background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42,
-  ambientOcclusion: true, shadows: true, grid: true, faceGrid: false, meshVertices: false, meshTriangles: false,
-  projection: 'orthographic', pathTracing: true,
-}
+const settings = { ...DEFAULT_SETTINGS }
 const hash = 'a'.repeat(64)
 const zero = { x: 0, y: 0, z: 0 }, unit = { x: 1, y: 1, z: 1 }, rotation = { x: 0, y: 0, z: 0, w: 1 }
 const fullLod = new Array<number>(64).fill(80)
@@ -37,6 +33,57 @@ function fixture(instances = [instance()], assets = [asset()]): SceneManifest {
 }
 
 describe('scene boundary', () => {
+  test('miniature settings round-trip and legacy fields default without weakening required settings', () => {
+    const enabled = { ...settings, tiltShift: true, tiltShiftStrength: 0.9, tiltShiftFocus: 1, tiltShiftWidth: 0 }
+    const manifest = { ...fixture(), settings: enabled }
+    manifest.assets = manifest.assets.map(asset => ({ ...asset, model: { ...asset.model, settings: enabled } }))
+    const restored = new SceneDocument(JSON.parse(JSON.stringify(manifest))).snapshot()
+    expect(restored).toEqual(manifest)
+    expect(createScene(enabled).settings).toEqual(enabled)
+    const keys = ['tiltShift', 'tiltShiftStrength', 'tiltShiftFocus', 'tiltShiftWidth'] as const
+    for (const missing of [...keys.map(key => [key]), keys]) {
+      const legacy = structuredClone(manifest), expected = { ...enabled }
+      for (const key of missing) {
+        Reflect.deleteProperty(legacy.settings, key)
+        Reflect.deleteProperty(legacy.assets[0].model.settings, key)
+        Reflect.set(expected, key, DEFAULT_SETTINGS[key])
+      }
+      const parsed = parseSceneManifest(legacy)
+      expect(parsed.settings).toEqual(expected)
+      expect(parsed.assets[0].model.settings).toEqual(expected)
+    }
+    for (const key of ['background', 'ambient', 'light', 'lightAzimuth', 'ambientOcclusion', 'shadows', 'grid', 'faceGrid', 'projection', 'pathTracing']) {
+      const incomplete = structuredClone(manifest)
+      Reflect.deleteProperty(incomplete.settings, key)
+      expect(() => parseSceneManifest(incomplete)).toThrow('settings is incomplete')
+    }
+  })
+
+  test('miniature commands validate patches atomically and are undoable without changing scene geometry', () => {
+    const scene = new SceneDocument(fixture()), before = scene.snapshot()
+    for (const key of ['tiltShift', 'tiltShiftStrength', 'tiltShiftFocus', 'tiltShiftWidth']) {
+      for (const value of key === 'tiltShift' ? [null, NaN, 0, 1, 'false', 'true', [], {}] : [null, NaN, Infinity, -Infinity, -0.01, 1.01, false, true, '0.5', [], {}]) {
+        expect(() => scene.execute({ type: 'scene.settings', patch: { [key]: value } })).toThrow(key)
+        expect(() => parseSceneManifest({ ...before, settings: { ...settings, [key]: value } })).toThrow(key)
+        expect(scene.snapshot()).toBe(before)
+        expect(scene.canUndo).toBe(false)
+      }
+    }
+    for (const patch of [null, [], {}, { unknown: true }]) expect(() => scene.execute({ type: 'scene.settings', patch } as SceneCommand)).toThrow()
+    const enabled = { tiltShift: true, tiltShiftStrength: 1, tiltShiftFocus: 0, tiltShiftWidth: 0.01 }
+    expect(scene.execute({ type: 'scene.settings', patch: enabled })).toMatchObject({ changed: true, instanceIds: [], assetIds: [] })
+    expect(scene.data.settings).toEqual({ ...settings, ...enabled })
+    expect(scene.data.instances).toBe(before.instances)
+    expect(scene.data.assets).toBe(before.assets)
+    expect(scene.data.settings.projection).toBe(settings.projection)
+    scene.execute({ type: 'history.undo' })
+    expect(scene.data.settings).toEqual(settings)
+    expect(scene.canUndo).toBe(false)
+    scene.execute({ type: 'history.redo' })
+    expect(scene.data.settings).toEqual({ ...settings, ...enabled })
+    expect(scene.execute({ type: 'scene.settings', patch: enabled }).changed).toBe(false)
+  })
+
   test('normalizes finite quaternions robustly, including extreme magnitudes', () => {
     for (const magnitude of [2, Number.MIN_VALUE, Number.MAX_VALUE]) {
       const manifest = fixture()
@@ -574,6 +621,15 @@ test('100M-voxel trusted autosaves visit no untouched chunk metadata and write o
     await saveSceneDocumentRecovery(scene)
     expect(writes).toEqual(['instances', 'scenes', 'meta'])
     for (const restore of restores.splice(0)) restore()
+
+    const miniature = new SceneDocument(createScene({ ...settings, tiltShift: true, tiltShiftStrength: 0.85, tiltShiftFocus: 0.7, tiltShiftWidth: 0.2 }))
+    await saveSceneDocumentRecovery(miniature)
+    expect((await loadSceneRecovery())!.scene.settings).toEqual(miniature.data.settings)
+    const miniatureRow = stores.get('scenes')!.get(JSON.stringify(miniature.data.id)) as SceneManifest
+    for (const key of ['tiltShift', 'tiltShiftStrength', 'tiltShiftFocus', 'tiltShiftWidth']) Reflect.deleteProperty(miniatureRow.settings, key)
+    expect((await loadSceneRecovery())!.scene.settings).toEqual(settings)
+    miniatureRow.settings.tiltShiftStrength = NaN
+    await expect(loadSceneRecovery()).rejects.toThrow('tiltShiftStrength')
 
     const raw = fixture()
     await saveSceneRecovery(raw)

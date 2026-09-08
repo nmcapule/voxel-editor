@@ -4,15 +4,11 @@ import { CHUNK_SIZE, CHUNK_VOLUME, DEFAULT_PALETTE, EditSession, PADDED_SIZE, Vo
 import { decodeProjectSnapshot, encodeProjectSnapshot, parseProjectSnapshot } from '../../shared/voxel/snapshot'
 import { projectFaces } from '../../shared/voxel/projections'
 import { restoreProjectSnapshot, snapshotProject } from './storage'
-import { type ViewSettings } from '../../shared/rendering/settings'
+import { DEFAULT_SETTINGS } from '../../shared/rendering/settings'
 import { Studio } from './studio'
 import { exportVox, importVox, VOX_EXPORT_WARNING } from '../../shared/voxel/vox'
 
-const settings: ViewSettings = {
-  background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42,
-  ambientOcclusion: true, shadows: true, grid: true, faceGrid: false, meshVertices: false, meshTriangles: false,
-  projection: 'orthographic', pathTracing: true,
-}
+const settings = { ...DEFAULT_SETTINGS }
 
 function words(...values: number[]) {
   const bytes = new Uint8Array(values.length * 4)

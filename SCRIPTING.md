@@ -142,6 +142,16 @@ save.flush
 
 The runtime validator in `src/editors/model/protocol.ts` is the authoritative argument schema. Destructive resize, layer deletion, project replacement, and VOX replacement require their corresponding explicit approval flag.
 
+`settings.update` accepts the saved miniature-photography fields `tiltShift`
+(boolean, default `false`), `tiltShiftStrength` (default `0.5`), `tiltShiftFocus`
+(default `0.5`), and `tiltShiftWidth` (default `0.3`). The three numbers must be
+finite fractions in `[0, 1]`; UI sliders use `0.01` steps and display percentages.
+Focus `0` is the image top and `1` the bottom; width is the sharp band's fraction
+of image height. The effect is visible only in Render mode, including its PNG
+captures. Updating these fields does not change render mode or camera. Older
+project snapshots and local recovery default missing fields; scene manifests use
+the same defaults and accept these fields through `scene.settings`.
+
 `edit.pushPull` reshapes the entire supplied selection along `normal`. Each
 contiguous selected run extends or retracts from its own front by the same
 clamped distance, preserving stepped face offsets. Pulls preserve selected source

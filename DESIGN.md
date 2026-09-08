@@ -102,6 +102,12 @@ data uses tabular figures.
   camera, light, geometry, and material changes restart accumulation. The model
   status reports measured rendered FPS without announcing every update. On
   mobile, toggling Render mode does not summon the Stage settings sheet.
+- Both Render tabs offer **Miniature photography**, a saved, default-off tilt-shift
+  effect visible only in Render mode and included in PNG captures from that mode.
+  Enabling it reveals native percentage sliders for **Blur strength**, **Focus
+  position** (top to bottom), and **Sharp band width** (fraction of image height),
+  without changing render mode or camera. Model sliders preview during dragging;
+  scene sliders update on release or keyboard changes as one undoable command.
 - The optional voxel face grid traces exposed unit-cell boundaries in adaptive
   graphite or porcelain. Like the editing grid, it disappears in Render mode.
 - The editing grid covers the guide floor and rear side planes. Camera-side

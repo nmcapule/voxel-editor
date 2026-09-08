@@ -6,7 +6,7 @@ import type { CameraSnapshot } from '../shared/rendering/contracts'
 import type { SceneRecoveryContext, SceneManifest } from '../editors/scene/types'
 import type { SceneUIHost } from '../editors/scene/ui'
 import type { StoredProject } from '../editors/model/storage'
-import type { ViewSettings } from '../shared/rendering/settings'
+import { DEFAULT_SETTINGS } from '../shared/rendering/settings'
 import type { PbrMap } from '../editors/model/studio'
 
 const cases = [
@@ -45,7 +45,7 @@ async function integration(name: typeof cases[number]) {
   const { PROTOCOL } = await import('../editors/model/protocol')
   const storage = { ...await import('../editors/model/storage') }
   const sceneStorage = { ...await import('../editors/scene/storage') }
-  const settings: ViewSettings = { background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42, ambientOcclusion: true, shadows: true, grid: true, faceGrid: false, meshVertices: false, meshTriangles: false, projection: 'orthographic', pathTracing: false }
+  const settings = { ...DEFAULT_SETTINGS, pathTracing: false }
   const original = new VoxelDocument(undefined, 'Standalone')
   original.setVoxel(1, 1, 1, 5)
   let standalone = storage.snapshotProject(original, settings, { id: 'source', version: 1, tags: ['test'], dirty: false })

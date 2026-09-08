@@ -714,6 +714,15 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     app.querySelector<HTMLInputElement>('#mesh-vertices')!.checked = settings.meshVertices
     app.querySelector<HTMLInputElement>('#mesh-triangles')!.checked = settings.meshTriangles
     app.querySelector<HTMLInputElement>('#path-tracing')!.checked = settings.pathTracing
+    app.querySelector<HTMLInputElement>('#tilt-shift')!.checked = settings.tiltShift
+    app.querySelector<HTMLElement>('#tilt-shift-controls')!.hidden = !settings.tiltShift
+    for (const key of ['tiltShiftStrength', 'tiltShiftFocus', 'tiltShiftWidth'] as const) {
+      const input = app.querySelector<HTMLInputElement>(`#${key}`)!
+      input.value = String(settings[key])
+      const percent = `${Math.round(settings[key] * 100)}%`
+      input.setAttribute('aria-valuetext', percent)
+      app.querySelector(`#${key}-output`)!.textContent = percent
+    }
     app.querySelector('#ambient-output')!.textContent = settings.ambient.toFixed(1)
     app.querySelector('#light-output')!.textContent = settings.light.toFixed(1)
     app.querySelector('#azimuth-output')!.textContent = `${settings.lightAzimuth}°`
@@ -1255,6 +1264,8 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     if (target.id === 'mesh-vertices') patch.meshVertices = (target as HTMLInputElement).checked
     if (target.id === 'mesh-triangles') patch.meshTriangles = (target as HTMLInputElement).checked
     if (target.id === 'path-tracing') patch.pathTracing = (target as HTMLInputElement).checked
+    if (target.id === 'tilt-shift') patch.tiltShift = (target as HTMLInputElement).checked
+    if (target.id === 'tiltShiftStrength' || target.id === 'tiltShiftFocus' || target.id === 'tiltShiftWidth') patch[target.id] = Number(target.value)
     runStudioCommand({ type: 'settings.update', patch })
   })
 

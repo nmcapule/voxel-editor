@@ -1,6 +1,6 @@
 import { Box3, Frustum, Matrix4, Quaternion, Ray, Vector3 } from 'three'
 import { CHUNK_SIZE, CHUNK_VOLUME, chunkCoords, type Vec3, type VoxelLayer } from '../../shared/voxel/document'
-import { settingsPatch } from '../../shared/rendering/settings'
+import { parseSettings as settings, settingsPatch } from '../../shared/rendering/settings'
 import { parseProjectSnapshot } from '../../shared/voxel/snapshot'
 import { StudioCommandError } from '../../shared/errors'
 import type { ViewSettings } from '../../shared/rendering/settings'
@@ -42,13 +42,6 @@ function vector(value: unknown, min: number, max: number, integer = false): Vec3
 function layer(value: unknown): VoxelLayer {
   const v = object(value, 'id name visible locked')
   return { id: number(v.id, 1, 65535, true), name: text(v.name, 40), visible: boolean(v.visible), locked: boolean(v.locked) }
-}
-function settings(value: unknown): ViewSettings {
-  const patch = settingsPatch(value)
-  for (const key of ['background', 'ambient', 'light', 'lightAzimuth', 'ambientOcclusion', 'shadows', 'grid', 'faceGrid', 'projection', 'pathTracing']) {
-    if (patch[key as keyof ViewSettings] === undefined) invalid(`Missing scene setting: ${key}.`)
-  }
-  return { meshVertices: false, meshTriangles: false, ...patch } as ViewSettings
 }
 function bounds(value: unknown, dimensions: Vec3): SceneBounds {
   const v = object(value, 'min max')
@@ -375,7 +368,7 @@ export class SceneDocument {
     }
     switch (command.type) {
       case 'scene.rename': header('name', text(command.name, 60)); break
-      case 'scene.settings': header('settings', settings({ ...this.data.settings, ...command.patch })); break
+      case 'scene.settings': header('settings', { ...this.data.settings, ...settingsPatch(command.patch) }); break
       case 'asset.add': case 'asset.update': {
         const previous = this.assets.get(command.asset.id)
         if (command.type === 'asset.add') {

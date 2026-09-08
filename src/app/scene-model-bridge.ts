@@ -150,7 +150,7 @@ export class SceneModelBridge {
     if (!this.editing) return
     this.editing.changed = true
     this.editing.all ||= Boolean(effects.documentReplaced)
-    for (const id of effects.dirtyChunks ?? []) this.editing.dirty.add(id)
+    for (const id of effects.rawDirtyChunks ?? effects.dirtyChunks ?? []) this.editing.dirty.add(id)
     this.scene.markLibraryDirty()
     this.scene.queueSave()
   }

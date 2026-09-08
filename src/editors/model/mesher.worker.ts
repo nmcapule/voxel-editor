@@ -3,7 +3,7 @@ import { meshChunk, meshFaceGrid } from '../../shared/voxel/mesher'
 interface MeshJob {
   id: number
   version: number
-  voxels: ArrayBuffer
+  voxels?: ArrayBuffer
   layerId?: number
   active?: ArrayBuffer
   context?: ArrayBuffer
@@ -29,16 +29,12 @@ scope.onmessage = (event: MessageEvent<WorkerRequest>) => {
   if (jobs.length !== 1) throw new RangeError('Expected exactly one mesher job')
   const job = jobs[0]
   if (event.data.type === 'grid') {
-    const faceLines = meshFaceGrid(new Uint8Array(job.voxels), transparent)
+    const faceLines = job.voxels ? meshFaceGrid(new Uint8Array(job.voxels), transparent) : undefined
     const activeFaceLines = job.active ? meshFaceGrid(new Uint8Array(job.active), transparent) : undefined
-    scope.postMessage({ type: 'gridded', results: [{ id: job.id, version: job.version, faceLines, ...(activeFaceLines ? { activeFaceLines } : {}) }] }, [faceLines.buffer, ...(activeFaceLines ? [activeFaceLines.buffer] : [])])
+    scope.postMessage({ type: 'gridded', results: [{ id: job.id, version: job.version, layerId: job.layerId, faceLines, activeFaceLines }] }, [...(faceLines ? [faceLines.buffer] : []), ...(activeFaceLines ? [activeFaceLines.buffer] : [])])
     return
   }
-  const result = {
-    id: job.id,
-    version: job.version,
-    ...meshChunk(new Uint8Array(job.voxels), undefined, event.data.faceGrid, transparent),
-  }
+  const normal = job.voxels ? meshChunk(new Uint8Array(job.voxels), undefined, event.data.faceGrid, transparent) : undefined
   const active = job.active ? meshChunk(new Uint8Array(job.active), undefined, event.data.faceGrid, transparent) : undefined
   let context
   if (job.context && job.active) {
@@ -47,8 +43,8 @@ scope.onmessage = (event: MessageEvent<WorkerRequest>) => {
     for (let index = 0; index < voxels.length; index++) voxels[index] = selected[index] ? 0 : Number(voxels[index] !== 0)
     context = meshChunk(voxels)
   }
-  const results = [{ ...result, ...(active ? { layerId: job.layerId, active, context } : {}) }]
-  const transfers = [result, ...(active ? [active] : []), ...(context ? [context] : [])]
+  const results = [{ id: job.id, version: job.version, normal, ...(active ? { layerId: job.layerId, active, context } : {}) }]
+  const transfers = [...(normal ? [normal] : []), ...(active ? [active] : []), ...(context ? [context] : [])]
     .flatMap(mesh => [mesh.positions.buffer, mesh.normals.buffer, mesh.uvs.buffer, mesh.indices.buffer, mesh.faceLines.buffer])
   scope.postMessage({ type: 'meshed', results }, transfers)
 }

@@ -115,6 +115,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
   const fileInput = app.querySelector<HTMLInputElement>('#file-input')!
   const fillOptions = app.querySelector<HTMLElement>('#fill-options')!
   const layerList = app.querySelector<HTMLElement>('#layer-list')!
+  const layerCounts = new Map<number, number>()
   const toolPopups = [...app.querySelectorAll<HTMLElement>('.tool-popup, .layer-panel')]
   let toastTimer: ReturnType<typeof setTimeout> | undefined
   let hoverPopupTimer: ReturnType<typeof setTimeout> | undefined
@@ -225,7 +226,9 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     if (disposed) return
     const effects = outcome.effects
     syncStudioState()
-    if (!effects.documentReplaced) renderer.refreshLayerScope()
+    if (command.type === 'tool.set' || command.type === 'tool.paintMode' || command.type === 'tool.auxiliary' || command.type === 'clipboard.paste.begin') {
+      renderer.setToolState(activeTool, paintMode, auxiliaryTool)
+    } else if (outcome.changed && (command.type.startsWith('layer.') || command.type.startsWith('history.'))) renderer.refreshLayerScope()
     if (effects.documentReplaced && command.type !== 'document.resize') {
       libraryLink = undefined
       libraryGeneration++
@@ -249,17 +252,12 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     if (command.type === 'tool.set' || command.type === 'clipboard.paste.begin') {
       studio.dataset.tool = activeTool
       app.querySelector('#context-title')!.textContent = toolCopy[activeTool][0]
-      renderer.setTool(activeTool)
-      renderer.setAuxiliary(auxiliaryTool)
     }
     if (command.type === 'tool.paintMode') {
       app.querySelector('#context-title')!.textContent = toolCopy[activeTool][0]
-      renderer.setPaintMode(paintMode)
-      renderer.setAuxiliary(auxiliaryTool)
     }
     if (command.type === 'tool.sculptMode' || command.type === 'clipboard.paste.begin') renderer.setSculptMode(sculptMode)
     if (command.type === 'tool.selectionMode') renderer.setSelectionMode(selectionMode)
-    if (command.type === 'tool.auxiliary') renderer.setAuxiliary(auxiliaryTool)
     if (command.type === 'tool.auxiliary') app.querySelector('#context-title')!.textContent = auxiliaryTool ? 'Eyedropper' : toolCopy[activeTool][0]
     if (command.type === 'tool.fill') { renderer.setFillShape(fillShape); renderer.setFillDepth(fillDepth) }
     if (command.type === 'renderMode.set') {
@@ -269,7 +267,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
       renderer.setRenderMode(renderMode)
     }
     if (effects.preferencesChanged) persistToolState()
-    if (effects.factsChanged || effects.documentReplaced) renderDocumentFacts()
+    if (effects.factsChanged || effects.documentReplaced) renderDocumentFacts(Boolean(effects.documentReplaced || (effects.rawDirtyChunks ?? effects.dirtyChunks)?.length))
     if (effects.paletteChanged || effects.activeColorChanged || effects.documentReplaced) {
       renderPalette()
       renderPaletteMaterial()
@@ -564,15 +562,17 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     app.querySelector('#context-copy')!.textContent = copy
   }
 
-  function renderLayers() {
+  function renderLayers(recount: boolean) {
     const focusedButton = document.activeElement instanceof HTMLButtonElement && layerList.contains(document.activeElement) ? document.activeElement : undefined
     const focusedLayer = focusedButton?.closest<HTMLElement>('[data-layer-id]')?.dataset.layerId
     const focusedAction = focusedButton?.dataset.layerAction
-    const counts = new Map<number, number>()
-    voxelDocument.forEachVoxel((_x, _y, _z, _color, layerId) => counts.set(layerId, (counts.get(layerId) ?? 0) + 1))
+    if (recount) {
+      layerCounts.clear()
+      voxelDocument.forEachVoxel((_x, _y, _z, _color, layerId) => layerCounts.set(layerId, (layerCounts.get(layerId) ?? 0) + 1))
+    }
     layerList.innerHTML = voxelDocument.layers.toReversed().map(layer => {
       const name = escapeHtml(layer.name)
-      const count = counts.get(layer.id) ?? 0
+      const count = layerCounts.get(layer.id) ?? 0
       return `<div class="layer-row" data-active="${layer.id === voxelDocument.activeLayerId}" data-layer-id="${layer.id}" role="listitem">
         <button type="button" class="layer-active" data-layer-action="select" aria-label="Make ${name} active" aria-pressed="${layer.id === voxelDocument.activeLayerId}"><span></span></button>
         <label class="layer-name"><span class="sr-only">Layer name</span><input type="text" maxlength="40" value="${name}" data-layer-name="${layer.id}" aria-label="Rename ${name}"><small>${formatNumber(count)} ${count === 1 ? 'voxel' : 'voxels'}</small></label>
@@ -688,7 +688,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     return true
   }
 
-  function renderDocumentFacts() {
+  function renderDocumentFacts(recount = true) {
     if (document.activeElement !== projectName) projectName.value = voxelDocument.name
     const dimensions = voxelDocument.dimensions
     app.querySelector('#dimension-readout')!.textContent = `${dimensions.x} × ${dimensions.y} × ${dimensions.z}`
@@ -698,7 +698,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     app.querySelector('#chunk-count')!.textContent = formatNumber(voxelDocument.chunks.size)
     app.querySelector<HTMLButtonElement>('[data-action="undo"]')!.disabled = !studioController.canUndo
     app.querySelector<HTMLButtonElement>('[data-action="redo"]')!.disabled = !studioController.canRedo
-    renderLayers()
+    renderLayers(recount)
   }
 
   function renderSettings() {
@@ -907,13 +907,11 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
       renderer.setActive(true)
       renderer.setView(session.view)
       renderer.setActiveColor(activeColor)
-      renderer.setTool(activeTool)
-      renderer.setPaintMode(paintMode)
+      renderer.setToolState(activeTool, paintMode, auxiliaryTool)
       renderer.setSculptMode(sculptMode)
       renderer.setSelectionMode(selectionMode)
       renderer.setFillShape(fillShape)
       renderer.setFillDepth(fillDepth)
-      renderer.setAuxiliary(auxiliaryTool)
       renderer.applySelection(selection, false)
       renderer.setRenderMode(renderMode)
       for (const command of sessionMaps.get(studioController)?.values() ?? []) {
@@ -1359,14 +1357,13 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
 
   renderer.setActiveColor(activeColor)
   renderer.setSelectionMode(selectionMode)
-  renderer.setPaintMode(paintMode)
+  renderer.setToolState(activeTool, paintMode, auxiliaryTool)
   renderer.setFillShape(fillShape)
   renderer.setFillDepth(fillDepth)
   renderPalette()
   renderDocumentFacts()
   renderSettings()
   renderPaletteMaterial()
-  renderer.setTool(activeTool)
   renderToolControls()
   updateSaveStatus()
   renderer.focusViewport()

@@ -3,7 +3,7 @@ import { Viewport } from '../../shared/rendering/viewport'
 import { castsRealtimeShadow } from '../../shared/rendering/stage'
 import type { CameraSnapshot, SceneContent } from '../../shared/rendering/contracts'
 import type { MeshData } from '../../shared/voxel/mesher'
-import { CHUNK_SIZE, chunkCoords, connectedBodyVoxels, connectedSurfaceVoxels, fillShapeVoxels, moveRange, occupiedVoxels, pushPullFaces, pushPullRange, surfaceVoxels, type FillShape, type Vec3, type VoxelDocument } from '../../shared/voxel/document'
+import { CHUNK_SIZE, chunkCoords, connectedBodyVoxels, connectedSurfaceVoxels, dirtyChunks, fillShapeVoxels, moveRange, occupiedVoxels, pushPullFaces, pushPullRange, surfaceVoxels, type FillShape, type Vec3, type VoxelDocument } from '../../shared/voxel/document'
 import type { AuxiliaryTool, PaintMode, PbrMap, SculptMode, SelectionMode, SelectionState, Tool } from './studio'
 import type { ViewSettings } from '../../shared/rendering/settings'
 import { faceViews, projectFaces, type FaceView } from '../../shared/voxel/projections'
@@ -25,15 +25,16 @@ export function isTouchTap(startX: number, startY: number, endX: number, endY: n
   return Math.hypot(endX - startX, endY - startY) < 8
 }
 
-interface MeshResult extends MeshData {
+interface MeshResult {
   id: number
   version: number
+  normal?: MeshData
   layerId?: number
   active?: MeshData
   context?: MeshData
 }
 
-interface GridResult { id: number; version: number; faceLines: Float32Array; activeFaceLines?: Float32Array }
+interface GridResult { id: number; version: number; layerId?: number; faceLines?: Float32Array; activeFaceLines?: Float32Array }
 
 export interface RendererCallbacks {
   onSelectionChange: (selection: SelectionState) => void
@@ -320,8 +321,8 @@ export class VoxelRenderer {
     }
     this.refreshLayerScope()
     if (this.settings.faceGrid && !previous.faceGrid) {
-      for (const [id, chunk] of this.chunkMeshes) if (!chunk.userData.faceGridReady && !this.queued.has(id)) this.queuedGrids.add(id)
-      this.pump()
+      for (const id of this.chunkMeshes.keys()) this.queuedGrids.add(id)
+      this.scheduleMesh()
     }
   }
 
@@ -375,6 +376,7 @@ export class VoxelRenderer {
 
   private nextVersion = 0
   private inFlight = 0
+  private pumpScheduled = false
 
   private workerReady = false
   private meshFailed = false
@@ -422,6 +424,7 @@ export class VoxelRenderer {
   private modelRenderMode?: boolean
   private layerState = ''
   private meshLayerId?: number
+  private overlayState = ''
 
   private bindWorker() {
     const worker = this.worker
@@ -437,7 +440,7 @@ export class VoxelRenderer {
       if (message.type === 'meshed') this.receiveMeshes(message)
       else {
         this.inFlight = 0
-        for (const result of message.results) if (this.versions.get(result.id) === result.version) this.receiveGrid(result)
+        for (const result of message.results) if ((this.versions.get(result.id) ?? 0) === result.version) this.receiveGrid(result)
         this.pump()
         this.viewport.contentBecameReady()
         this.viewport.render()
@@ -898,17 +901,39 @@ export class VoxelRenderer {
       this.hover.visible = false
     }
     const isolated = this.isolatedLayerId()
-    // Retain the composited surface for normal viewing and clean inspection.
-    // Only build extra geometry while editing alongside other visible layers.
     const meshLayerId = isolated !== undefined && this.document.layers.some(other => other.visible && other.id !== isolated)
       ? isolated : undefined
     const changed = meshLayerId !== this.meshLayerId
     this.meshLayerId = meshLayerId
     if (changed) {
       this.viewport.renderer.shadowMap.needsUpdate = true
-      this.markDirty(this.document.chunks.keys())
+      // Scope changes do not change content versions or invalidate the normal surface.
+      for (const id of this.document.chunks.keys()) {
+        const chunk = this.chunkMeshes.get(id)
+        const cached = chunk?.children.find(child => child.userData.layerIsolation)
+        const version = this.versions.get(id) ?? 0
+        const layerId = this.chunkLayerId(id)
+        if (chunk?.userData.version !== version || layerId !== undefined && (cached?.userData.version !== version || cached?.userData.layerId !== layerId)) this.queued.add(id)
+        else this.queued.delete(id)
+        if (this.settings.faceGrid) this.queuedGrids.add(id)
+      }
+      this.scheduleMesh()
     }
-    this.updateMeshOverlayVisibility()
+    const overlayState = `${meshLayerId}:${layer.visible}:${this.viewport.renderMode}:${this.settings.faceGrid}:${this.settings.meshVertices}:${this.settings.meshTriangles}`
+    if (overlayState !== this.overlayState) {
+      this.overlayState = overlayState
+      this.updateMeshOverlayVisibility()
+    }
+  }
+
+  private chunkLayerId(id: number) {
+    const layerId = this.meshLayerId
+    if (layerId === undefined) return undefined
+    // Zero denotes context-only chunks. They are reusable across distant active layers.
+    if (this.document.getLayer(layerId)?.visible) {
+      for (const neighbor of dirtyChunks(this.document, [id])) if (this.document.chunks.get(neighbor)?.has(layerId)) return layerId
+    }
+    return 0
   }
 
   private activeLayerEditable() {
@@ -1164,15 +1189,33 @@ export class VoxelRenderer {
     if (message.type !== 'meshed') return
     if (this.modelSuspended) return
     this.inFlight = 0
+    let changed = false
     for (const result of message.results) {
-      if (this.versions.get(result.id) !== result.version || !this.document.chunks.has(result.id)) continue
-      this.removeChunk(result.id)
-      if (!result.positions.length && !result.active?.positions.length && !result.context?.positions.length) continue
-      const chunkMesh = this.createSurface(result)
-      if (result.active) {
+      if ((this.versions.get(result.id) ?? 0) !== result.version || !this.document.chunks.has(result.id)) continue
+      const acceptIsolation = result.active && (this.meshLayerId === undefined || result.layerId === this.chunkLayerId(result.id))
+      if (!result.normal && !acceptIsolation) continue
+      let chunkMesh = this.chunkMeshes.get(result.id)
+      if (!chunkMesh) {
+        chunkMesh = new THREE.Group()
+        const chunk = chunkCoords(result.id)
+        chunkMesh.position.set(chunk.x * CHUNK_SIZE - this.document.dimensions.x / 2, chunk.y * CHUNK_SIZE, chunk.z * CHUNK_SIZE - this.document.dimensions.z / 2)
+        chunkMesh.updateMatrix()
+        chunkMesh.matrixAutoUpdate = false
+        chunkMesh.userData.id = result.id
+        this.chunkMeshes.set(result.id, chunkMesh)
+        this.model.add(chunkMesh)
+      }
+      if (result.normal) {
+        for (const child of [...chunkMesh.children]) if (!child.userData.layerIsolation) this.removeSurface(child)
+        const normal = this.createSurface(result.normal)
+        for (const child of [...normal.children]) chunkMesh.add(child)
+        Object.assign(chunkMesh.userData, { version: result.version, quads: result.normal.quads, faceGridReady: normal.userData.faceGridReady })
+      }
+      if (acceptIsolation && result.active) {
+        for (const child of [...chunkMesh.children]) if (child.userData.layerIsolation) this.removeSurface(child)
         const isolated = this.createSurface(result.active)
-        isolated.userData.layerIsolation = true
-        isolated.userData.layerId = result.layerId
+        Object.assign(isolated.userData, { layerIsolation: true, layerId: result.layerId, version: result.version,
+          quads: result.active.quads + (result.context?.quads ?? 0) })
         if (result.context?.positions.length) {
           const geometry = new THREE.BufferGeometry()
           geometry.setAttribute('position', new THREE.BufferAttribute(result.context.positions, 3))
@@ -1185,26 +1228,26 @@ export class VoxelRenderer {
         }
         chunkMesh.add(isolated)
       }
-      const chunk = chunkCoords(result.id)
-      chunkMesh.position.set(chunk.x * CHUNK_SIZE - this.document.dimensions.x / 2, chunk.y * CHUNK_SIZE, chunk.z * CHUNK_SIZE - this.document.dimensions.z / 2)
-      chunkMesh.updateMatrix()
-      chunkMesh.matrixAutoUpdate = false
-      this.chunkMeshes.set(result.id, chunkMesh)
-      this.chunkQuads.set(result.id, result.quads + (result.active?.quads ?? 0) + (result.context?.quads ?? 0))
-      this.model.add(chunkMesh)
-      chunkMesh.updateWorldMatrix(true, true)
-      if (result.faceLines.length || result.active?.faceLines.length) this.receiveGrid({ ...result, activeFaceLines: result.active?.faceLines })
-      else if (this.settings.faceGrid) this.queuedGrids.add(result.id)
+      const isolated = chunkMesh.children.find(child => child.userData.layerIsolation)
+      this.chunkQuads.set(result.id, (chunkMesh.userData.quads ?? 0) + (isolated?.userData.quads ?? 0))
+      // The retained parent may be clean, but newly attached static meshes are not.
+      chunkMesh.updateWorldMatrix(true, true, true)
+      if (this.settings.faceGrid) this.queuedGrids.add(result.id)
       this.updateMeshOverlayVisibility([chunkMesh])
+      changed = true
     }
-    this.viewport.renderer.shadowMap.needsUpdate = true
+    if (changed) {
+      this.viewport.renderer.shadowMap.needsUpdate = true
+      this.viewport.requestPathTraceRebuild()
+      this.viewport.render()
+    }
     this.pump()
-    this.viewport.requestPathTraceRebuild()
-    this.viewport.render()
   }
 
   private createSurface(data: MeshData) {
     const surface = new THREE.Group()
+    surface.userData.faceGridReady = !data.positions.length
+    if (!data.positions.length) return surface
     // Draw the post-merge positions once each, without the surface's triangle indices.
     const verticesGeometry = new THREE.BufferGeometry()
     verticesGeometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3))
@@ -1231,15 +1274,17 @@ export class VoxelRenderer {
       mesh.receiveShadow = true
       surface.add(mesh)
     }
+    if (data.faceLines.length) this.installFaceGrid(surface, data.faceLines)
     return surface
   }
 
   private receiveGrid(result: GridResult) {
     const chunk = this.chunkMeshes.get(result.id)
     if (!chunk) return
-    this.installFaceGrid(chunk, result.faceLines)
+    if (result.faceLines && chunk.userData.version === result.version) this.installFaceGrid(chunk, result.faceLines)
     const isolated = chunk.children.find(child => child.userData.layerIsolation)
-    if (isolated && result.activeFaceLines) this.installFaceGrid(isolated, result.activeFaceLines)
+    if (isolated && result.activeFaceLines && isolated.userData.version === result.version && isolated.userData.layerId === result.layerId
+      && (this.meshLayerId === undefined || result.layerId === this.chunkLayerId(result.id))) this.installFaceGrid(isolated, result.activeFaceLines)
     this.updateMeshOverlayVisibility([chunk])
   }
 
@@ -1264,12 +1309,16 @@ export class VoxelRenderer {
   private removeChunk(id: number) {
     const chunk = this.chunkMeshes.get(id)
     if (chunk) {
-      chunk.traverse(child => { if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments || child instanceof THREE.Points) child.geometry.dispose() })
-      this.model.remove(chunk)
+      this.removeSurface(chunk)
       this.chunkMeshes.delete(id)
       this.viewport.renderer.shadowMap.needsUpdate = true
     }
     this.chunkQuads.delete(id)
+  }
+
+  private removeSurface(surface: THREE.Object3D) {
+    surface.traverse(child => { if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments || child instanceof THREE.Points) child.geometry.dispose() })
+    surface.removeFromParent()
   }
 
   private reportMeshStats() {
@@ -1289,15 +1338,22 @@ export class VoxelRenderer {
       const id = queue.values().next().value!
       queue.delete(id)
       if (!this.document.chunks.has(id)) { this.removeChunk(id); continue }
-      if (grid && this.chunkMeshes.get(id)?.userData.faceGridReady) continue
-      const voxels = this.document.paddedChunk(id, true).buffer
-      const layerId = this.meshLayerId
-      const active = layerId === undefined ? undefined : this.document.paddedChunk(id, true, [layerId]).buffer
-      const context = layerId === undefined || grid ? undefined
+      const chunk = this.chunkMeshes.get(id)
+      const cached = chunk?.children.find(child => child.userData.layerIsolation)
+      const version = this.versions.get(id) ?? 0
+      const layerId = this.chunkLayerId(id)
+      const normalNeeded = grid ? chunk?.userData.version === version && !chunk.userData.faceGridReady : chunk?.userData.version !== version
+      const activeNeeded = layerId !== undefined && (grid
+        ? cached?.userData.version === version && cached.userData.layerId === layerId && !cached.userData.faceGridReady
+        : cached?.userData.version !== version || cached?.userData.layerId !== layerId)
+      if (!normalNeeded && !activeNeeded) continue
+      const voxels = normalNeeded ? this.document.paddedChunk(id, true).buffer : undefined
+      const active = activeNeeded ? this.document.paddedChunk(id, true, [layerId!]).buffer : undefined
+      const context = !activeNeeded || grid ? undefined
         : this.document.paddedChunk(id, true, this.document.layers.filter(layer => layer.id !== layerId).map(layer => layer.id)).buffer
-      const buffers = [voxels, ...(active ? [active] : []), ...(context ? [context] : [])]
+      const buffers = [...(voxels ? [voxels] : []), ...(active ? [active] : []), ...(context ? [context] : [])]
       this.inFlight = 1
-      this.worker.postMessage({ type: grid ? 'grid' : 'mesh', jobs: [{ id, version: this.versions.get(id)!, voxels, layerId, active, context }], faceGrid: this.settings.faceGrid }, buffers)
+      this.worker.postMessage({ type: grid ? 'grid' : 'mesh', jobs: [{ id, version, voxels, layerId, active, context }], faceGrid: this.settings.faceGrid }, buffers)
       break
     }
     this.reportMeshStats()
@@ -1313,8 +1369,15 @@ export class VoxelRenderer {
       if (!this.document.chunks.has(id)) this.removeChunk(id)
     }
     this.viewport.requestPathTraceRebuild()
-    this.pump()
+    this.scheduleMesh()
     this.viewport.render()
+  }
+
+  private scheduleMesh() {
+    if (this.pumpScheduled) return
+    this.pumpScheduled = true
+    // Finish the command's scope/content changes before preparing any voxel buffers.
+    queueMicrotask(() => { this.pumpScheduled = false; this.pump() })
   }
 
   whenMeshIdle() {
@@ -1408,6 +1471,7 @@ export class VoxelRenderer {
     this.document = document
     this.layerState = ''
     this.meshLayerId = undefined
+    this.overlayState = ''
     this.applySelection({ cells: [], count: 0 }, false)
     this.queued.clear()
     this.queuedGrids.clear()
@@ -1431,10 +1495,16 @@ export class VoxelRenderer {
   }
 
   setTool(tool: Tool) {
+    this.setToolState(tool, this.paintMode, this.auxiliary)
+  }
+
+  setToolState(tool: Tool, paintMode: PaintMode, auxiliary?: AuxiliaryTool) {
     this.cancelPaint()
     this.cancelPushPull()
     this.cancelMarquee()
     this.tool = tool
+    this.paintMode = paintMode
+    this.auxiliary = auxiliary
     this.hover.visible = false
     this.refreshLayerScope()
     this.viewport.render()
@@ -1448,11 +1518,7 @@ export class VoxelRenderer {
   }
 
   setPaintMode(mode: PaintMode) {
-    this.cancelPaint()
-    this.cancelMarquee()
-    this.paintMode = mode
-    this.refreshLayerScope()
-    this.viewport.render()
+    this.setToolState(this.tool, mode, this.auxiliary)
   }
 
   setFillShape(shape: FillShape) {
@@ -1464,13 +1530,7 @@ export class VoxelRenderer {
   }
 
   setAuxiliary(tool?: AuxiliaryTool) {
-    this.cancelPaint()
-    this.cancelPushPull()
-    this.cancelMarquee()
-    this.auxiliary = tool
-    this.hover.visible = false
-    this.refreshLayerScope()
-    this.viewport.render()
+    this.setToolState(this.tool, this.paintMode, tool)
   }
 
   setSelectionMode(mode: SelectionMode) {
@@ -1536,7 +1596,8 @@ export class VoxelRenderer {
     const showTriangles = this.settings.meshTriangles && !this.viewport.renderMode
     for (const chunk of chunks) {
       const isolated = chunk.children.find(child => child.userData.layerIsolation)
-      const focused = !!isolated && this.isolatedLayerId() === isolated.userData.layerId
+      const focused = !!isolated && this.isolatedLayerId() !== undefined && this.chunkLayerId(chunk.userData.id) === isolated.userData.layerId
+        && isolated.userData.version === chunk.userData.version
       if (isolated) isolated.visible = focused
       for (const surface of isolated ? [chunk, isolated] : [chunk]) for (const child of surface.children) {
         if (child === isolated || child.userData.layerContext) continue

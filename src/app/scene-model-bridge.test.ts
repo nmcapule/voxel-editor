@@ -1,4 +1,4 @@
-import { expect, mock, test } from 'bun:test'
+import { expect, mock, spyOn, test } from 'bun:test'
 import type { AssistantHost } from '../../plugins/assistant/shared'
 import type { VoxelDocument } from '../shared/voxel/document'
 import type { RemoteCommand } from '../editors/model/protocol'
@@ -7,7 +7,7 @@ import type { SceneRecoveryContext, SceneManifest } from '../editors/scene/types
 import type { SceneUIHost } from '../editors/scene/ui'
 import type { StoredProject } from '../editors/model/storage'
 import { DEFAULT_SETTINGS } from '../shared/rendering/settings'
-import type { PbrMap } from '../editors/model/studio'
+import type { AuxiliaryTool, PaintMode, PbrMap, SelectionState, Tool } from '../editors/model/studio'
 
 const cases = [
   'shared model edits return to every instance without changing the standalone session',
@@ -19,6 +19,8 @@ const cases = [
   'each editor mounts without the other editor and disposal removes its listeners',
   'autosave timers respect changed persistence owners and handle rejected saves',
   'application teardown drains accepted commands and failed saves retain an editable UI',
+  'model effects synchronize tools once and reuse layer counts for metadata only',
+  'visibility saves reuse raw chunks without losing pending voxel edits',
 ] as const
 
 for (const name of cases) {
@@ -111,6 +113,7 @@ async function integration(name: typeof cases[number]) {
     classList = { add() {} }
     value = ''
     textContent = ''
+    innerHTML = ''
     hidden = false
     inert = false
     disabled = false
@@ -182,15 +185,13 @@ async function integration(name: typeof cases[number]) {
     meshState() { return { pending: 0 } }
     setSettings() {}
     setActiveColor() {}
-    setTool() {}
-    refreshLayerScope() {}
-    setPaintMode() {}
+    setToolState = mock((_tool: Tool, _paintMode: PaintMode, _auxiliary?: AuxiliaryTool) => {})
+    refreshLayerScope = mock(() => {})
     setSculptMode() {}
     setSelectionMode() {}
     setFillShape() {}
     setFillDepth() {}
-    setAuxiliary() {}
-    applySelection() {}
+    applySelection = mock((_selection: SelectionState, _focus?: boolean) => {})
     markDirty() {}
     updatePalette() {}
     updatePaletteMaterial() {}
@@ -497,6 +498,96 @@ async function integration(name: typeof cases[number]) {
       modelFailure = false
       await model.dispose()
       expect(standalone.name).toBe('Retry standalone autosave')
+    } else if (name === cases[9]) {
+      const counts = () => [...modelNode('#layer-list').innerHTML.matchAll(/<small>(\d+) voxels?<\/small>/g)].map(match => Number(match[1]))
+      expect(counts()).toEqual([1])
+      expect(renderer.setToolState.mock.calls).toEqual([['select', 'paint', undefined]])
+      const scans = spyOn(VoxelDocument.prototype, 'forEachVoxel')
+      try {
+        for (const command of [
+          { type: 'document.rename', name: 'Metadata only' },
+          { type: 'layer.create' },
+          { type: 'layer.rename', id: 2, name: 'Upper' },
+          { type: 'layer.activate', id: 1 },
+          { type: 'layer.visibility', id: 2, visible: false },
+          { type: 'layer.visibility', id: 2, visible: true },
+          { type: 'layer.lock', id: 2, locked: true },
+          { type: 'layer.lock', id: 2, locked: false },
+        ] satisfies RemoteCommand[]) await dispatch(command)
+        expect(renderer.refreshLayerScope).toHaveBeenCalledTimes(7)
+        expect(renderer.applySelection).toHaveBeenLastCalledWith({ cells: [], count: 0 }, false)
+        expect(counts()).toEqual([0, 1])
+
+        for (const command of [
+          { type: 'tool.set', tool: 'paint' },
+          { type: 'tool.auxiliary', tool: 'pick' },
+          { type: 'tool.paintMode', mode: 'fill' },
+          { type: 'tool.auxiliary', tool: 'pick' },
+          { type: 'tool.set', tool: 'select' },
+          { type: 'tool.set', tool: 'select' },
+          { type: 'selection.set', cells: [{ x: 1, y: 1, z: 1 }] },
+          { type: 'clipboard.copy' },
+          { type: 'tool.auxiliary', tool: 'pick' },
+          { type: 'clipboard.paste.begin' },
+          { type: 'clipboard.paste.cancel' },
+        ] satisfies RemoteCommand[]) await dispatch(command)
+        expect(renderer.setToolState.mock.calls.slice(1)).toEqual([
+          ['paint', 'paint', undefined], ['paint', 'paint', 'pick'], ['paint', 'fill', undefined], ['paint', 'fill', 'pick'],
+          ['select', 'fill', undefined], ['select', 'fill', undefined], ['select', 'fill', 'pick'], ['sculpt', 'fill', 'pick'],
+        ])
+        expect(renderer.refreshLayerScope).toHaveBeenCalledTimes(7)
+        expect(scans).not.toHaveBeenCalled()
+
+        await edit(2)
+        expect(counts()).toEqual([0, 2])
+        await dispatch({ type: 'history.undo' })
+        expect(counts()).toEqual([0, 1])
+        await dispatch({ type: 'history.redo' })
+        expect(counts()).toEqual([0, 2])
+        expect(renderer.refreshLayerScope).toHaveBeenCalledTimes(9)
+        expect(scans).toHaveBeenCalledTimes(3)
+
+        const { Studio } = await import('../editors/model/studio')
+        const replacement = new VoxelDocument()
+        replacement.createLayer()
+        replacement.setVoxel(1, 1, 1, 5); replacement.setVoxel(2, 1, 1, 6)
+        const controller = new Studio(replacement, settings)
+        controller.execute({ type: 'tool.set', tool: 'paint' })
+        controller.execute({ type: 'tool.paintMode', mode: 'fill' })
+        controller.execute({ type: 'tool.auxiliary', tool: 'pick' })
+        const toolCalls = renderer.setToolState.mock.calls.length
+        await application.model.activateSession({ controller, view: renderer.getView() })
+        expect(renderer.setToolState.mock.calls.slice(toolCalls)).toEqual([['paint', 'fill', 'pick']])
+        expect(counts()).toEqual([2, 0])
+        expect(scans).toHaveBeenCalledTimes(4)
+        await dispatch({ type: 'layer.delete', id: 2, allowNonEmpty: true })
+        await dispatch({ type: 'layer.create' })
+        expect(counts()).toEqual([0, 0])
+        expect(scans).toHaveBeenCalledTimes(5)
+        await dispatch({ type: 'document.new' })
+        expect(counts()).toEqual([0])
+        expect(scans).toHaveBeenCalledTimes(6)
+      } finally { scans.mockRestore() }
+    } else if (name === cases[10]) {
+      await workspace.start(true); await enter()
+      const before = recovery!.scene.assets[0]
+      const hashes = spyOn(crypto.subtle, 'digest')
+      try {
+        await dispatch({ type: 'layer.visibility', id: 1, visible: false })
+        await workspace.flush()
+        expect(hashes).not.toHaveBeenCalled()
+        expect(recovery!.scene.assets[0].chunks).toEqual(before.chunks)
+        expect(recovery!.scene.assets[0].model.layers[0].visible).toBe(false)
+
+        await dispatch({ type: 'layer.visibility', id: 1, visible: true })
+        await edit(2)
+        await dispatch({ type: 'layer.visibility', id: 1, visible: false })
+        await workspace.flush()
+        expect(hashes).toHaveBeenCalledTimes(2) // Asset hash plus the blob store's integrity check.
+        const saved = await savedModel()
+        expect(saved.getLayerVoxel(2, 1, 1)).toBe(6)
+        expect(saved.activeLayer.visible).toBe(false)
+      } finally { hashes.mockRestore() }
     } else {
       const shell = dom.querySelector('.studio'), nameInput = modelNode('#project-name')
       const captureGate = capturePause = gate()

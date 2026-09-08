@@ -202,7 +202,7 @@ test('empty and fully occluded chunks have no geometry, groups or grid', () => {
 
 test('worker handles one surface or grid job per message with versioned transferable results', async () => {
   type Reply = { type: 'ready' }
-    | { type: 'meshed'; results: (MeshData & { id: number; version: number })[] }
+    | { type: 'meshed'; results: { id: number; version: number; normal: MeshData }[] }
     | { type: 'gridded'; results: { id: number; version: number; faceLines: Float32Array }[] }
   const worker = new Worker(new URL('../../editors/model/mesher.worker.ts', import.meta.url), { type: 'module' })
   const receive = () => new Promise<Reply>((resolve, reject) => {
@@ -222,8 +222,8 @@ test('worker handles one surface or grid job per message with versioned transfer
     expect(meshed.type).toBe('meshed')
     if (meshed.type !== 'meshed') throw new Error('Expected surface result')
     expect(meshed.results).toHaveLength(1)
-    expect(meshed.results[0]).toEqual({ id: 0, version: 7, ...meshChunk(document.paddedChunk(0), undefined, false, transparent) })
-    checkLayout(meshed.results[0])
+    expect(meshed.results[0]).toEqual({ id: 0, version: 7, normal: meshChunk(document.paddedChunk(0), undefined, false, transparent) })
+    checkLayout(meshed.results[0].normal)
     const gridVoxels = document.paddedChunk(0).buffer
     worker.postMessage({ type: 'grid', jobs: [{ id: 0, version: 8, voxels: gridVoxels }] }, [gridVoxels])
     expect(await receive()).toEqual({ type: 'gridded', results: [{ id: 0, version: 8, faceLines: meshFaceGrid(document.paddedChunk(0), transparent) }] })
@@ -232,4 +232,65 @@ test('worker handles one surface or grid job per message with versioned transfer
   } finally {
     worker.terminate()
   }
+})
+
+test('worker isolation-only jobs remove overlaps in all six face halos and leave active grids independent', async () => {
+  const worker = new Worker(new URL('../../editors/model/mesher.worker.ts', import.meta.url), { type: 'module' })
+  const receive = () => new Promise<any>((resolve, reject) => {
+    worker.onmessage = event => resolve(event.data)
+    worker.onerror = reject
+  })
+  try {
+    expect(await receive()).toEqual({ type: 'ready' })
+    const table = transparent.slice().buffer
+    worker.postMessage({ type: 'palette', transparent: table }, [table])
+    for (const axis of [0, 1, 2]) for (const sign of [-1, 1]) {
+      const document = new VoxelDocument({ x: 48, y: 48, z: 48 })
+      const active = document.activeLayerId
+      const interior = [20, 20, 20], halo = [...interior]
+      interior[axis] = sign < 0 ? 16 : 31
+      halo[axis] = interior[axis] + sign
+      document.setVoxel(halo[0], halo[1], halo[2], 12)
+      const context = document.createLayer().id
+      document.setVoxel(halo[0], halo[1], halo[2], 31)
+      document.setVoxel(interior[0], interior[1], interior[2], 31)
+      const id = document.idAt(20, 20, 20)
+      const expected = new VoxelDocument(document.dimensions)
+      expected.setVoxel(interior[0], interior[1], interior[2], 1)
+      const selected = document.paddedChunk(id, true, [active]).buffer
+      const background = document.paddedChunk(id, true, [context]).buffer
+      worker.postMessage({ type: 'mesh', jobs: [{ id, version: 9, layerId: active, active: selected, context: background }], faceGrid: true }, [selected, background])
+      const reply = await receive()
+      expect(reply.type).toBe('meshed')
+      expect(reply.results).toHaveLength(1)
+      const result = reply.results[0]
+      expect(result).toMatchObject({ id, version: 9, layerId: active })
+      expect(result.normal).toBeUndefined()
+      expect(result.active).toEqual(meshChunk(document.paddedChunk(id, true, [active]), undefined, true, transparent))
+      expect(result.active.quads).toBe(0) // Halo voxels never own faces in this chunk.
+      expect(result.context).toEqual(meshChunk(expected.paddedChunk(id)))
+      expect(result.context.quads).toBe(6) // Removing the overlapping halo exposes the boundary face.
+      expect(result.context.groups.map((group: MeshData['groups'][number]) => group.materialIndex)).toEqual([1])
+      checkLayout(result.context)
+      expect([selected.byteLength, background.byteLength]).toEqual([0, 0])
+
+      const haloId = document.idAt(halo[0], halo[1], halo[2])
+      const gridVoxels = document.paddedChunk(haloId, true, [active])
+      const expectedGrid = meshFaceGrid(gridVoxels, transparent)
+      const buffer = gridVoxels.buffer
+      worker.postMessage({ type: 'grid', jobs: [{ id: haloId, version: 10, layerId: active, active: buffer }] }, [buffer])
+      expect(await receive()).toEqual({ type: 'gridded', results: [{ id: haloId, version: 10, layerId: active, activeFaceLines: expectedGrid }] })
+      expect(expectedGrid.length).toBeGreaterThan(0)
+      expect(buffer.byteLength).toBe(0)
+
+      const empty = new Uint8Array(PADDED_SIZE ** 3).buffer, all = document.paddedChunk(id, true).buffer
+      worker.postMessage({ type: 'mesh', jobs: [{ id, version: 11, layerId: 0, active: empty, context: all }], faceGrid: true }, [empty, all])
+      expected.setVoxel(halo[0], halo[1], halo[2], 1)
+      expect(await receive()).toEqual({ type: 'meshed', results: [{ id, version: 11, layerId: 0,
+        active: meshChunk(new Uint8Array(PADDED_SIZE ** 3), undefined, true, transparent),
+        context: meshChunk(expected.paddedChunk(id)) }] })
+      expect(meshChunk(expected.paddedChunk(id)).quads).toBe(5)
+      expect([empty.byteLength, all.byteLength]).toEqual([0, 0])
+    }
+  } finally { worker.terminate() }
 })

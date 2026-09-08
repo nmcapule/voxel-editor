@@ -32,7 +32,7 @@ test('orthographic picking starts at the rendered near plane', () => {
   expect(probe.targetAt({ clientX: 50, clientY: 50 })).toMatchObject({ cell: { x: 16, y: 8, z: 30 }, normal: { x: 0, y: 0, z: 1 } })
 })
 
-test('deletion-only mesh queues resume the requested trace build', () => {
+test('deletion-only mesh queues resume the requested trace build', async () => {
   let builds = 0
   const viewport = Object.assign(Object.create(Viewport.prototype), {
     pathTracingRevision: 0, renderMode: true, settings: { pathTracing: true },
@@ -48,6 +48,7 @@ test('deletion-only mesh queues resume the requested trace build', () => {
   })
   viewport.sceneContent = { stage: 'bounded', isReady: () => !probe.inFlight && !probe.queued.size }
   probe.markDirty([0])
+  await Promise.resolve()
   expect(probe.meshState()).toMatchObject({ pending: 0 })
   expect(builds).toBe(1)
 })
@@ -158,7 +159,7 @@ test('mesh overlays use merged geometry, follow chunk transforms and visibility,
   let disposed = 0, materialDisposed = 0
   meshVerticesMaterial.addEventListener('dispose', () => { materialDisposed++ })
   try {
-    probe.receiveMeshes({ type: 'meshed', results: [{ ...data, id, version: 1 }] })
+    probe.receiveMeshes({ type: 'meshed', results: [{ normal: data, id, version: 1 }] })
     const chunk = model.children[0]
     const overlays = chunk.children.filter(child => child instanceof Points)
     expect(overlays).toHaveLength(1)
@@ -223,10 +224,10 @@ test('mesh overlays use merged geometry, follow chunk transforms and visibility,
     document.setVoxel(19, 19, 20, 0)
     const replacement = meshChunk(document.paddedChunk(id), document.palette, true)
     probe.versions.set(id, 2)
-    probe.receiveMeshes({ type: 'meshed', results: [{ ...replacement, id, version: 2 }] })
+    probe.receiveMeshes({ type: 'meshed', results: [{ normal: replacement, id, version: 2 }] })
     expect(disposed).toBe(1)
     expect(trianglesDisposed).toBe(1)
-    expect(chunk.parent).toBeNull()
+    expect(chunk.parent).toBe(model)
     expect(model.children).toHaveLength(1)
     const nextOverlays = model.children[0].children.filter(child => child instanceof Points)
     expect(nextOverlays).toHaveLength(1)
@@ -239,6 +240,8 @@ test('mesh overlays use merged geometry, follow chunk transforms and visibility,
     probe.updateMeshOverlayVisibility()
     const nextSurface = model.children[0].children.find(child => child instanceof Mesh)!
     const nextTriangles = nextSurface.children[0] as LineSegments
+    expect(nextSurface.matrixWorld).toEqual(chunk.matrixWorld)
+    expect(nextTriangles.matrixWorld).toEqual(chunk.matrixWorld)
     expect(nextTriangles.visible).toBe(true)
     expect(nextTriangles.geometry).not.toBe(triangles.geometry)
     nextTriangles.geometry.addEventListener('dispose', () => { trianglesDisposed++ })
@@ -270,7 +273,7 @@ test('installed material-local meshes and vertex overlays do not multiply path-t
     chunkMeshes: new Map(), chunkQuads: new Map(), queuedGrids: new Set(),
     viewport: { renderer: { shadowMap: { needsUpdate: false } }, renderMode: false, requestPathTraceRebuild() {}, render() {} }, pump() {},
   })
-  probe.receiveMeshes({ type: 'meshed', results: [{ ...data, id: 0, version: 1 }] })
+  probe.receiveMeshes({ type: 'meshed', results: [{ normal: data, id: 0, version: 1 }] })
   let vertices = 0
   model.traverse(object => {
     if (!(object instanceof Mesh)) return

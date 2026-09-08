@@ -77,6 +77,8 @@ export type StudioCommand =
 
 export interface StudioEffects {
   dirtyChunks?: number[]
+  /** Overrides remesh dirtiness for raw saves; an empty array means metadata-only. */
+  rawDirtyChunks?: number[]
   documentReplaced?: boolean
   preserveMaterials?: boolean
   selectionChanged?: boolean
@@ -621,7 +623,7 @@ export class Studio {
     this.pendingPaste = undefined
     this.document.setActiveLayer(id)
     this.selection = { cells: [], count: 0 }
-    return this.changed({ selectionChanged: true, selectionFocus: true, factsChanged: true, toolsChanged: true, save: activeChanged, announcement: `${layer.name} active` }, { layer: { ...layer } })
+    return this.changed({ selectionChanged: true, selectionFocus: selectionChanged || pasteChanged, factsChanged: true, toolsChanged: true, save: activeChanged, announcement: `${layer.name} active` }, { layer: { ...layer } })
   }
 
   private setLayerVisibility(id: number, visible: boolean) {
@@ -635,7 +637,9 @@ export class Studio {
       ? this.selectionState(previous.cells, previous.floating)
       : { cells: [], count: 0 }
     const selectionChanged = pasteCanceled || !sameCells(previous.cells, this.selection.cells) || Boolean(previous.floating) !== Boolean(this.selection.floating)
-    return this.changed({ dirtyChunks: [...dirtyChunks(this.document, this.document.chunks.keys())], selectionChanged, selectionFocus: true, factsChanged: true, toolsChanged: true, save: true, announcement: `${layer.name} ${visible ? 'shown' : 'hidden'}` }, { layer: { ...layer } })
+    const ids: number[] = []
+    for (const [chunkId, layers] of this.document.chunks) if (layers.has(id)) ids.push(chunkId)
+    return this.changed({ dirtyChunks: [...dirtyChunks(this.document, ids)], rawDirtyChunks: [], selectionChanged, selectionFocus: true, factsChanged: true, toolsChanged: true, save: true, announcement: `${layer.name} ${visible ? 'shown' : 'hidden'}` }, { layer: { ...layer } })
   }
 
   private deleteLayer(id: number, allowNonEmpty: boolean) {

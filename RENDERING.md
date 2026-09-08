@@ -121,6 +121,60 @@ remain four ordinary bounces, the existing transmissive traversal allowance, 128
 three-mesh-bvh 0.9.14. `bun install --frozen-lockfile` reapplies them. Recheck the dependency
 regressions before upgrading; do not replace them with private-field mutation in app code.
 
+## Layer Isolation
+
+Tool-driven ghost context is a cached surface, not a palette-opacity change. Each
+stored model chunk retains its normal composition and at most one active/context
+variant. Content versions advance on edits, visibility changes and material topology
+changes, not tool switches. Missing normal and isolation surfaces can be meshed and
+installed independently without replacing the chunk parent or unrelated geometry.
+Empty results are cached too. Worker replies validate content and scope independently;
+a superseded isolation result cannot discard valid normal work or overwrite the current
+isolation/grid. Chunk transforms are propagated explicitly to newly attached static meshes.
+
+Chunks without active-layer data in their own or six face-neighbor chunks share a
+context-only cache key. Switching distant active layers therefore remeshes only their
+affected neighborhoods. The first isolation still builds context across the model;
+switching between layers covering the entire model still rebuilds isolation everywhere.
+The single-variant cache deliberately does not retain geometry for every visited layer.
+
+Tool/submode/eyedropper state is applied together, with worker submission deferred until
+the command's synchronous scope and content effects finish. Visibility dirtiness is
+limited to the changed layer's chunks and face neighbors. Layer metadata changes reuse
+UI voxel counts, and activation without a selection no longer recenters a panned camera.
+Scene-owned visibility saves persist metadata without recopying unchanged raw chunks;
+standalone autosave still snapshots raw data after its existing debounce.
+
+Run `bun scripts/isolation-benchmark.ts` for real-worker CPU measurements. The default
+uses 16 chunks, three layers, three warmups and nine measured sequences. Baseline
+`b80f566` dense-fixture exit/reentry medians were 7.15/45.57 ms; cached exit/reentry
+are below 0.1 ms on the same EPYC/Bun host. These exclude GPU uploads and rendering.
+Work counts are more portable than timings:
+
+| Dense 16-chunk transition | Normal mesh passes, before/after | Active + context passes, before/after | Geometry allocations, before/after |
+| --- | ---: | ---: | ---: |
+| First isolation | 16 / 0 | 32 / 32 | 112 / 48 |
+| Exit | 16 / 0 | 0 / 0 | 64 / 0 |
+| Unchanged reentry | 16 / 0 | 32 / 0 | 112 / 0 |
+| Active A to B | 16 / 0 | 32 / 32 | 112 / 48 |
+
+`bun scripts/isolation-benchmark.ts 5 16` expands to 64 chunks. Localized A/B switches
+rebuild eight chunks at both sizes; the unrelated context and all normal meshes survive.
+`renderer-isolation.test.ts` covers reuse, localized seams, edits/undo, empty surfaces,
+material topology, stale meshes/grids, inspection, replacement and disposal.
+
+In the dedicated browser harness, run:
+
+```js
+await (await import('/tests/isolation.ts')).runIsolationChecks(
+  transparencyTest.renderer, transparencyTest.settings,
+);
+```
+
+This checks automatic RAF presentation before capture, identical cold/warm pixels,
+zero warm worker messages, and stable CPU/GPU geometry identities/counts. Its software
+GPU timings are not native-device performance guarantees.
+
 ## Scene Resources
 
 Scenes compose models sized 16-256 voxels per axis rather than enlarging

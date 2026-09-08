@@ -172,6 +172,51 @@ describe('studio command kernel', () => {
     expect(studio.selection.count).toBe(0)
   })
 
+  test.each([
+    [17, [273, 272, 274, 257, 289, 17, 529]],
+    [0, [0, 1, 16, 256]],
+    [63, [819, 818, 803, 563]],
+  ] as const)('visibility at %i only dirties layer chunks and bounded face neighbors, not raw data', (coordinate, expected) => {
+    const document = new VoxelDocument({ x: 64, y: 64, z: 64 })
+    document.setVoxel(coordinate, coordinate, coordinate, 5)
+    const other = document.createLayer()
+    document.setVoxel(32, 32, 32, 6)
+    document.setActiveLayer(1)
+    const studio = new Studio(document, settings)
+    for (const visible of [false, true]) {
+      const revision = studio.revision
+      const outcome = studio.execute({ type: 'layer.visibility', id: 1, visible })
+      expect(new Set(outcome.effects.dirtyChunks)).toEqual(new Set(expected))
+      expect(outcome).toMatchObject({ changed: true, revision: revision + 1, effects: { rawDirtyChunks: [], save: true } })
+      expect(document.getLayerVoxel(coordinate, coordinate, coordinate)).toBe(5)
+      expect(document.getLayerVoxel(32, 32, 32, other.id)).toBe(6)
+      expect(studio.execute({ type: 'layer.visibility', id: 1, visible })).toMatchObject({ changed: false, effects: {} })
+    }
+    const empty = document.createLayer()
+    expect(studio.execute({ type: 'layer.visibility', id: empty.id, visible: false }).effects).toMatchObject({ dirtyChunks: [], rawDirtyChunks: [], save: true })
+  })
+
+  test('layer activation focuses only when clearing selected or pasted content', () => {
+    const document = new VoxelDocument()
+    const cell = { x: 1, y: 1, z: 1 }
+    document.setVoxel(1, 1, 1, 5)
+    document.createLayer()
+    const studio = new Studio(document, settings)
+    expect(studio.execute({ type: 'layer.activate', id: 1 }).effects).toMatchObject({ selectionChanged: true, selectionFocus: false, save: true })
+    for (const paste of [false, true]) {
+      studio.execute({ type: 'selection.set', cells: [cell] })
+      if (paste) {
+        studio.execute({ type: 'clipboard.copy' })
+        studio.execute({ type: 'clipboard.paste.begin' })
+      }
+      expect(studio.execute({ type: 'layer.activate', id: 1 }).effects).toMatchObject({ selectionChanged: true, selectionFocus: true, save: false })
+      expect(studio.selection.count).toBe(0)
+      expect(studio.pendingPaste).toBeUndefined()
+    }
+    expect(studio.execute({ type: 'layer.activate', id: 2 }).effects.selectionFocus).toBe(false)
+    expect(studio.execute({ type: 'layer.activate', id: 2 }).changed).toBe(false)
+  })
+
   test('keeps covered selections when another layer is hidden or shown', () => {
     const document = new VoxelDocument()
     const cell = { x: 1, y: 1, z: 1 }

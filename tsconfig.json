@@ -16,5 +16,5 @@
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true
   },
-  "include": ["src", "tests", "plugins/assistant", "scripts", "vite.config.ts", "vite.config.test.ts"]
+  "include": ["src", "tests", "plugins", "scripts", "vite.config.ts", "vite.config.test.ts"]
 }

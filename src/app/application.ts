@@ -5,6 +5,7 @@ import { connectIntegrations } from './integrations'
 import { SerialCommandQueue, type RemoteCommand } from '../editors/model/protocol'
 import { StudioCommandError } from '../shared/errors'
 import { bytesToBase64 } from '../shared/voxel/snapshot'
+import type { ModelPreviewPlugin } from '../shared/rendering/contracts'
 
 export async function mountApplication(root: HTMLElement) {
   root.innerHTML = `<div class="studio editor-surface" data-editor="model"><div class="viewport"></div><div class="model-root"></div><div class="scene-root"></div><div class="scene-return instrument" hidden><button type="button" class="primary">Done: Return to scene</button><span></span></div><div class="toast instrument" role="status" aria-live="polite" hidden></div></div>`
@@ -55,9 +56,20 @@ export async function mountApplication(root: HTMLElement) {
     if (disposed || disposal || bridge?.busy && command.type !== 'save.flush') return Promise.reject(new StudioCommandError('invalid_state', 'Wait for the current scene operation to finish.'))
     return queue.dispatch({ command, source, ifRevision, viewVersion, editorGeneration }, signal)
   }
+  let previewPlugin: ModelPreviewPlugin | undefined
+  let previewPluginNotice = ''
+  try {
+    // This optional file glob keeps builds valid even when the plugin directory is removed.
+    const modules = import.meta.glob<{ default: ModelPreviewPlugin }>('../../plugins/cube-sprites/index.ts')
+    previewPlugin = (await modules['../../plugins/cube-sprites/index.ts']?.())?.default
+    if (!previewPlugin) previewPluginNotice = 'Cube sprites is not installed. Using Standard rendering.'
+  } catch {
+    previewPluginNotice = 'Cube sprites could not be loaded. Using Standard rendering.'
+  }
   const model = await mountModelEditor(modelRoot, {
     viewportRoot: shell.querySelector<HTMLElement>('.viewport')!,
     keyboardRoot: shell,
+    previewPlugin,
     dispatch,
     notify,
     onCommand(event) { const emitted = { ...event, sequence: ++sequence }; for (const listener of listeners) listener(emitted) },
@@ -76,6 +88,7 @@ export async function mountApplication(root: HTMLElement) {
       { action: 'export-owning-scene', label: 'Export owning scene...', hidden: true, run: async () => { await bridge!.exportScene() } },
     ],
   })
+  if (previewPluginNotice) notify(previewPluginNotice, 'warning')
   bridge = new SceneModelBridge({
     model, sceneRoot, keyboardRoot: shell,
     notify: message => notify(message, 'warning'),

@@ -511,15 +511,17 @@ test('model surfaces and jobs are released/suspended in scene mode, then all mod
   const model = new VoxelDocument(); model.setVoxel(0, 0, 0, 1)
   let stopped = 0, posted = 0
   const geometry = new THREE.BoxGeometry(), material = new THREE.MeshPhysicalMaterial(), chunk = new THREE.Group(), root = new THREE.Group()
+  material.visible = false
   chunk.add(new THREE.Mesh(geometry, material)); root.add(chunk)
   const probe = Object.assign(Object.create(VoxelRenderer.prototype), {
-    document: model, model: root, selection: new Map(), floatingSelection: false,
+    document: model, model: root, materials: [material], selection: new Map(), floatingSelection: false,
     chunkMeshes: new Map([[0, chunk]]), chunkQuads: new Map([[0, 6]]), queued: new Set([0]), queuedGrids: new Set([0]), versions: new Map([[0, 1]]), meshWaiters: [], nextVersion: 1,
     viewport: { renderer: { shadowMap: {} }, requestPathTraceRebuild() {}, contentBecameReady() {}, render() {} },
     callbacks: { onMeshStats() {} }, worker: { terminate() { stopped++ }, postMessage() { posted++ } }, workerReady: true, inFlight: 1,
     bindWorker() {}, updateSelection() {},
   })
   probe.suspendModelMeshes()
+  expect(material.visible).toBe(true)
   expect(stopped).toBe(1); expect(probe.chunkMeshes.size).toBe(0); expect(root.children).toHaveLength(0)
   probe.markDirty([0]); probe.pump(); expect(posted).toBe(0); expect(probe.queued.size).toBe(0)
   probe.resumeModelMeshes()

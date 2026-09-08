@@ -43,6 +43,31 @@ Follow-up review also fixed deletion-only queues failing to restart tracing, imm
 captures returning old pixels with new metadata, and disposal racing shader-compilation
 polling. These are covered by the renderer-state, dependency and recovery tests.
 
+## Optional Cube-Sprite Renderer
+
+The model Render panel offers **Standard / Cube sprites** when the removable
+`plugins/cube-sprites` module is installed. Cube sprites is an orthographic,
+opaque palette-color renderer for model Edit and Render modes, not PBR material parity.
+Physical material properties and maps remain saved but are not applied. It shares the
+viewport, directional shadow map, depth-based GTAO, capture, and finishing effects.
+Scene rendering is unchanged; child asset editing uses the model renderer.
+Saved PBR preferences are retained but
+tracing is gated off while the plugin is selected. Missing plugins fall back to
+Standard without rejecting saved documents.
+
+Select, Sculpt, and Paint use active-layer sprites with existing neutral ghost context;
+Volume, Layer, Eyedropper, Render mode, and isometric inspection use the full visible
+composition. Inspection restores editing scope afterward. Physical mesh materials are
+hidden while the plugin is active, but the helper tree and mesh-based face grids/topology
+overlays remain. Picking and tools are unchanged. Edits dirty chunk instance buffers
+for live updates; palette colors remain in a LUT. One current-scope cache is retained,
+not a per-layer cache; scope changes repack chunks on demand.
+
+See [`plugins/cube-sprites/README.md`](plugins/cube-sprites/README.md) for bake/instance
+invalidation, memory ceilings, removal instructions, and runnable GPU checks and
+comparative benchmarks. Sprite fragment depth uses reconstructed cube surfaces, not
+the quad plane; shadows use a separate light-oriented bake of the same unit cube.
+
 ## Pipeline And Invalidation
 
 The raster path is `opaque color/depth -> half-resolution AO -> transparent layers ->

@@ -87,9 +87,10 @@ With document dimensions `X,Y,Z`, pixel `u` increases right and `v` increases do
 
 ### Isometric Images
 
-Isometric images are 512 x 512 orthographic raster renders with scene lighting and materials, not exact voxel-color maps or progressive path-traced renders. All look down from +Y: front-right uses +X/+Z, front-left -X/+Z, back-right +X/-Z, back-left -X/-Z. Inspection images exclude editing overlays and leave the interactive camera untouched. Face images include `pixelAxes`; isometric images use `direction` without a per-pixel voxel mapping.
+Isometric images are 512 x 512 orthographic raster renders with scene lighting and materials (opaque palette colors without physical materials/maps when Cube sprites is active), not exact voxel-color maps or progressive path-traced renders. All look down from +Y: front-right uses +X/+Z, front-left -X/+Z, back-right +X/-Z, back-left -X/-Z. Inspection images exclude editing overlays and leave the interactive camera untouched. Face images include `pixelAxes`; isometric images use `direction` without a per-pixel voxel mapping.
 
 Each isometric image fits the entire visible model independently of selection, with a small margin and the configured background. No automatic ground plane is added. Offscreen rendering leaves the live viewport and progressive samples untouched.
+Cube sprites uses the full visible composition for inspection and restores editing scope afterward.
 
 Use targeted `composition.get` bounds/layers for exact depth, interior, or layer questions that these images cannot answer, rather than dumping the whole model for visual understanding. Results are ordered by layer and then Z/Y/X, scan at most one million cells per response, and return `nextCursor` until complete.
 
@@ -141,6 +142,13 @@ save.flush
 ```
 
 The runtime validator in `src/editors/model/protocol.ts` is the authoritative argument schema. Destructive resize, layer deletion, project replacement, and VOX replacement require their corresponding explicit approval flag.
+
+`settings.update` accepts the persisted field `previewRenderer`: `standard` (default)
+or `cube-sprites`. Despite the field name, Cube sprites applies in both model Edit
+and Render modes. When available and selected, it enforces orthographic projection
+and opaque palette colors, without applying physical materials/maps or Progressive PBR;
+authored materials and the saved PBR preference remain unchanged. A missing plugin
+falls back to Standard while retaining the saved choice. Scene rendering is unchanged.
 
 `settings.update` and `scene.settings` accept `skybox`: `solid` (default),
 `daylight`, `overcast`, `sunset`, or `night`. Older project snapshots, local recovery,

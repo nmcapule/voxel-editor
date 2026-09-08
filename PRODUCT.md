@@ -84,6 +84,12 @@ to the composition without replacing the standalone model workspace.
   roughness, metalness, emissive intensity, opacity, transmission, refraction, albedo, normal,
   roughness, and metalness maps, progressive PBR rendering with an
   ambient-occluded realtime fallback, and PNG capture.
+- An optional removable Cube sprites plugin provides an orthographic, opaque
+  palette-color renderer in the model editor's Edit and Render modes. It uses depth-correct
+  instanced cube sprites with independent AO/shadow switches and PNG capture.
+  Tool-driven layer scope, neutral ghost context, mesh-based overlays, and picking
+  remain unchanged. Physical materials and maps stay unchanged but are not applied
+  by this renderer; scene rendering is unchanged, while child asset editing benefits.
 - Grid and list palette views with named, editable presets for common surfaces
   including concrete, grass, wood, organic material, water, metals, glass, and warm and cool lights.
   The palette filters materials by opacity, transmission, metalness, and emission.

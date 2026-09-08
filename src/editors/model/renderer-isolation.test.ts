@@ -3,6 +3,7 @@ import { Box3, BufferGeometry, Group, LineBasicMaterial, LineSegments, Mesh, Mes
 import { EditSession, History, VoxelDocument, dirtyChunks } from '../../shared/voxel/document'
 import { meshChunk, meshFaceGrid, type MeshData } from '../../shared/voxel/mesher'
 import { VoxelRenderer, traceGridRay } from './renderer'
+import { DEFAULT_SETTINGS } from '../../shared/rendering/settings'
 
 function layeredDocument() {
   const document = new VoxelDocument({ x: 16, y: 16, z: 16 })
@@ -196,6 +197,59 @@ function meshProbe(document: VoxelDocument, faceGrid = true) {
 
 const isolation = (chunk: Object3D) => chunk.children.find(child => child.userData.layerIsolation)!
 const grid = (surface: Object3D) => surface.children.find(child => child.userData.faceGrid) as LineSegments | undefined
+
+test('live sprite scope retains fresh context and diagnostics without drawing the physical surfaces', async () => {
+  const { document, active, context } = layeredDocument()
+  const harness = meshProbe(document), { probe } = harness
+  const preview = { root: new Group(), setLayerScope: mock((_id?: number) => {}), markDirty: mock((_ids: Iterable<number>) => {}) }
+  preview.root.visible = false
+  Object.assign(probe, { preview, previewPlugin: { id: 'cube-sprites' }, modelRenderMode: false })
+  probe.viewport.settings = { ...DEFAULT_SETTINGS, ...probe.settings, previewRenderer: 'cube-sprites' }
+  try {
+    probe.markDirty(document.chunks.keys())
+    await harness.flush()
+    probe.syncViewport()
+    expect(preview.root.visible).toBe(true)
+    expect(probe.model.visible).toBe(true)
+    expect(probe.materials.every((material: MeshPhysicalMaterial) => !material.visible)).toBe(true)
+    const chunk = probe.chunkMeshes.get(0) as Group
+    probe.setToolState('select', 'paint')
+    expect(preview.setLayerScope).toHaveBeenLastCalledWith(active.id)
+    expect(chunk.visible).toBe(false)
+    await harness.flush()
+    const scoped = isolation(chunk)
+    expect(chunk.visible && scoped.visible).toBe(true)
+    expect(scoped.children.some(child => child.userData.layerContext && child.visible)).toBe(true)
+    expect(grid(scoped)?.visible).toBe(true)
+    expect(scoped.children.some(child => child instanceof Points && child.visible)).toBe(true)
+    expect(scoped.children.some(child => child instanceof Mesh && child.children.some(overlay => overlay.userData.meshTriangles && overlay.visible))).toBe(true)
+
+    document.setVoxel(2, 2, 2, 7)
+    probe.markDirty(document.chunks.keys())
+    expect(chunk.visible).toBe(false)
+    expect(preview.markDirty).toHaveBeenLastCalledWith([0])
+    await harness.flush()
+    expect(chunk.visible).toBe(true)
+    document.setActiveLayer(context.id)
+    probe.refreshLayerScope()
+    expect(preview.setLayerScope).toHaveBeenLastCalledWith(context.id)
+    expect(chunk.visible).toBe(false)
+    await harness.flush()
+    expect(chunk.visible).toBe(true)
+
+    probe.viewport.renderViews = () => {
+      expect(preview.setLayerScope).toHaveBeenLastCalledWith(undefined)
+      throw new Error('Inspection draw failed')
+    }
+    await expect(probe.inspect(['iso-front-left'])).rejects.toThrow('Inspection draw failed')
+    expect(preview.setLayerScope).toHaveBeenLastCalledWith(context.id)
+    probe.viewport.settings.previewRenderer = 'standard'
+    probe.syncViewport()
+    expect(preview.root.visible).toBe(false)
+    expect(probe.materials.every((material: MeshPhysicalMaterial) => material.visible)).toBe(true)
+    expect(chunk.visible).toBe(true)
+  } finally { harness.dispose() }
+})
 
 test('normal bootstrap, cold isolation, exit and warm reentry retain roots with zero warm jobs, allocations or disposal', async () => {
   const { document, active } = layeredDocument()

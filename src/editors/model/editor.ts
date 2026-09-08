@@ -9,7 +9,7 @@ import { VoxelDocument, type Dimensions, type FillShape, type ResizeAnchor, type
 import { mountModelLibrary } from './library'
 import { SerialCommandQueue, type RemoteCommand } from './protocol'
 import { VoxelRenderer } from './renderer'
-import { type CameraSnapshot } from '../../shared/rendering/contracts'
+import { type CameraSnapshot, type ModelPreviewPlugin } from '../../shared/rendering/contracts'
 import { Studio, type AuxiliaryTool, type PaintMode, type PbrMap, type SculptMode, type SelectionMode, type SelectionState, type StudioCommand, type StudioEffects, type StudioOutcome, type Tool } from './studio'
 import { loadProject, saveProjectSnapshot, snapshotProject } from './storage'
 import { type LibraryLink } from '../../shared/library/types'
@@ -34,6 +34,7 @@ export type ModelDispatch = (command: RemoteCommand, source?: CommandSource, ifR
 export interface ModelEditorOptions {
   viewportRoot?: HTMLElement
   keyboardRoot?: HTMLElement
+  previewPlugin?: ModelPreviewPlugin
   dispatch?: ModelDispatch
   onCommand?(event: ModelCommandEvent): void
   onViewChange?(view: CameraSnapshot): boolean
@@ -274,7 +275,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
       renderPalette()
       renderPaletteMaterial()
     }
-    if (effects.settingsChanged) renderSettings()
+    if (effects.settingsChanged || effects.documentReplaced) renderSettings()
     if (effects.toolsChanged || effects.selectionChanged) renderToolControls()
     if (effects.save) queueSave(effects)
     if (effects.announcement) announce(effects.announcement)
@@ -669,7 +670,20 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
   }
 
   function renderSettings() {
-    app.querySelector<HTMLSelectElement>('#projection')!.value = settings.projection
+    const previewAvailable = renderer.hasPreviewRenderer
+    const cubeSprites = previewAvailable && settings.previewRenderer === 'cube-sprites'
+    app.querySelector<HTMLSelectElement>('#preview-renderer')!.value = cubeSprites ? 'cube-sprites' : 'standard'
+    app.querySelector<HTMLOptionElement>('#preview-renderer option[value="cube-sprites"]')!.disabled = !previewAvailable
+    const previewHelp = app.querySelector<HTMLElement>('#preview-renderer-help')!
+    previewHelp.hidden = previewAvailable && !cubeSprites
+    const previewNotice = !previewAvailable
+      ? settings.previewRenderer === 'cube-sprites'
+        ? 'Cube sprites is unavailable. Using Standard; your saved Cube sprites choice is retained.'
+        : 'Cube sprites is unavailable. Using Standard rendering.'
+      : cubeSprites ? 'Edit and Render modes: opaque palette colors, orthographic only. Physical materials and textures stay unchanged but are not applied. PBR preference is kept.' : ''
+    if (previewHelp.textContent !== previewNotice) previewHelp.textContent = previewNotice
+    app.querySelector<HTMLSelectElement>('#projection')!.value = cubeSprites ? 'orthographic' : settings.projection
+    app.querySelector<HTMLOptionElement>('#projection option[value="perspective"]')!.disabled = cubeSprites
     app.querySelector<HTMLSelectElement>('#skybox')!.value = settings.skybox
     app.querySelector<HTMLElement>('#background-label')!.hidden = settings.skybox !== 'solid'
     app.querySelector<HTMLElement>('#skybox-help')!.hidden = settings.skybox === 'solid'
@@ -683,7 +697,8 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     app.querySelector<HTMLInputElement>('#face-grid')!.checked = settings.faceGrid
     app.querySelector<HTMLInputElement>('#mesh-vertices')!.checked = settings.meshVertices
     app.querySelector<HTMLInputElement>('#mesh-triangles')!.checked = settings.meshTriangles
-    app.querySelector<HTMLInputElement>('#path-tracing')!.checked = settings.pathTracing
+    app.querySelector<HTMLInputElement>('#path-tracing')!.checked = settings.pathTracing && !cubeSprites
+    app.querySelector<HTMLInputElement>('#path-tracing')!.disabled = cubeSprites
     app.querySelector<HTMLInputElement>('#tilt-shift')!.checked = settings.tiltShift
     app.querySelector<HTMLElement>('#tilt-shift-controls')!.hidden = !settings.tiltShift
     for (const key of ['tiltShiftStrength', 'tiltShiftFocus', 'tiltShiftWidth'] as const) {
@@ -844,7 +859,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     onError(message) {
       showToast(message, 'warning')
     },
-  })
+  }, options.previewPlugin)
 
   const modelLibrary = mountModelLibrary(app, {
     current: () => ({ name: voxelDocument.name, revision: studioController.revision, generation: libraryGeneration, changes: libraryChanges, library: libraryLink, hasTextureMaps: loadedPbrMaps.size > 0 }),
@@ -1221,6 +1236,10 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
   on(app.querySelector<HTMLElement>('[data-panel="render"]')!, 'input', event => {
     const target = event.target as HTMLInputElement | HTMLSelectElement
     const patch: Partial<ViewSettings> = {}
+    if (target.id === 'preview-renderer') {
+      patch.previewRenderer = target.value as ViewSettings['previewRenderer']
+      if (patch.previewRenderer === 'cube-sprites') patch.projection = 'orthographic'
+    }
     if (target.id === 'projection') patch.projection = target.value as ViewSettings['projection']
     if (target.id === 'skybox') patch.skybox = target.value as ViewSettings['skybox']
     if (target.id === 'background') patch.background = target.value
@@ -1236,7 +1255,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     if (target.id === 'path-tracing') patch.pathTracing = (target as HTMLInputElement).checked
     if (target.id === 'tilt-shift') patch.tiltShift = (target as HTMLInputElement).checked
     if (target.id === 'tiltShiftStrength' || target.id === 'tiltShiftFocus' || target.id === 'tiltShiftWidth') patch[target.id] = Number(target.value)
-    runStudioCommand({ type: 'settings.update', patch })
+    void runStudioCommand({ type: 'settings.update', patch }).then(outcome => { if (!outcome && !disposed) renderSettings() })
   })
 
   on(app.querySelector<HTMLInputElement>('#fill-depth')!, 'input', event => {

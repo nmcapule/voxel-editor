@@ -1,5 +1,6 @@
 import type * as THREE from 'three'
 import type { ViewSettings } from './settings'
+import type { VoxelDocument } from '../voxel/document'
 export interface Vector3Value { x: number; y: number; z: number }
 
 export interface CameraSnapshot {
@@ -27,7 +28,37 @@ export interface SceneContent {
   isReady?(): boolean
   focusTarget?(): THREE.Vector3
   onViewportChange(): void
+  /** Optional orthographic, raster-only model preview. Absent plugins leave normal rendering intact. */
+  previewRendererId?: string
+  prepareRaster?(frame: PreviewFrame): void
+  onContextLost?(): void
   prepareFullDetail?(signal: AbortSignal): Promise<PreparedSceneContent>
+}
+
+export interface PreviewFrame {
+  renderer: THREE.WebGLRenderer
+  camera: THREE.Camera
+  light: THREE.DirectionalLight
+  settings: ViewSettings
+  width: number
+  height: number
+}
+
+export interface ModelPreviewRenderer {
+  root: THREE.Group
+  setDocument(document: VoxelDocument): void
+  /** Undefined renders the visible composition; returns whether editing scope changed. */
+  setLayerScope(layerId?: number): boolean
+  markDirty(ids: Iterable<number>): void
+  updatePalette(): void
+  prepare(frame: PreviewFrame): void
+  dispose(): void
+}
+
+export interface ModelPreviewPlugin {
+  id: ViewSettings['previewRenderer']
+  label: string
+  create(document: VoxelDocument): ModelPreviewRenderer
 }
 
 export interface ViewportCallbacks {

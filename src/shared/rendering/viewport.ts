@@ -57,6 +57,7 @@ export class Viewport {
       this.environmentTarget.dispose()
       this.skyTexture?.dispose()
       this.releaseSceneDetail()
+      this.sceneContent?.onContextLost?.()
       this.callbacks.onPathTracingStatus?.('Graphics context lost')
     }, options)
     this.renderer.domElement.addEventListener('webglcontextrestored', () => {
@@ -137,6 +138,9 @@ export class Viewport {
   private get worldScale() { return this.sceneContent?.stage !== 'bounded' }
   private get stageBounds() { return this.sceneContent?.bounds ?? this.emptyBounds }
   private contentReady() { return this.sceneContent?.isReady?.() !== false }
+  private previewSelected(settings = this.settings) {
+    return !!this.sceneContent?.previewRendererId && settings.previewRenderer === this.sceneContent.previewRendererId
+  }
 
   private createCamera(projection: ViewSettings['projection']) {
     if (projection === 'perspective') return new THREE.PerspectiveCamera(34, 1, this.worldScale ? 0.5 : 0.1, this.worldScale ? 131072 : 2000)
@@ -290,7 +294,7 @@ export class Viewport {
       this.resize()
       return true
     }
-    const progressive = this.renderMode && this.settings.pathTracing && !this.pathTracingFailed
+    const progressive = this.renderMode && this.settings.pathTracing && !this.pathTracingFailed && !this.previewSelected()
       && !!this.sceneContent && (!this.worldScale || !!this.sceneContent.prepareFullDetail)
     const reduced = !progressive && this.captures === 0 && (this.rasterInteractions.size > 0 || this.rasterRestoreTimer !== undefined)
     const ratio = Math.min(devicePixelRatio, reduced ? 1 : 2)
@@ -307,7 +311,7 @@ export class Viewport {
   }
 
   private pathTracingEnabled() {
-    return !!this.sceneContent && (!this.worldScale || !!this.sceneContent.prepareFullDetail) && !this.sceneInteraction && this.renderMode && this.settings.pathTracing && !this.pathTracingFailed && !this.contextLost && !this.disposed
+    return !!this.sceneContent && (!this.worldScale || !!this.sceneContent.prepareFullDetail) && !this.sceneInteraction && this.renderMode && this.settings.pathTracing && !this.previewSelected() && !this.pathTracingFailed && !this.contextLost && !this.disposed
   }
 
   private stopPathTracingSamples() {
@@ -511,7 +515,7 @@ export class Viewport {
     this.updateWorkspaceGridVisibility()
     if (this.limits) this.limits.visible = this.settings.grid && !enabled
     this.sceneContent?.onViewportChange()
-    if (enabled && this.settings.pathTracing) {
+    if (enabled && this.settings.pathTracing && !this.previewSelected()) {
       this.pathTracingFailed = false
       if (this.worldScale && this.pathTracingReady && !this.pathTracingBuildRequested) {
         if (this.sceneCameraDirty) this.updatePathTracing('camera')
@@ -523,16 +527,19 @@ export class Viewport {
       if (!this.worldScale) this.pathTracingReady = false
       else if (this.pathTracingBuildRunning || this.fullPreparation) this.invalidateSceneContent()
       this.stopPathTracingSamples()
-      this.callbacks.onPathTracingStatus?.('Ready')
+      this.callbacks.onPathTracingStatus?.(enabled && this.previewSelected() ? 'Cube sprites' : 'Ready')
       this.render()
     }
   }
 
   setSettings(settings: ViewSettings) {
+    if (this.previewSelected(settings) && settings.projection !== 'orthographic') settings = { ...settings, projection: 'orthographic' }
     const previous = this.settings
     this.tiltShiftDirty ||= (['tiltShift', 'tiltShiftStrength', 'tiltShiftFocus', 'tiltShiftWidth'] as const).some(key => settings[key] !== previous[key])
     const projectionChanged = settings.projection !== this.settings.projection
-    const pathTracingChanged = settings.pathTracing !== this.settings.pathTracing
+    const previewChanged = this.previewSelected(settings) !== this.previewSelected(previous)
+    const pathTracingChanged = settings.pathTracing !== this.settings.pathTracing || previewChanged
+    if (previewChanged) { this.pathTracingRevision++; this.disposePathTracer() }
     const skyChanged = settings.skybox !== previous.skybox
     const sceneDependenciesChanged = this.worldScale && (['skybox', 'background', 'ambient', 'light', 'lightAzimuth', 'shadows'] as const).some(key => settings[key] !== previous[key])
     if (skyChanged) this.replaceEnvironment(settings.skybox)
@@ -572,7 +579,7 @@ export class Viewport {
       if (pathTracingChanged) this.pathTracingRevision++
       this.pathTracingReady = false
       this.stopPathTracingSamples()
-      this.callbacks.onPathTracingStatus?.(this.worldScale && this.renderMode && settings.pathTracing ? 'Scene raster fallback' : 'Ready')
+      this.callbacks.onPathTracingStatus?.(this.renderMode && this.previewSelected() ? 'Cube sprites' : this.worldScale && this.renderMode && settings.pathTracing ? 'Scene raster fallback' : 'Ready')
     } else {
       const changes: ('materials' | 'lights' | 'environment' | 'camera')[] = []
       if (skyChanged || settings.background !== previous.background || settings.shadows !== previous.shadows) changes.push('materials')
@@ -897,7 +904,11 @@ export class Viewport {
     const enabled = shadowMap.enabled, needsUpdate = shadowMap.needsUpdate, castShadow = this.sunlight.castShadow
     // Light shadow counts also switch shaders, preventing cached-map sampling in trace previews.
     shadowMap.enabled = this.sunlight.castShadow = this.settings.shadows && shadows
-    try { raster.render(camera) }
+    try {
+      this.sceneContent?.prepareRaster?.({ renderer: this.renderer, camera, light: this.sunlight, settings: this.settings,
+        width: raster.readBuffer.width, height: raster.readBuffer.height })
+      raster.render(camera)
+    }
     finally {
       this.scene.background = background
       if (!shadowMap.enabled) shadowMap.needsUpdate = needsUpdate

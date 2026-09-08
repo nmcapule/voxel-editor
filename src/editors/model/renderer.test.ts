@@ -475,7 +475,7 @@ test('model material creation, property refreshes and viewport sync bind the cur
   const probe = Object.assign(Object.create(VoxelRenderer.prototype), {
     document, viewport, settings, modelRenderMode: false, modelSuspended: false, tool: 'select',
     faceGridMaterial, meshVerticesMaterial, meshTrianglesMaterial: faceGridMaterial,
-    chunkMeshes: new Map(), textureLoads: new Map(), hover: new Group(),
+    chunkMeshes: new Map(), textureLoads: new Map(), hover: new Group(), model: new Group(),
     cancelPaint() {}, cancelPushPull() {}, cancelMarquee() {},
     markDirty() { throw new Error('Environment and non-topology material changes must not remesh') },
   })

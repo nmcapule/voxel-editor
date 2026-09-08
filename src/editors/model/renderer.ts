@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { Viewport } from '../../shared/rendering/viewport'
 import { castsRealtimeShadow } from '../../shared/rendering/stage'
-import type { CameraSnapshot, SceneContent } from '../../shared/rendering/contracts'
+import type { CameraSnapshot, SceneContent, ModelPreviewPlugin, ModelPreviewRenderer } from '../../shared/rendering/contracts'
 import type { MeshData } from '../../shared/voxel/mesher'
 import { CHUNK_SIZE, chunkCoords, connectedBodyVoxels, connectedSurfaceVoxels, dirtyChunks, fillShapeVoxels, moveRange, occupiedVoxels, pushPullFaces, pushPullRange, surfaceVoxels, type FillShape, type Vec3, type VoxelDocument } from '../../shared/voxel/document'
 import type { AuxiliaryTool, PaintMode, PbrMap, SculptMode, SelectionMode, SelectionState, Tool } from './studio'
@@ -241,13 +241,17 @@ export class VoxelRenderer {
   private listeners = new AbortController()
   private disposed = false
   private textureLoads = new Map<string, symbol>()
+  private previewPlugin?: ModelPreviewPlugin
+  private preview?: ModelPreviewRenderer
+  get hasPreviewRenderer() { return !!this.previewPlugin }
 
-  constructor(host: HTMLElement | Viewport, document: VoxelDocument, settings: ViewSettings, callbacks: RendererCallbacks) {
+  constructor(host: HTMLElement | Viewport, document: VoxelDocument, settings: ViewSettings, callbacks: RendererCallbacks, previewPlugin?: ModelPreviewPlugin) {
     this.ownsViewport = !(host instanceof Viewport)
     this.viewport = host instanceof Viewport ? host : new Viewport(host, settings, callbacks)
     this.document = document
     this.settings = { ...settings }
     this.callbacks = callbacks
+    this.previewPlugin = previewPlugin
     this.materials = this.createMaterials()
     this.root.add(this.model, this.hover, this.marqueePreview)
     this.hover.visible = this.marqueePreview.visible = false
@@ -260,6 +264,9 @@ export class VoxelRenderer {
       isReady: () => !this.inFlight && !this.queued.size,
       focusTarget: () => this.focusCenter(),
       onViewportChange: () => this.syncViewport(),
+      previewRendererId: previewPlugin?.id,
+      prepareRaster: frame => { if (this.preview?.root.visible) this.preview.prepare(frame) },
+      onContextLost: () => this.disposePreview(),
     }
     this.updateBounds()
     this.setActive(true)
@@ -304,12 +311,21 @@ export class VoxelRenderer {
   private syncViewport() {
     const previous = this.settings
     this.settings = { ...this.viewport.settings }
+    const usePreview = !!this.previewPlugin && this.previewPlugin.id === this.settings.previewRenderer
+    if (usePreview !== !!this.preview?.root.visible) this.viewport.renderer.shadowMap.needsUpdate = true
+    if (usePreview && !this.preview) {
+      this.preview = this.previewPlugin!.create(this.document)
+      this.root.add(this.preview.root)
+    }
+    if (this.preview) this.preview.root.visible = usePreview
     const background = new THREE.Color(this.settings.background)
     const luminance = background.r * 0.2126 + background.g * 0.7152 + background.b * 0.0722
     this.faceGridMaterial.color.setHex(luminance > 0.35 ? 0x20262c : 0xf9faf8)
     this.meshVerticesMaterial.color.copy(this.faceGridMaterial.color)
     this.meshTrianglesMaterial.color.copy(this.faceGridMaterial.color)
     for (const material of this.materials) {
+      // Keep mesh children traversable for context, face grids, and topology overlays.
+      material.visible = !usePreview
       Object.assign(material, { castShadow: this.settings.shadows })
       this.viewport.applyEnvironment(material)
     }
@@ -901,6 +917,7 @@ export class VoxelRenderer {
       this.hover.visible = false
     }
     const isolated = this.isolatedLayerId()
+    if (this.preview?.setLayerScope(isolated)) this.viewport.render()
     const meshLayerId = isolated !== undefined && this.document.layers.some(other => other.visible && other.id !== isolated)
       ? isolated : undefined
     const changed = meshLayerId !== this.meshLayerId
@@ -919,7 +936,7 @@ export class VoxelRenderer {
       }
       this.scheduleMesh()
     }
-    const overlayState = `${meshLayerId}:${layer.visible}:${this.viewport.renderMode}:${this.settings.faceGrid}:${this.settings.meshVertices}:${this.settings.meshTriangles}`
+    const overlayState = `${meshLayerId}:${layer.visible}:${this.viewport.renderMode}:${this.settings.faceGrid}:${this.settings.meshVertices}:${this.settings.meshTriangles}:${!!this.preview?.root.visible}`
     if (overlayState !== this.overlayState) {
       this.overlayState = overlayState
       this.updateMeshOverlayVisibility()
@@ -1363,10 +1380,15 @@ export class VoxelRenderer {
   markDirty(ids: Iterable<number>) {
     if (this.modelSuspended) return
     for (const id of ids) {
+      this.preview?.markDirty([id])
       this.versions.set(id, ++this.nextVersion)
       this.queued.add(id)
       this.queuedGrids.delete(id)
       if (!this.document.chunks.has(id)) this.removeChunk(id)
+      else if (this.preview?.root.visible) {
+        const chunk = this.chunkMeshes.get(id)
+        if (chunk) this.updateMeshOverlayVisibility([chunk])
+      }
     }
     this.viewport.requestPathTraceRebuild()
     this.scheduleMesh()
@@ -1421,6 +1443,7 @@ export class VoxelRenderer {
   }
 
   updatePalette() {
+    this.preview?.updatePalette()
     this.materials.forEach((material, index) => {
       material.color.setHex(this.document.palette[index])
       material.emissive.copy(material.color)
@@ -1469,6 +1492,7 @@ export class VoxelRenderer {
     this.cancelPushPull()
     this.cancelMarquee()
     this.document = document
+    this.preview?.setDocument(document)
     this.layerState = ''
     this.meshLayerId = undefined
     this.overlayState = ''
@@ -1598,6 +1622,9 @@ export class VoxelRenderer {
       const isolated = chunk.children.find(child => child.userData.layerIsolation)
       const focused = !!isolated && this.isolatedLayerId() !== undefined && this.chunkLayerId(chunk.userData.id) === isolated.userData.layerId
         && isolated.userData.version === chunk.userData.version
+      // Sprite edits are synchronous; don't draw stale worker-produced guides/context over them.
+      chunk.visible = !this.preview?.root.visible || chunk.userData.version === (this.versions.get(chunk.userData.id) ?? 0)
+        && (this.meshLayerId === undefined || focused)
       if (isolated) isolated.visible = focused
       for (const surface of isolated ? [chunk, isolated] : [chunk]) for (const child of surface.children) {
         if (child === isolated || child.userData.layerContext) continue
@@ -1630,6 +1657,7 @@ export class VoxelRenderer {
 
   private suspendModelMeshes() {
     this.modelSuspended = true
+    this.disposePreview()
     this.worker.terminate()
     this.workerReady = false
     this.inFlight = 0
@@ -1650,6 +1678,15 @@ export class VoxelRenderer {
     this.bindWorker()
     this.updateSelection([...this.selection.values()], this.floatingSelection, false, false)
     this.markDirty(this.document.chunks.keys())
+  }
+
+  private disposePreview() {
+    this.preview?.root.removeFromParent()
+    this.preview?.dispose()
+    this.preview = undefined
+    this.model.visible = true
+    for (const material of this.materials) material.visible = true
+    this.overlayState = ''
   }
 
   async inspect(views: readonly InspectionView[] = defaultInspectionViews) {
@@ -1678,10 +1715,15 @@ export class VoxelRenderer {
         child.visible = !child.userData.layerIsolation
       }
       this.viewport.renderer.shadowMap.needsUpdate = true
-      try { canvases = this.viewport.renderViews(box, directions) }
+      try {
+        this.preview?.setLayerScope(undefined)
+        canvases = this.viewport.renderViews(box, directions)
+      }
       finally {
+        this.preview?.setLayerScope(this.isolatedLayerId())
         for (const [object, visible] of visibility) object.visible = visible
         this.viewport.renderer.shadowMap.needsUpdate = true
+        if (this.preview?.root.visible) this.viewport.render()
       }
       isometric.forEach((name, index) => {
         const { x, z } = directions[index]

@@ -105,6 +105,13 @@ data uses tabular figures.
   camera, light, geometry, and material changes restart accumulation. The model
   status reports measured rendered FPS without announcing every update. On
   mobile, toggling Render mode does not summon the Stage settings sheet.
+- The model Render tab starts with **Renderer: Standard / Cube sprites**. The optional
+  Cube sprites plugin applies in both Edit and Render modes, uses opaque palette colors, and
+  clearly states that physical materials and texture maps are not applied or changed.
+  It retains tool-driven layer scope, neutral ghost context, and mesh-based editing overlays.
+  Its camera is orthographic and Progressive PBR is disabled without erasing the saved
+  preference. A missing plugin shows Standard with an explicit fallback notice while
+  retaining the saved choice. Keep the existing independent AO and shadow switches.
 - Both Render tabs offer **Miniature photography**, a saved, default-off tilt-shift
   effect visible only in Render mode and included in PNG captures from that mode.
   Enabling it reveals native percentage sliders for **Blur strength**, **Focus
@@ -143,7 +150,8 @@ data uses tabular figures.
   shown or hidden, and locked or unlocked.
   Editing requires an active, visible, unlocked layer; selection targets the
   active visible layer. Hidden layers do not mesh, pick, or export.
-- Select, Paint, and Sculpt keep the active layer at its authored appearance and
+- Select, Paint, and Sculpt keep the active layer at its authored appearance
+  (opaque palette colors with Cube sprites) and
   render other visible layers as faint, neutral translucent context. Picking and
   every selection scope pass through that context, including exact coordinate
   overlaps. Layer, Eyedropper, Volume, Render mode, and model inspection retain

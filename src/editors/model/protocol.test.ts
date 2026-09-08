@@ -9,6 +9,40 @@ import { DEFAULT_SETTINGS, SKYBOX_PRESETS, type SkyboxPreset } from '../../share
 const settings = { ...DEFAULT_SETTINGS }
 
 describe('scripting protocol', () => {
+  test('preview renderer IDs validate without requiring an installed plugin', () => {
+    const parse = (previewRenderer: unknown) => parseRequest({ protocol: PROTOCOL, id: 'renderer', command: { type: 'settings.update', patch: { previewRenderer } } }).command
+    for (const previewRenderer of ['standard', 'cube-sprites'] as const) expect(parse(previewRenderer)).toEqual({ type: 'settings.update', patch: { previewRenderer } })
+    const document = new VoxelDocument(), snapshot = encodeProjectSnapshot(document, settings), stored = snapshotProject(document, settings)
+    for (const previewRenderer of [null, false, 0, '', 'Cube sprites', 'cube-sprites ', 'unknown', 'toString', '__proto__', [], {}]) {
+      expect(() => parse(previewRenderer)).toThrow('command.patch.previewRenderer must be one of')
+      expect(() => parseProjectSnapshot({ ...snapshot, settings: { ...settings, previewRenderer } })).toThrow('previewRenderer')
+      expect(() => restoreProjectSnapshot({ ...stored, settings: { ...settings, previewRenderer } } as typeof stored)).toThrow('previewRenderer')
+    }
+    expect(() => parse(undefined)).toThrow('must change at least one setting')
+  })
+
+  test('preview renderer preferences round-trip and old snapshots default to Standard', () => {
+    expect(DEFAULT_SETTINGS.previewRenderer).toBe('standard')
+    const document = new VoxelDocument()
+    document.setVoxel(1, 2, 3, 5)
+    for (const previewRenderer of ['standard', 'cube-sprites', undefined] as const) {
+      const expected = { ...settings, previewRenderer: previewRenderer ?? 'standard', projection: 'perspective' as const, pathTracing: true }
+      const snapshot = encodeProjectSnapshot(document, expected), stored = snapshotProject(document, expected)
+      if (previewRenderer === undefined) {
+        Reflect.deleteProperty(snapshot.settings, 'previewRenderer')
+        Reflect.deleteProperty(stored.settings, 'previewRenderer')
+      }
+      const decoded = decodeProjectSnapshot(JSON.parse(JSON.stringify(snapshot)))
+      expect(decoded.settings).toEqual(expected)
+      expect(encodeProjectSnapshot(decoded.document, decoded.settings)).toEqual({ ...snapshot, settings: expected })
+      for (const version of [1, 2, 3] as const) {
+        const recovered = restoreProjectSnapshot(structuredClone({ ...stored, version }))!
+        expect(recovered.settings).toEqual(expected)
+        expect(snapshotProject(recovered.document, recovered.settings)).toEqual({ ...stored, settings: expected })
+      }
+    }
+  })
+
   test('skybox settings accept only preset keys at command and persistence boundaries', () => {
     expect(SKYBOX_PRESETS).toEqual({ solid: 'Solid color', daylight: 'Daylight', overcast: 'Overcast', sunset: 'Sunset', night: 'Night' })
     const parse = (skybox: unknown) => parseRequest({ protocol: PROTOCOL, id: 'skybox', command: { type: 'settings.update', patch: { skybox } } }).command

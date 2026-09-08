@@ -617,7 +617,8 @@ export class SceneRenderer {
         for (const [id, localBounds] of entry.asset.chunkBounds) {
           const worldBounds = localBounds.clone().applyMatrix4(matrix)
           const chunkVisible = visible && frustum.intersectsBox(worldBounds)
-          const chunkCaster = shadowVolume?.intersectsBox(worldBounds) && entry.asset.chunks.get(id)!.some(chunk => chunk.colors.some(color => castsRealtimeShadow(entry.asset.asset.model.materials[color])))
+           const chunkCaster = shadowVolume?.intersectsBox(worldBounds) && (!this.document.data.settings.pbrMaterials
+             || entry.asset.chunks.get(id)!.some(chunk => chunk.colors.some(color => castsRealtimeShadow(entry.asset.asset.model.materials[color]))))
           if (!chunkVisible && !selected && !chunkCaster) continue
           const demand = require(entry.asset, id, entry.lod, selected ? 0 : 10 + distance)
           if (!chunkVisible && !chunkCaster) continue

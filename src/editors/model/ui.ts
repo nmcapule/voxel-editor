@@ -209,10 +209,11 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
         <section class="panel-section" role="tabpanel" aria-labelledby="render-tab" data-panel="render" hidden>
           <div class="section-heading"><h2>Render</h2><span>Realtime / progressive</span></div>
           <label class="select-row"><span>Renderer</span><select id="preview-renderer" aria-describedby="preview-renderer-help"><option value="standard">Standard</option><option value="cube-sprites" disabled>Cube sprites</option></select></label>
-          <label id="cube-sprites-pbr-row" class="toggle-row" hidden><span>PBR materials</span><input id="cube-sprites-pbr" type="checkbox" aria-describedby="preview-renderer-help" disabled></label>
           <p id="preview-renderer-help" class="panel-note" aria-live="polite" hidden></p>
+          <label class="toggle-row"><span>PBR materials</span><input id="pbr-materials" type="checkbox" aria-describedby="pbr-materials-help"></label>
+          <p id="pbr-materials-help" class="panel-note">Shared by Standard and Cube sprites for realtime rendering only. Off uses opaque palette colors without changing materials or maps. Progressive PBR is independent.</p>
           <label class="select-row"><span>Camera</span><select id="projection" aria-describedby="preview-renderer-help"><option value="orthographic">Orthographic</option><option value="perspective">Perspective</option></select></label>
-          <label class="toggle-row"><span>Progressive PBR <output id="path-status" aria-live="polite">Ready</output></span><input id="path-tracing" type="checkbox" aria-label="Progressive PBR" aria-describedby="preview-renderer-help"></label>
+          <label class="toggle-row"><span>Progressive PBR <output id="path-status" aria-live="polite">Ready</output></span><input id="path-tracing" type="checkbox" aria-label="Progressive PBR" aria-describedby="pbr-materials-help preview-renderer-help"></label>
           <label class="toggle-row"><span>Miniature photography</span><input id="tilt-shift" type="checkbox" aria-describedby="tilt-shift-help" aria-controls="tilt-shift-controls"></label>
           <p id="tilt-shift-help" class="panel-note">A tilt-shift effect visible only in Render mode and included in PNG captures from Render mode.</p>
           <div id="tilt-shift-controls" hidden>

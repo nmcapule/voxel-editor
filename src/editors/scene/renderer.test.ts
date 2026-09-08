@@ -670,6 +670,16 @@ test('shadows ON load relevant offscreen casters, not far noncasters or unrelate
     expect(probe.diagnostics.meshJobs).toBe(3) // Near full/preview plus shared shadow LOD 8, all chunk 0.
     expect([...probe.surfaces.values()].every((surface: any) => surface.demand.asset.asset.id === 'shared' && surface.demand.id === 0)).toBe(true)
     probe.report(); expect(probe.stats.detail).toContain('relevant shadow contributors')
+    read.mockImplementation(async blob => {
+      expect([hash, glass.chunks[0].blob]).toContain(blob)
+      return raw.slice()
+    })
+    probe.refresh(doc.execute({ type: 'scene.settings', patch: { pbrMaterials: false } })); probe.reconcile()
+    expect(new Set([...probe.desired.values()].map((d: any) => d.asset.asset.id))).toEqual(new Set(['shared', 'glass']))
+    await drainSceneWorker(probe)
+    expect(new Set([...probe.batches.values()].flatMap((batch: any) => batch.ids))).toEqual(new Set(['near', 'caster', 'far-caster', 'noncasting-glass']))
+    probe.refresh(doc.execute({ type: 'scene.settings', patch: { pbrMaterials: true } })); probe.reconcile()
+    expect(new Set([...probe.batches.values()].flatMap((batch: any) => batch.ids))).toEqual(ids)
     const controller = new AbortController(), full = probe.prepareFullDetail(controller.signal)
     expect(new Set([...probe.fullDetailDemand.values()].map((d: any) => d.asset.asset.id))).toEqual(new Set(['shared', 'other', 'glass']))
     expect([...probe.fullDetailDemand.values()].some((d: any) => d.id === 8 && d.lod === 1)).toBe(true)

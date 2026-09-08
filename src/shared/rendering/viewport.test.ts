@@ -719,9 +719,31 @@ test('sky changes own resources, update tracing and preserve maps on intensity/r
   }
 })
 
-test('orthographic raster samples the rotated sky and restores the texture on rendering failure', () => {
+test('realtime PBR toggles invalidate shadows without changing progressive tracing or its lighting', () => {
+  const { probe, pathTracer } = photoProbe()
+  probe.render = () => {}
+  probe.settings.skybox = 'daylight'
+  for (const pbrMaterials of [false, true, false]) {
+    probe.renderer.shadowMap.needsUpdate = false
+    probe.setSettings({ ...probe.settings, pbrMaterials })
+    expect(probe.renderer.shadowMap.needsUpdate).toBe(true)
+    expect(probe.settings.pathTracing && probe.pathTracingEnabled() && probe.pathTracingReady).toBe(true)
+    expect(probe.pathTracingRevision).toBe(0)
+    expect(pathTracer.reset).not.toHaveBeenCalled()
+    expect(probe.hemisphere.intensity).toBe(0)
+    const raster = { pbrMaterials: true, render() {
+      expect(raster.pbrMaterials).toBe(pbrMaterials)
+      expect(probe.hemisphere.intensity).toBe(pbrMaterials ? 0 : probe.settings.ambient)
+    } }
+    probe.renderRaster(undefined, raster, true)
+    expect(probe.hemisphere.intensity).toBe(0)
+  }
+})
+
+test('orthographic non-PBR raster restores sky and ambient lighting on rendering failure', () => {
   const { probe } = photoProbe()
-  probe.settings = { ...probe.settings, skybox: 'sunset', pathTracing: false }
+  probe.settings = { ...probe.settings, skybox: 'sunset', pathTracing: false, pbrMaterials: false }
+  probe.hemisphere.intensity = 0
   probe.skyTexture = createSkyTexture('sunset')
   probe.scene.background = probe.skyTexture
   probe.scene.backgroundRotation.y = -Math.PI / 2
@@ -729,6 +751,8 @@ test('orthographic raster samples the rotated sky and restores the texture on re
   probe.camera.lookAt(0, 0, 1)
   const expected = skyColor('sunset', new THREE.Vector3(1, 0, 0))
   probe.raster.render = () => {
+    expect(probe.raster.pbrMaterials).toBe(false)
+    expect(probe.hemisphere.intensity).toBe(probe.settings.ambient)
     expect(probe.scene.background).toBeInstanceOf(THREE.Color)
     expect(probe.scene.background.r).toBeCloseTo(expected.r)
     throw new Error('raster failed')
@@ -736,6 +760,7 @@ test('orthographic raster samples the rotated sky and restores the texture on re
   try {
     expect(() => probe.renderRaster()).toThrow('raster failed')
     expect(probe.scene.background).toBe(probe.skyTexture)
+    expect(probe.hemisphere.intensity).toBe(0)
     expect(probe.scene.backgroundRotation.y).toBe(-Math.PI / 2)
   } finally { probe.skyTexture.dispose() }
 })

@@ -23,7 +23,7 @@ export interface ViewSettings {
   meshVertices: boolean
   meshTriangles: boolean
   previewRenderer: 'standard' | 'cube-sprites'
-  cubeSpritesPbr: boolean
+  pbrMaterials: boolean
   projection: 'orthographic' | 'perspective'
   pathTracing: boolean
   tiltShift: boolean
@@ -35,14 +35,14 @@ export interface ViewSettings {
 export const DEFAULT_SETTINGS: ViewSettings = {
   skybox: 'solid', background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42,
   ambientOcclusion: true, shadows: true, grid: true, faceGrid: false,
-  meshVertices: false, meshTriangles: false, previewRenderer: 'standard', cubeSpritesPbr: false, projection: 'orthographic', pathTracing: true,
+  meshVertices: false, meshTriangles: false, previewRenderer: 'standard', pbrMaterials: true, projection: 'orthographic', pathTracing: true,
   tiltShift: false, tiltShiftStrength: 0.5, tiltShiftFocus: 0.5, tiltShiftWidth: 0.3,
 }
 
 export function settingsPatch(value: unknown): Partial<ViewSettings> {
   const input = record(value, 'command.patch')
   const patch: Partial<ViewSettings> = {}
-  const allowed = new Set(Object.keys(DEFAULT_SETTINGS))
+  const allowed = new Set([...Object.keys(DEFAULT_SETTINGS), 'cubeSpritesPbr'])
   for (const key of Object.keys(input)) if (!allowed.has(key)) throw invalid(`Unknown setting: ${key}.`)
   if (input.skybox !== undefined) patch.skybox = oneOf(input.skybox, 'command.patch.skybox', Object.keys(SKYBOX_PRESETS) as SkyboxPreset[])
   if (input.background !== undefined) {
@@ -60,7 +60,12 @@ export function settingsPatch(value: unknown): Partial<ViewSettings> {
   if (input.meshVertices !== undefined) patch.meshVertices = booleanValue(input.meshVertices, 'command.patch.meshVertices')
   if (input.meshTriangles !== undefined) patch.meshTriangles = booleanValue(input.meshTriangles, 'command.patch.meshTriangles')
   if (input.previewRenderer !== undefined) patch.previewRenderer = oneOf(input.previewRenderer, 'command.patch.previewRenderer', ['standard', 'cube-sprites'] as const)
-  if (input.cubeSpritesPbr !== undefined) patch.cubeSpritesPbr = booleanValue(input.cubeSpritesPbr, 'command.patch.cubeSpritesPbr')
+  if (input.pbrMaterials !== undefined) patch.pbrMaterials = booleanValue(input.pbrMaterials, 'command.patch.pbrMaterials')
+  if (input.cubeSpritesPbr !== undefined) {
+    const legacyPbr = booleanValue(input.cubeSpritesPbr, 'command.patch.cubeSpritesPbr')
+    if (patch.pbrMaterials !== undefined && patch.pbrMaterials !== legacyPbr) throw invalid('command.patch.pbrMaterials and cubeSpritesPbr must not conflict.')
+    patch.pbrMaterials = legacyPbr
+  }
   if (input.pathTracing !== undefined) patch.pathTracing = booleanValue(input.pathTracing, 'command.patch.pathTracing')
   if (input.tiltShift !== undefined) patch.tiltShift = booleanValue(input.tiltShift, 'command.patch.tiltShift')
   for (const key of ['tiltShiftStrength', 'tiltShiftFocus', 'tiltShiftWidth'] as const) {
@@ -72,8 +77,11 @@ export function settingsPatch(value: unknown): Partial<ViewSettings> {
 }
 
 export function parseSettings(value: unknown): ViewSettings {
-  const input = record(value, 'snapshot.settings')
-  const patch = settingsPatch(input)
+  const { cubeSpritesPbr, ...input } = record(value, 'snapshot.settings')
+  const legacyPbr = cubeSpritesPbr === undefined ? false : booleanValue(cubeSpritesPbr, 'snapshot.settings.cubeSpritesPbr')
+  // Saved Standard rendering was always physical; only Cube sprites used the legacy flag.
+  const patch = settingsPatch({ ...input, pbrMaterials: input.pbrMaterials !== undefined ? input.pbrMaterials
+    : input.previewRenderer === 'cube-sprites' ? legacyPbr : true })
   const required = ['background', 'ambient', 'light', 'lightAzimuth', 'ambientOcclusion', 'shadows', 'grid', 'faceGrid', 'projection', 'pathTracing'] as const
   if (required.some(property => patch[property] === undefined)) throw invalid('snapshot.settings is incomplete.')
   return { ...DEFAULT_SETTINGS, ...patch }

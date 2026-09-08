@@ -33,6 +33,21 @@ function fixture(instances = [instance()], assets = [asset()]): SceneManifest {
 }
 
 describe('scene boundary', () => {
+  test('legacy scene PBR stays on while child models retain their own renderer migration', () => {
+    for (const previewRenderer of ['standard', 'cube-sprites'] as const) for (const pbrMaterials of [undefined, false, true]) {
+      const manifest = structuredClone(fixture())
+      const saved = { ...settings, previewRenderer, cubeSpritesPbr: false, pbrMaterials }
+      if (pbrMaterials === undefined) Reflect.deleteProperty(saved, 'pbrMaterials')
+      manifest.settings = saved as typeof settings
+      manifest.assets[0].model.settings = { ...saved } as typeof settings
+      const parsed = parseSceneManifest(manifest)
+      expect(parsed.settings.pbrMaterials).toBe(pbrMaterials ?? true)
+      expect(parsed.assets[0].model.settings.pbrMaterials).toBe(pbrMaterials ?? previewRenderer === 'standard')
+      expect(parsed.settings).not.toHaveProperty('cubeSpritesPbr')
+      expect(parseSceneManifest(JSON.parse(JSON.stringify(parsed)))).toEqual(parsed)
+    }
+  })
+
   test('skybox presets round-trip in scenes and child models with legacy solid defaults', () => {
     for (const skybox of ['solid', 'daylight', 'overcast', 'sunset', 'night', undefined] as const) {
       const expected = { ...settings, skybox: skybox ?? 'solid', background: '#243648', ambient: 0.7, light: 3.1, lightAzimuth: -72, tiltShift: true, tiltShiftStrength: 0.8, tiltShiftFocus: 0.3, tiltShiftWidth: 0.1 }

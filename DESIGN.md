@@ -105,10 +105,15 @@ data uses tabular figures.
   camera, light, geometry, and material changes restart accumulation. The model
   status reports measured rendered FPS without announcing every update. On
   mobile, toggling Render mode does not summon the Stage settings sheet.
-- The model Render tab starts with **Renderer: Standard / Cube sprites**. The optional
-  Cube sprites plugin applies in both Edit and Render modes, uses opaque palette colors, and
-  clearly states that physical materials and texture maps are not applied or changed.
-  It retains tool-driven layer scope, neutral ghost context, and mesh-based editing overlays.
+- The model Render tab starts with **Renderer: Standard / Cube sprites**. The
+  **PBR materials** native checkbox below it is always visible and enabled, even when
+  the plugin is unavailable. It controls one saved, default-on preference shared by
+  both realtime renderers; switching renderer keeps its value. Concise help distinguishes
+  this from independent **Progressive PBR** and explains that off uses opaque palette
+  colors without changing authored materials or texture maps. Legacy saves retain
+  their prior renderer's appearance through [migration](RENDERING.md#shared-realtime-pbr).
+  Cube sprites applies in Edit and Render modes, retaining tool-driven layer scope,
+  neutral ghost context, and mesh-based editing overlays.
   Its camera is orthographic and Progressive PBR is disabled without erasing the saved
   preference. A missing plugin shows Standard with an explicit fallback notice while
   retaining the saved choice. Keep the existing independent AO and shadow switches.
@@ -151,7 +156,7 @@ data uses tabular figures.
   Editing requires an active, visible, unlocked layer; selection targets the
   active visible layer. Hidden layers do not mesh, pick, or export.
 - Select, Paint, and Sculpt keep the active layer at its authored appearance
-  (opaque palette colors with Cube sprites) and
+  (opaque palette colors when realtime PBR materials is off) and
   render other visible layers as faint, neutral translucent context. Picking and
   every selection scope pass through that context, including exact coordinate
   overlaps. Layer, Eyedropper, Volume, Render mode, and model inspection retain

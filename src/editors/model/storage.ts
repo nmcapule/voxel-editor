@@ -78,7 +78,7 @@ export async function loadProject() {
 export function restoreProjectSnapshot(stored: StoredProject) {
   if (!stored || stored.version !== 1 && stored.version !== 2 && stored.version !== 3) return undefined
   const { roughness, metalness, ...view } = stored.settings as ViewSettings & Partial<PaletteMaterial>
-  const settings = parseSettings({ ...DEFAULT_SETTINGS, ...view })
+  const settings = parseSettings({ ...DEFAULT_SETTINGS, ...view, pbrMaterials: view.pbrMaterials })
   const materials = stored.materials ?? (roughness === undefined && metalness === undefined ? undefined
     : Array.from({ length: 256 }, () => ({ roughness: roughness ?? 0.68, metalness: metalness ?? 0.02 })))
   const document = new VoxelDocument(stored.dimensions, stored.name, new Uint32Array(stored.palette), materials, stored.version >= 2 ? stored.layers : undefined, stored.activeLayerId, stored.paletteOccupied ? new Uint8Array(stored.paletteOccupied) : undefined)

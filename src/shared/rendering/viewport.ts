@@ -567,7 +567,7 @@ export class Viewport {
       this.sunlight.position.set(Math.cos(radians) * Math.cos(elevation), Math.sin(elevation), Math.sin(radians) * Math.cos(elevation))
         .multiplyScalar(radius * 3).add(this.sunlightTarget.position)
     } else this.sunlight.position.set(Math.cos(radians) * radius, radius * 1.7, Math.sin(radians) * radius).add(center)
-    if (skyChanged || settings.shadows !== previous.shadows || settings.lightAzimuth !== previous.lightAzimuth) this.renderer.shadowMap.needsUpdate = true
+    if (skyChanged || previewChanged || settings.pbrMaterials !== previous.pbrMaterials || settings.shadows !== previous.shadows || settings.lightAzimuth !== previous.lightAzimuth) this.renderer.shadowMap.needsUpdate = true
     this.fitShadowCamera()
     if (projectionChanged) this.switchProjection(settings.projection)
     this.sceneContent?.onViewportChange()
@@ -891,6 +891,7 @@ export class Viewport {
 
   private renderRaster(camera = this.camera, raster = this.raster, shadows = !this.pathTracingEnabled()) {
     if (this.contextLost) return
+    raster.pbrMaterials = this.settings.pbrMaterials || this.previewSelected()
     // FXAA washes out pixel-wide triangle edges; keep the topology inspection view sharp.
     if (raster === this.raster) raster.antialias = !this.settings.meshTriangles || this.renderMode || this.worldScale
     const shadowMap = this.renderer.shadowMap
@@ -902,14 +903,18 @@ export class Viewport {
       this.scene.background = skyColor(this.settings.skybox, direction)
     }
     const enabled = shadowMap.enabled, needsUpdate = shadowMap.needsUpdate, castShadow = this.sunlight.castShadow
+    const ambient = this.hemisphere.intensity
     // Light shadow counts also switch shaders, preventing cached-map sampling in trace previews.
     shadowMap.enabled = this.sunlight.castShadow = this.settings.shadows && shadows
+    // Lambert materials do not sample the sky environment. Keep this raster-only light out of tracing.
+    if (!raster.pbrMaterials) this.hemisphere.intensity = this.settings.ambient
     try {
       this.sceneContent?.prepareRaster?.({ renderer: this.renderer, camera, light: this.sunlight, settings: this.settings,
         width: raster.readBuffer.width, height: raster.readBuffer.height })
       raster.render(camera)
     }
     finally {
+      this.hemisphere.intensity = ambient
       this.scene.background = background
       if (!shadowMap.enabled) shadowMap.needsUpdate = needsUpdate
       shadowMap.enabled = enabled

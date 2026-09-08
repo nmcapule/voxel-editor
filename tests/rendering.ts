@@ -182,7 +182,7 @@ export async function runRenderingChecks(renderer: VoxelRenderer, settings: View
   const viewport = renderer.viewport
   const [{ VoxelDocument }, THREE] = await Promise.all([import('../src/shared/voxel/document'), import('three')])
   return withViewport(renderer, 512, async () => {
-    const baseline: ViewSettings = { ...settings, projection: 'orthographic', pathTracing: false, ambientOcclusion: false, shadows: false, grid: false, faceGrid: false, meshVertices: false, meshTriangles: false }
+    const baseline: ViewSettings = { ...settings, previewRenderer: 'standard', pbrMaterials: true, projection: 'orthographic', pathTracing: false, ambientOcclusion: false, shadows: false, grid: false, faceGrid: false, meshVertices: false, meshTriangles: false }
     const webgl = viewport.renderer
     const errorStart = errors.length
     const counters = { raster: 0, webgl: 0, workerMessages: 0, meshJobs: 0, gridJobs: 0 }
@@ -248,6 +248,81 @@ export async function runRenderingChecks(renderer: VoxelRenderer, settings: View
       return grids
     }
     try {
+      await run('Standard realtime PBR on/off/on preserves authored materials and maps', async () => {
+        const document = fixture()
+        Object.assign(document.materials[40], { opacity: 1, metalness: 1, emissiveIntensity: 0 })
+        Object.assign(document.materials[43], { opacity: 1, transmission: 0, emissiveIntensity: 3 })
+        fill(document, 42, 5, 0, 6, 27, 1, 27)
+        fill(document, 40, 7, 1, 18, 12, 7, 20)
+        fill(document, 41, 14, 3, 19, 18, 9, 20)
+        fill(document, 42, 14, 3, 15, 18, 9, 16)
+        fill(document, 43, 21, 1, 18, 25, 7, 20)
+        await load(document)
+        const textureCanvas = new OffscreenCanvas(2, 2), textureContext = textureCanvas.getContext('2d')!
+        textureContext.fillStyle = '#2244aa'; textureContext.fillRect(0, 0, 2, 2)
+        textureContext.fillStyle = '#ffffff'; textureContext.fillRect(0, 0, 1, 1)
+        await renderer.setPbrMap(40, 'map', await textureCanvas.convertToBlob())
+        const materials = Reflect.get(renderer, 'materials') as import('three').MeshPhysicalMaterial[]
+        const map = materials[40].map
+        const sourceState = JSON.stringify(document.materials)
+        const model = Reflect.get(renderer, 'model') as Object3D
+        const geometries: import('three').BufferGeometry[] = []
+        model.traverse(object => { if (object instanceof THREE.Mesh) geometries.push(object.geometry) })
+        const start = jobs.length
+        const physical = await image(renderer)
+        renderer.setSettings({ ...baseline, pbrMaterials: false })
+        const plain = await image(renderer)
+        const probes = [[9, 4, 20], [16, 6, 20], [23, 4, 20]] as const
+        const deltas = probes.map(([x, y, z]) => difference(at(physical, x, y, z), at(plain, x, y, z)))
+        check(deltas.every(delta => delta.mean > 3), `Metal, glass and emission must change when PBR is off: ${JSON.stringify(deltas)}`)
+        check(Reflect.get(viewport, 'raster').lastFrame.triangleBound === 0, 'Non-PBR glass must render as opaque, without peeling')
+        const inspect = () => viewport.renderViews(new THREE.Box3().setFromObject(model), [new THREE.Vector3(1, 1, 1)])[0]
+          .getContext('2d')!.getImageData(0, 0, 512, 512).data
+        const plainInspection = inspect()
+        renderer.setSettings(baseline)
+        const restored = difference(physical.data, (await image(renderer)).data)
+        check(restored.max <= 1, `PBR re-enable must restore the original pixels: ${JSON.stringify(restored)}`)
+        check(difference(plainInspection, inspect()).mean > 0.5, 'Offscreen raster inspection must respect PBR materials')
+        check(JSON.stringify(document.materials) === sourceState && materials[40].map === map, 'Toggling must not alter authored properties or texture bindings')
+        const current: import('three').BufferGeometry[] = []
+        model.traverse(object => { if (object instanceof THREE.Mesh) current.push(object.geometry) })
+        check(jobs.length === start && current.every((geometry, i) => geometry === geometries[i]), 'PBR toggles must reuse geometry without worker jobs')
+
+        renderer.setSettings({ ...baseline, pbrMaterials: false })
+        Object.assign(document.materials[40], { roughness: 0.9, metalness: 0.2, emissiveIntensity: 2 })
+        Object.assign(document.materials[41], { opacity: 0.3, transmission: 0.6, ior: 1.4 })
+        document.materials[43].emissiveIntensity = 0
+        for (const index of [40, 41, 43]) renderer.updatePaletteMaterial(index)
+        textureContext.fillStyle = '#33dd77'; textureContext.fillRect(0, 0, 2, 2)
+        await renderer.setPbrMap(40, 'map', await textureCanvas.convertToBlob())
+        const editedPlain = difference(plain.data, (await image(renderer)).data)
+        check(editedPlain.max <= 1, `Physical edits/maps must not affect PBR-off pixels: ${JSON.stringify(editedPlain)}`)
+        document.palette[40] = 0x22dd55
+        renderer.updatePalette()
+        const recolored = difference(at(plain, 9, 4, 20), at(await image(renderer), 9, 4, 20))
+        check(recolored.mean > 10, 'Palette recoloring must remain live with PBR off')
+        renderer.setSettings(baseline)
+        check(difference(physical.data, (await image(renderer)).data).mean > 1, 'Re-enabling PBR must use edits and maps made while off')
+
+        renderer.setSettings({ ...baseline, pbrMaterials: false, skybox: 'daylight', light: 0, ambient: 0 })
+        const dark = at(await image(renderer), 9, 4, 20)
+        renderer.setSettings({ ...viewport.settings, ambient: 1.2 })
+        const ambientDelta = difference(dark, at(await image(renderer), 9, 4, 20))
+        check(ambientDelta.mean > 10, 'Non-PBR materials must receive ambient lighting under a sky preset')
+        renderer.setView({ position: { x: 25, y: 23, z: 34 }, target: { x: 0, y: 3, z: 0 }, orthographicSpan: 32 })
+        renderer.setSettings({ ...baseline, pbrMaterials: false, shadows: true, ambient: 0.4, light: 4 })
+        const shadowed = await image(renderer)
+        renderer.setSettings({ ...viewport.settings, shadows: false })
+        const shadowDelta = difference(shadowed.data, (await image(renderer)).data)
+        check(shadowDelta.mean > 0.1, 'Non-PBR voxels must cast and receive shadows')
+        renderer.setSettings({ ...viewport.settings, ambientOcclusion: true })
+        const withAo = await image(renderer)
+        renderer.setSettings({ ...viewport.settings, ambientOcclusion: false })
+        const aoDelta = difference(withAo.data, (await image(renderer)).data)
+        check(aoDelta.mean > 0.01, 'Non-PBR voxels must still receive ambient occlusion')
+        return { deltas, restored, editedPlain, recolored, ambientDelta, shadowDelta, aoDelta }
+      })
+
       await run('alpha behind and in front of transmission', async () => {
         const samples: number[][] = []
         for (const alphaZ of [14, 22]) {

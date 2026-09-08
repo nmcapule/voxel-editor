@@ -9,25 +9,80 @@ import { DEFAULT_SETTINGS, SKYBOX_PRESETS, type SkyboxPreset } from '../../share
 const settings = { ...DEFAULT_SETTINGS }
 
 describe('scripting protocol', () => {
-  test('Cube sprites PBR validates and round-trips independently of progressive PBR, defaulting off for old saves', () => {
-    expect(DEFAULT_SETTINGS.cubeSpritesPbr).toBe(false)
+  test('realtime PBR updates normalize the legacy alias and reject conflicts', () => {
+    const parse = (patch: unknown) => parseRequest({ protocol: PROTOCOL, id: 'pbr', command: { type: 'settings.update', patch } }).command
     const document = new VoxelDocument()
-    for (const cubeSpritesPbr of [false, true, undefined]) {
-      const expected = { ...settings, previewRenderer: 'cube-sprites' as const, cubeSpritesPbr: cubeSpritesPbr ?? false, pathTracing: true }
-      const snapshot = encodeProjectSnapshot(document, expected), stored = snapshotProject(document, expected)
-      if (cubeSpritesPbr === undefined) {
-        Reflect.deleteProperty(snapshot.settings, 'cubeSpritesPbr')
-        Reflect.deleteProperty(stored.settings, 'cubeSpritesPbr')
-      } else {
-        expect(parseRequest({ protocol: PROTOCOL, id: 'pbr', command: { type: 'settings.update', patch: { cubeSpritesPbr } } }).command).toEqual({ type: 'settings.update', patch: { cubeSpritesPbr } })
-      }
-      expect(decodeProjectSnapshot(JSON.parse(JSON.stringify(snapshot))).settings).toEqual(expected)
-      expect(restoreProjectSnapshot(structuredClone(stored))!.settings).toEqual(expected)
+    for (const pbrMaterials of [false, true]) {
+      const expected = { type: 'settings.update' as const, patch: { pbrMaterials } }
+      expect(parse({ pbrMaterials })).toEqual(expected)
+      expect(parse({ pbrMaterials, cubeSpritesPbr: pbrMaterials })).toEqual(expected)
+      const command = parse({ cubeSpritesPbr: pbrMaterials })
+      expect(command).toEqual(expected)
+      if (command.type !== 'settings.update') throw new Error('Expected settings.update')
+      const normalized = { ...settings, ...command.patch }
+      expect(encodeProjectSnapshot(document, normalized).settings).toEqual({ ...settings, pbrMaterials })
+      expect(snapshotProject(document, normalized).settings).toEqual({ ...settings, pbrMaterials })
+      expect(() => parse({ pbrMaterials, cubeSpritesPbr: !pbrMaterials })).toThrow('must not conflict')
     }
-    for (const cubeSpritesPbr of [null, 0, 1, 'true', [], {}]) {
-      expect(() => parseRequest({ protocol: PROTOCOL, id: 'pbr', command: { type: 'settings.update', patch: { cubeSpritesPbr } } })).toThrow('cubeSpritesPbr')
-      expect(() => parseProjectSnapshot({ ...encodeProjectSnapshot(document, settings), settings: { ...settings, cubeSpritesPbr } })).toThrow('cubeSpritesPbr')
-      expect(() => restoreProjectSnapshot({ ...snapshotProject(document, settings), settings: { ...settings, cubeSpritesPbr } } as any)).toThrow('cubeSpritesPbr')
+    for (const patch of [{ pbrMaterials: undefined }, { cubeSpritesPbr: undefined }, { pbrMaterial: true }]) expect(() => parse(patch)).toThrow()
+  })
+
+  test('realtime PBR validates canonical and legacy booleans even when the legacy value is unused', () => {
+    const document = new VoxelDocument(), snapshot = encodeProjectSnapshot(document, settings), stored = snapshotProject(document, settings)
+    for (const key of ['pbrMaterials', 'cubeSpritesPbr']) for (const value of [null, 0, 1, NaN, 'false', 'true', [], {}]) {
+      for (const patch of [{ [key]: value }, { pbrMaterials: true, cubeSpritesPbr: true, [key]: value }]) {
+        expect(() => parseRequest({ protocol: PROTOCOL, id: 'pbr', command: { type: 'settings.update', patch } })).toThrow(key)
+      }
+      for (const previewRenderer of ['standard', 'cube-sprites', undefined]) {
+        const invalid = { ...settings, previewRenderer, [key]: value }
+        expect(() => parseProjectSnapshot({ ...snapshot, settings: invalid })).toThrow(key)
+        expect(() => restoreProjectSnapshot({ ...stored, settings: invalid } as typeof stored)).toThrow(key)
+        if (key === 'cubeSpritesPbr') {
+          Reflect.deleteProperty(invalid, 'pbrMaterials')
+          expect(() => parseProjectSnapshot({ ...snapshot, settings: invalid })).toThrow(key)
+          expect(() => restoreProjectSnapshot({ ...stored, settings: invalid } as typeof stored)).toThrow(key)
+        }
+      }
+    }
+  })
+
+  test('shared realtime PBR defaults on and round-trips independently of renderer and progressive PBR', () => {
+    expect(DEFAULT_SETTINGS.pbrMaterials).toBe(true)
+    expect(DEFAULT_SETTINGS).not.toHaveProperty('cubeSpritesPbr')
+    const document = new VoxelDocument()
+    document.setVoxel(1, 2, 3, 7)
+    for (const previewRenderer of ['standard', 'cube-sprites'] as const) for (const pbrMaterials of [false, true]) for (const pathTracing of [false, true]) {
+      const expected = { ...settings, previewRenderer, pbrMaterials, pathTracing }
+      const snapshot = encodeProjectSnapshot(document, expected), stored = snapshotProject(document, expected)
+      expect(snapshot.settings).not.toHaveProperty('cubeSpritesPbr')
+      expect(stored.settings).not.toHaveProperty('cubeSpritesPbr')
+      const decoded = decodeProjectSnapshot(JSON.parse(JSON.stringify(snapshot)))
+      expect(decoded.settings).toEqual(expected)
+      expect(encodeProjectSnapshot(decoded.document, decoded.settings)).toEqual(snapshot)
+      const recovered = restoreProjectSnapshot(structuredClone(stored))!
+      expect(recovered.settings).toEqual(expected)
+      expect(snapshotProject(recovered.document, recovered.settings)).toEqual(stored)
+    }
+  })
+
+  for (const version of ['project', 1, 2, 3] as const) test(`saved realtime PBR migrates by renderer with canonical precedence and canonical-only resaves (${version})`, () => {
+    const document = new VoxelDocument(), snapshot = encodeProjectSnapshot(document, settings), stored = snapshotProject(document, settings)
+    for (const previewRenderer of ['standard', 'cube-sprites', undefined] as const) for (const cubeSpritesPbr of [false, true, undefined]) for (const pbrMaterials of [false, true, undefined]) {
+      const saved = { ...settings, previewRenderer, cubeSpritesPbr, pbrMaterials }
+      for (const key of ['previewRenderer', 'cubeSpritesPbr', 'pbrMaterials'] as const) if (saved[key] === undefined) Reflect.deleteProperty(saved, key)
+      const before = structuredClone(saved)
+      const expected = { ...settings, previewRenderer: previewRenderer ?? 'standard',
+        pbrMaterials: pbrMaterials ?? (previewRenderer === 'cube-sprites' ? cubeSpritesPbr ?? false : true) }
+      if (version === 'project') {
+        const decoded = decodeProjectSnapshot({ ...snapshot, settings: saved })
+        expect(decoded.settings).toEqual(expected)
+        expect(encodeProjectSnapshot(decoded.document, decoded.settings)).toEqual({ ...snapshot, settings: expected })
+      } else {
+        const recovered = restoreProjectSnapshot({ ...stored, version, settings: saved } as typeof stored)!
+        expect(recovered.settings).toEqual(expected)
+        expect(snapshotProject(recovered.document, recovered.settings)).toEqual({ ...stored, settings: expected })
+      }
+      expect(saved).toEqual(before)
     }
   })
 

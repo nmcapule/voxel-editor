@@ -161,7 +161,10 @@ export function parseSceneManifest(value: unknown): SceneManifest {
   if (assetMap.size !== assets.length) invalid('Duplicate scene asset id.')
   const instances = Array.from(rawInstances, value => instance(value, extent, assetMap, layerMap))
   if (new Set(instances.map(instance => instance.id)).size !== instances.length) invalid('Duplicate scene instance id.')
-  return { schema: 'voxel-studio/scene', version: 1, id: text(v.id), name: text(v.name, 60), revision: number(v.revision, 0, Number.MAX_SAFE_INTEGER, true), extent, settings: settings(v.settings), layers, activeLayerId, assets, instances }
+  const view = settings(v.settings)
+  // Scenes never used Cube sprites, even when they inherited its model preference.
+  if ((v.settings as Partial<ViewSettings>).pbrMaterials === undefined) view.pbrMaterials = true
+  return { schema: 'voxel-studio/scene', version: 1, id: text(v.id), name: text(v.name, 60), revision: number(v.revision, 0, Number.MAX_SAFE_INTEGER, true), extent, settings: view, layers, activeLayerId, assets, instances }
 }
 
 export function createScene(view: ViewSettings, name = 'Untitled scene'): SceneManifest {

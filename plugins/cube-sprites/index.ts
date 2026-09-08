@@ -329,7 +329,7 @@ export class CubeSprites implements ModelPreviewRenderer {
   prepare({ renderer, camera, light, settings, width, height, materials }: PreviewFrame) {
     if (this.disposed) throw new Error('Cube sprites is disposed.')
     if (!(camera instanceof THREE.OrthographicCamera)) throw new Error('Cube sprites requires an orthographic camera.')
-    const pbr = settings.cubeSpritesPbr
+    const pbr = settings.pbrMaterials
     if (pbr && !materials) throw new Error('Cube sprites PBR requires host palette materials in prepare().')
     let repack = this.pbr !== pbr
     this.pbr = pbr

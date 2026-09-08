@@ -95,7 +95,7 @@ test('progressive raster previews suppress maps and preserve pending updates and
     if (fail) throw new Error('draw failed')
   } }
   const probe = Object.assign(Object.create(Viewport.prototype), {
-    renderer: { shadowMap }, scene: new Scene(), sunlight, raster, settings: { pathTracing: true, shadows: true }, renderMode: true,
+    renderer: { shadowMap }, scene: new Scene(), sunlight, hemisphere: { intensity: 1.2 }, raster, settings: { ...DEFAULT_SETTINGS }, renderMode: true,
     sceneContent: { stage: 'bounded' },
     recordFrame() { frames++ },
   })

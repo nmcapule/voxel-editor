@@ -237,6 +237,73 @@ test('physical variants retain maps, opacity, IOR and dynamic transmission unifo
   h.pipeline.dispose()
 })
 
+test('non-PBR raster uses cached opaque palette materials without changing sources, helpers or geometry', () => {
+  const scene = new THREE.Scene(), geometry = triangles(2)
+  geometry.addGroup(0, 6, 0)
+  const map = new THREE.Texture()
+  const source = new THREE.MeshPhysicalMaterial({ color: 0x123456, transmission: 0.8, opacity: 0.4,
+    transparent: true, metalness: 1, emissive: 0xffffff, emissiveIntensity: 3,
+    map, normalMap: map, roughnessMap: map, metalnessMap: map })
+  const mesh = new THREE.Mesh(geometry, [source] as THREE.Material[])
+  const offscreen = new THREE.Mesh(geometry, source as THREE.Material)
+  offscreen.position.x = 100
+  const overlay = new THREE.Mesh(geometry, source as THREE.Material)
+  overlay.userData.editorOverlay = true
+  const basic = new THREE.MeshBasicMaterial(), context = new THREE.Mesh(geometry, basic as THREE.Material)
+  scene.add(mesh, offscreen, overlay, context)
+  const original = mesh.material, h = harness(scene), camera = new THREE.OrthographicCamera()
+  let diffuse: THREE.MeshLambertMaterial | undefined, disposed = 0
+  h.pipeline.pbrMaterials = false
+  h.onScene(() => {
+    if (mesh.material[0].visible) {
+      const material = mesh.material[0] as THREE.MeshLambertMaterial
+      expect(material).toBeInstanceOf(THREE.MeshLambertMaterial)
+      expect(material.color.equals(source.color)).toBe(true)
+      expect(material.opacity).toBe(1)
+      expect(material.transparent).toBe(false)
+      expect(material.map || material.normalMap || material.envMap).toBeNull()
+      expect(material.emissive.getHex()).toBe(0)
+      expect(offscreen.material).toBe(material)
+      expect(mesh.castShadow && offscreen.castShadow).toBe(true)
+      expect(context.material).toBe(basic)
+      if (diffuse) expect(material).toBe(diffuse)
+      else { diffuse = material; material.addEventListener('dispose', () => disposed++) }
+    } else expect(overlay.material).toBe(source)
+  })
+  try {
+    h.pipeline.render(camera)
+    const version = diffuse!.version
+    h.pipeline.render(camera)
+    expect(diffuse!.version).toBe(version)
+    source.color.setHex(0xabcdef)
+    source.roughness = 0.8
+    source.needsUpdate = true
+    h.pipeline.render(camera)
+    expect(h.pipeline.lastFrame).toEqual({ layers: 0, triangleBound: 0, complete: true })
+    expect(h.state.reads).toBe(0)
+    expect(mesh.material).toBe(original)
+    expect(mesh.geometry).toBe(geometry)
+    expect(mesh.castShadow || offscreen.castShadow).toBe(false)
+    expect(source.map).toBe(map)
+    expect(source.transmission).toBe(0.8)
+    expect(source.opacity).toBe(0.4)
+    h.onScene(() => { throw new Error('diffuse draw failure') })
+    expect(() => h.pipeline.render(camera)).toThrow('diffuse draw failure')
+    expect(mesh.material).toBe(original)
+    expect(mesh.castShadow || offscreen.castShadow).toBe(false)
+    h.onScene(() => {})
+    h.pipeline.pbrMaterials = true
+    h.pipeline.render(camera)
+    expect(h.pipeline.lastFrame.triangleBound).toBe(2)
+    expect(mesh.material).toBe(original)
+    source.dispose()
+    expect(disposed).toBe(1)
+  } finally {
+    h.pipeline.dispose(); geometry.dispose(); basic.dispose(); map.dispose()
+  }
+  expect(disposed).toBe(1)
+})
+
 test('AO uses only opaque depth, helpers render last, and successful offscreen inspection restores state', () => {
   const scene = new THREE.Scene()
   scene.background = new THREE.Color(0xabcdef)

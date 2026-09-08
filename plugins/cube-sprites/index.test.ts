@@ -74,7 +74,8 @@ test('PBR batches, toggles, live material edits and borrowed texture ownership',
   materials[7].visible = false
   materials[12].transmission = 0.8
   const frame = { renderer: { shadowMap: {} } as THREE.WebGLRenderer, camera: new THREE.OrthographicCamera(),
-    light: new THREE.DirectionalLight(), settings: { ...DEFAULT_SETTINGS, shadows: false, cubeSpritesPbr: true }, materials, width: 32, height: 32 }
+    light: new THREE.DirectionalLight(), settings: { ...DEFAULT_SETTINGS, shadows: false }, materials, width: 32, height: 32 }
+  expect(frame.settings.pbrMaterials).toBe(true)
   sprites.prepare(frame)
   const meshes = sprites.root.children.slice() as THREE.Mesh<THREE.InstancedBufferGeometry, THREE.MeshPhysicalMaterial>[]
   expect(meshes).toHaveLength(2)
@@ -102,10 +103,18 @@ test('PBR batches, toggles, live material edits and borrowed texture ownership',
   materials[7].needsUpdate = true
   sprites.prepare(frame)
   expect(sprites.root.children[0]).not.toBe(alphaMesh)
-  frame.settings.cubeSpritesPbr = false
+  frame.settings.pbrMaterials = false
   sprites.prepare(frame)
   expect(sprites.root.children).toHaveLength(1)
   expect((sprites.root.children[0] as THREE.Mesh).material).toBeInstanceOf(THREE.ShaderMaterial)
+  expect(materials[7].map).toBe(map)
+  expect(materials[7].envMap).toBe(map)
+  expect(materials[7].opacity).toBe(0.5)
+  expect(materials[7].transmission).toBe(0.9)
+  frame.settings.pbrMaterials = true
+  sprites.prepare(frame)
+  expect(sprites.root.children).toHaveLength(2)
+  expect((sprites.root.children[0] as THREE.Mesh<THREE.BufferGeometry, THREE.MeshPhysicalMaterial>).material.map).toBe(map)
   sprites.dispose()
   expect(disposed).toBe(false)
   for (const material of materials) material.dispose()

@@ -91,6 +91,8 @@ export class RasterPipeline {
   readonly ambientOcclusion: GTAOPass
   readonly readBuffer = colorTarget()
   renderToScreen = true
+  /** False substitutes opaque palette-only diffuse shading for physical mesh materials. */
+  pbrMaterials = true
   readonly lastFrame = { layers: 0, triangleBound: 0, complete: false }
 
   private readonly renderer: THREE.WebGLRenderer
@@ -108,6 +110,7 @@ export class RasterPipeline {
   private readonly pixel = new Uint8Array(4)
   private readonly hidden = new THREE.MeshBasicMaterial({ visible: false })
   private readonly variants = new Map<THREE.Material, MaterialVariants>()
+  private readonly diffuse = new Map<THREE.MeshStandardMaterial, { version: number; material: THREE.MeshLambertMaterial; dispose: () => void }>()
   private readonly uniforms = {
     rasterOpaqueDepth: { value: this.beauty.depthTexture },
     rasterPreviousDepth: { value: this.beauty.depthTexture },
@@ -302,6 +305,30 @@ export class RasterPipeline {
     entry.sourceVersion = source.version
   }
 
+  private diffuseMaterial(source: THREE.MeshStandardMaterial) {
+    let entry = this.diffuse.get(source)
+    if (!entry) {
+      const material = new THREE.MeshLambertMaterial()
+      const dispose = () => {
+        material.dispose()
+        source.removeEventListener('dispose', dispose)
+        this.diffuse.delete(source)
+      }
+      source.addEventListener('dispose', dispose)
+      entry = { version: -1, material, dispose }
+      this.diffuse.set(source, entry)
+    }
+    if (entry.version !== source.version) {
+      entry.material.color.copy(source.color)
+      for (const key of ['side', 'shadowSide', 'vertexColors', 'flatShading', 'visible'] as const) {
+        Object.assign(entry.material, { [key]: source[key] })
+      }
+      entry.material.needsUpdate = true
+      entry.version = source.version
+    }
+    return entry.material
+  }
+
   private blit(source: THREE.Texture, target: THREE.WebGLRenderTarget) {
     this.copy.uniforms.image.value = source
     this.quad.material = this.copy
@@ -353,26 +380,9 @@ export class RasterPipeline {
     if (camera.parent === null && camera.matrixWorldAutoUpdate) camera.updateMatrixWorld()
     const frustum = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse))
     const materials = new Set<THREE.Material>()
-    const objects: { object: Surface; material: Surface['material']; overlay: boolean; visible: boolean; inView: boolean }[] = []
-    scene.traverseVisible(object => {
-      const surface = object as Surface
-      if (!surface.material) return
-      let overlay = object instanceof THREE.Line || object instanceof THREE.Points || object instanceof THREE.Sprite
-      for (let ancestor: THREE.Object3D | null = object; ancestor; ancestor = ancestor.parent) {
-        overlay ||= ancestor.userData.editorOverlay === true
-      }
-      const inView = object.layers.test(camera.layers) && (overlay || !(object instanceof THREE.Mesh)
-        || !object.frustumCulled || frustum.intersectsObject(object))
-      objects.push({ object: surface, material: surface.material, visible: object.visible, overlay, inView })
-      if (overlay || !inView) return
-      if ((object as THREE.BatchedMesh).isBatchedMesh) throw new Error('RasterPipeline does not support BatchedMesh.')
-      if (object instanceof THREE.Mesh) this.lastFrame.triangleBound += transparentTriangleBound(object)
-      for (const source of Array.isArray(surface.material) ? surface.material : [surface.material]) {
-        if (source.visible && isLayered(source)) materials.add(source)
-      }
-    })
+    const objects: { object: Surface; material: Surface['material']; rasterMaterial: Surface['material']; castShadow: boolean; overlay: boolean; visible: boolean; inView: boolean }[] = []
     const show = (phase: Phase) => {
-      for (const { object, material, overlay, inView } of objects) {
+      for (const { object, rasterMaterial, overlay, inView } of objects) {
         // Never hide a renderable parent: it may have children belonging to a different phase.
         const select = (source: THREE.Material) => {
           if (!source.visible) return source
@@ -381,11 +391,39 @@ export class RasterPipeline {
           if (!inView) return this.hidden
           return phase === 'peel' || phase === 'shade' ? this.variants.get(source)![phase] : this.hidden
         }
-        object.material = Array.isArray(material) ? material.map(select) : select(material)
+        object.material = Array.isArray(rasterMaterial) ? rasterMaterial.map(select) : select(rasterMaterial)
       }
     }
     this.rendering = true
     try {
+      scene.traverseVisible(object => {
+        const surface = object as Surface
+        if (!surface.material) return
+        let overlay = object instanceof THREE.Line || object instanceof THREE.Points || object instanceof THREE.Sprite
+        for (let ancestor: THREE.Object3D | null = object; ancestor; ancestor = ancestor.parent) {
+          overlay ||= ancestor.userData.editorOverlay === true
+        }
+        const inView = object.layers.test(camera.layers) && (overlay || !(object instanceof THREE.Mesh)
+          || !object.frustumCulled || frustum.intersectsObject(object))
+        const entry = { object: surface, material: surface.material, rasterMaterial: surface.material,
+          castShadow: object.castShadow, visible: object.visible, overlay, inView }
+        objects.push(entry)
+        if (!this.pbrMaterials && !overlay && object instanceof THREE.Mesh) {
+          const select = (source: THREE.Material) => {
+            if (!(source instanceof THREE.MeshStandardMaterial) || !source.visible) return source
+            object.castShadow = true
+            return this.diffuseMaterial(source)
+          }
+          // Classify opaque substitutes, including offscreen shadow casters, not authored glass.
+          entry.rasterMaterial = surface.material = Array.isArray(surface.material) ? surface.material.map(select) : select(surface.material)
+        }
+        if (overlay || !inView) return
+        if ((object as THREE.BatchedMesh).isBatchedMesh) throw new Error('RasterPipeline does not support BatchedMesh.')
+        if (object instanceof THREE.Mesh) this.lastFrame.triangleBound += transparentTriangleBound(object)
+        for (const source of Array.isArray(surface.material) ? surface.material : [surface.material]) {
+          if (source.visible && isLayered(source)) materials.add(source)
+        }
+      })
       if (!Number.isSafeInteger(this.lastFrame.triangleBound)) throw new Error('RasterPipeline triangle bound is not a safe integer.')
       for (const material of materials) this.updateMaterial(material)
       renderer.xr.enabled = false
@@ -462,9 +500,10 @@ export class RasterPipeline {
       this.lastFrame.complete = true
       return target
     } finally {
-      for (const { object, material, visible } of objects) {
+      for (const { object, material, visible, castShadow } of objects) {
         object.material = material
         object.visible = visible
+        object.castShadow = castShadow
       }
       scene.background = saved.background
       scene.overrideMaterial = saved.override
@@ -490,6 +529,7 @@ export class RasterPipeline {
     if (this.disposed) return
     this.disposed = true
     for (const entry of this.variants.values()) entry.dispose()
+    for (const entry of this.diffuse.values()) entry.dispose()
     for (const target of [this.readBuffer, this.beauty, this.scratch, this.snapshot, ...this.peels, ...this.reductions]) target.dispose()
     this.ambientOcclusion.dispose()
     this.hidden.dispose()

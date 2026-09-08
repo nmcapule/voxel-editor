@@ -65,7 +65,7 @@ export function runCubeSpritePbrChecks() {
   normalMap.needsUpdate = true
   const sprites = new CubeSprites(model), reference = new THREE.Group()
   scene.add(sprites.root, reference)
-  const settings = { ...DEFAULT_SETTINGS, shadows: false, cubeSpritesPbr: true }
+  const settings = { ...DEFAULT_SETTINGS, shadows: false, pbrMaterials: true }
   const actual = new Uint8Array(128 * 128 * 4), expected = new Uint8Array(actual.length)
   const results: object[] = []
   let unmapped: Uint8Array | undefined
@@ -137,10 +137,10 @@ export function runCubeSpritePbrChecks() {
     const updates = sprites.stats.chunkUpdates
     render(true, actual); render(true, expected)
     check(sprites.stats.chunkUpdates === updates && difference(actual, expected) === 0, 'Unchanged PBR frames must retain instances and pixels')
-    settings.cubeSpritesPbr = false
+    settings.pbrMaterials = false
     render(true, expected)
     check(difference(actual, expected) > 0.05 && sprites.stats.chunkUpdates > updates, 'Toggle off must restore stylized opaque rendering')
-    settings.cubeSpritesPbr = true
+    settings.pbrMaterials = true
     render(true, expected)
     check(difference(actual, expected) === 0, 'Toggle on must restore physical pixels')
     return results
@@ -185,7 +185,7 @@ export function runCubeSpriteDepthChecks() {
     for (const direction of [[1, 1, 1], [-1, 0.3, 1], [-1, 1, -1], [1, -0.4, -1], [0, 0, 1], [1, 0, 0], [0, 1, 0], [0, -1, 0], [0.03, 1, -1]]) {
       camera.position.set(...direction as [number, number, number]).normalize().multiplyScalar(15).add(new THREE.Vector3(0, 4, 0))
       camera.lookAt(0, 4, 0)
-      sprites.prepare({ renderer, camera, light, settings: { ...DEFAULT_SETTINGS, shadows: false }, width: 192, height: 192 })
+      sprites.prepare({ renderer, camera, light, settings: { ...DEFAULT_SETTINGS, pbrMaterials: false, shadows: false }, width: 192, height: 192 })
       renderer.setRenderTarget(target); renderer.render(scene, camera)
       renderer.readRenderTargetPixels(target, 0, 0, 192, 192, actual)
       renderer.render(reference, camera)
@@ -223,7 +223,7 @@ export async function runCubeSpriteBenchmark() {
   host.style.cssText = 'position:fixed;inset:0;width:256px;height:256px'
   document.body.append(host)
   const callbacks = new Proxy({}, { get: () => () => {} }) as RendererCallbacks
-  const settings = { ...DEFAULT_SETTINGS, pathTracing: false, ambientOcclusion: false, shadows: false, grid: false }
+  const settings = { ...DEFAULT_SETTINGS, pbrMaterials: false, pathTracing: false, ambientOcclusion: false, shadows: false, grid: false }
   const renderer = new VoxelRenderer(host, new VoxelDocument(), settings, callbacks, plugin)
   const results: object[] = []
   try {
@@ -268,7 +268,7 @@ export async function runCubeSpriteChecks() {
   const documentModel = new VoxelDocument({ x: 32, y: 16, z: 32 })
   for (let x = 11; x < 21; x++) for (let z = 11; z < 21; z++) documentModel.setVoxel(x, 0, z, 3)
   for (let y = 1; y < 6; y++) for (let x = 14; x < 17; x++) documentModel.setVoxel(x, y, 15, 7)
-  const settings = { ...DEFAULT_SETTINGS, previewRenderer: 'cube-sprites' as const, projection: 'perspective' as const,
+  const settings = { ...DEFAULT_SETTINGS, previewRenderer: 'cube-sprites' as const, pbrMaterials: false, projection: 'perspective' as const,
     ambientOcclusion: false, shadows: false, grid: false, lightAzimuth: 35 }
   const renderer = new VoxelRenderer(host, documentModel, settings, callbacks, plugin)
   const viewport = renderer.viewport
@@ -365,7 +365,7 @@ export async function runCubeSpriteChecks() {
   } finally { renderer.dispose(); host.remove() }
 }
 
-export async function runCubeSpriteEditingChecks(cubeSpritesPbr = false) {
+export async function runCubeSpriteEditingChecks(pbrMaterials = DEFAULT_SETTINGS.pbrMaterials) {
   const host = document.createElement('div')
   host.style.cssText = 'position:fixed;inset:0;width:320px;height:320px'
   document.body.append(host)
@@ -378,7 +378,7 @@ export async function runCubeSpriteEditingChecks(cubeSpritesPbr = false) {
   const callbacks = new Proxy({ onError: (message: string) => errors.push(message) }, {
     get: (target, key) => target[key as keyof typeof target] ?? (() => {}),
   }) as unknown as RendererCallbacks
-  const renderer = new VoxelRenderer(host, model, { ...DEFAULT_SETTINGS, previewRenderer: 'cube-sprites', cubeSpritesPbr,
+  const renderer = new VoxelRenderer(host, model, { ...DEFAULT_SETTINGS, previewRenderer: 'cube-sprites', pbrMaterials,
     grid: false, ambientOcclusion: false, shadows: false }, callbacks, plugin)
   const viewport = renderer.viewport
   const presented = async () => {

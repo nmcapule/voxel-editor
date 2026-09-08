@@ -2,12 +2,14 @@
 
 Optional orthographic rendering for the model editor's **Edit and Render modes**.
 In Stage > Render choose **Renderer: Cube sprites** to use it in both modes.
-The scene renderer is unchanged; child asset editing uses the model renderer. Isometric views
+The scene renderer does not use the plugin; child asset editing uses the model renderer. Isometric views
 are orthographic camera orientations; continuous orbit and axis-aligned views work.
 
 ## Behavior
 
-- With **PBR materials** off (the default), rendered cells use palette colors, stylized hemispheric ambient light, and the
+- **PBR materials** is one saved realtime preference shared with Standard, on by default.
+  Switching renderers keeps its value; Progressive PBR remains independent.
+- With **PBR materials** off, rendered cells use palette colors, stylized hemispheric ambient light, and the
   existing directional light. All occupied cells are opaque, even if their authored
   materials describe glass, opacity, or emission. Physical properties and texture
   maps remain saved and unmodified, but are not applied in this mode.
@@ -59,7 +61,7 @@ its geometry inputs with the hit normal, view/world position and chunk-local pla
 face UVs. Fragment inputs are mutable globals, not writes to varyings. Directional
 shadow coordinates use the hit position and Standard's normal bias.
 
-Integration requires `ViewSettings.cubeSpritesPbr` (default `false`) and borrowed
+Integration requires `ViewSettings.pbrMaterials` (default `true`) and borrowed
 `PreviewFrame.materials?: readonly THREE.MeshPhysicalMaterial[]`, populated by the
 host each prepare with current map/environment bindings. The raster pipeline must
 call the material callback **after** its patch and place `// voxel-fragment-depth`
@@ -71,6 +73,12 @@ The versioned shader cache key includes this marker contract. Layer bounds must 
 
 Physical mesh materials are hidden while the plugin is active, but the helper tree
 is retained, including neutral ghost context and mesh-based face grids/topology overlays.
+
+Saves without `pbrMaterials` migrate using their saved renderer: Cube sprites uses
+legacy `cubeSpritesPbr`, or `false` if absent; Standard/missing renderer uses `true`
+regardless of the unused legacy flag. Canonical values win, but legacy values are
+still boolean-validated. Old `settings.update` commands accept `cubeSpritesPbr` as an
+alias; conflicting canonical/alias values are rejected. Resaves contain only `pbrMaterials`.
 
 Two reusable RGBA16F atlases contain unit-cube normals and view-relative depth:
 one for the view and one for the directional light. The fragment shader reconstructs
@@ -110,7 +118,7 @@ const checks = await import('/plugins/cube-sprites/browser-checks.ts')
 checks.runCubeSpriteDepthChecks()
 checks.runCubeSpritePbrChecks()
 await checks.runCubeSpriteChecks()
-await checks.runCubeSpriteEditingChecks()
+await checks.runCubeSpriteEditingChecks(false)
 await checks.runCubeSpriteEditingChecks(true)
 await checks.runCubeSpriteBenchmark()
 ```
@@ -127,13 +135,14 @@ Integration checks cover palette updates, dirty edits, bake reuse, AO/shadows,
 capture, offscreen views, renderer switching, and context recovery. Editing checks
 cover automatic live frames, scoped picking, layer/tool changes, helper overlays,
 inspection restoration, and document replacement. The benchmark
-compares sparse, solid, and checkerboard models with AO/shadows off, separately for
+compares sparse, solid, and checkerboard models with PBR materials and AO/shadows off, separately for
 stationary frames and orbit. It is a diagnostic, not a hardware-independent FPS
 promise: greedy meshes can be cheaper for flat solids, and impostors can be limited
 by fragment cost and overdraw.
 
 Remove this entire directory to uninstall, including its tests. The application
 still builds and uses Standard rendering. Saved `cube-sprites` choices remain
-readable and are retained with an explicit unavailable-plugin notice. Restart a
+readable and are retained with an explicit unavailable-plugin notice.
+The shared PBR materials checkbox remains available for Standard after removal. Restart a
 running development server after installing/removing the directory if its glob
 discovery cache is stale. Rebuilding production always rediscovers installed files.

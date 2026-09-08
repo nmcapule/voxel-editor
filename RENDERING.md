@@ -43,15 +43,34 @@ Follow-up review also fixed deletion-only queues failing to restart tracing, imm
 captures returning old pixels with new metadata, and disposal racing shader-compilation
 polling. These are covered by the renderer-state, dependency and recovery tests.
 
+## Shared Realtime PBR
+
+**PBR materials** (`pbrMaterials`, default `true`) is one saved realtime preference
+shared by Standard and Cube sprites. On applies authored physical properties and
+texture maps; off renders opaque, lit palette colors without mutating materials or
+maps. Switching renderers retains the value. **Progressive PBR** (`pathTracing`)
+is independent and always uses authored physical materials, regardless of this toggle.
+The model checkbox stays available even when the optional plugin is missing.
+
+For saves without `pbrMaterials`, a saved `cube-sprites` renderer uses legacy
+`cubeSpritesPbr`, or `false` if absent. Standard/missing renderer migrates to `true`
+regardless of the unused legacy flag. Canonical values take precedence; any supplied
+legacy value must still be a boolean. `settings.update` accepts `cubeSpritesPbr` as a
+compatibility alias, rejecting conflicting canonical/alias values. Resaves persist
+only `pbrMaterials`; neither migration nor toggling edits authored materials or maps.
+Legacy scene viewports stay PBR-on because they always used Standard, even if they
+inherited a Cube sprites model preference; child model settings migrate separately.
+
 ## Optional Cube-Sprite Renderer
 
 The model Render panel offers **Standard / Cube sprites** when the removable
-`plugins/cube-sprites` module is installed. Cube sprites is an orthographic,
-opaque palette-color renderer for model Edit and Render modes, not PBR material parity.
-Physical material properties and maps remain saved but are not applied. It shares the
+`plugins/cube-sprites` module is installed. Cube sprites is an orthographic renderer
+for model Edit and Render modes. With shared PBR materials on, its impostors use
+physical material clones and the same layered transparency pipeline as Standard;
+off uses stylized opaque palette colors. It shares the
 viewport, directional shadow map, depth-based GTAO, capture, and finishing effects.
-Scene rendering is unchanged; child asset editing uses the model renderer.
-Saved PBR preferences are retained but
+Scene rendering does not use the plugin; child asset editing uses the model renderer.
+The saved Progressive PBR preference is retained but
 tracing is gated off while the plugin is selected. Missing plugins fall back to
 Standard without rejecting saved documents.
 

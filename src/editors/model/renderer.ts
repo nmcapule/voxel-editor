@@ -8,6 +8,7 @@ import type { AuxiliaryTool, PaintMode, PbrMap, SculptMode, SelectionMode, Selec
 import type { ViewSettings } from '../../shared/rendering/settings'
 import { faceViews, projectFaces, type FaceView } from '../../shared/voxel/projections'
 import { defaultInspectionViews, type InspectionView } from './inspection'
+import { ModelOcclusion } from './occlusion'
 
 
 export interface ToolTarget {
@@ -243,7 +244,24 @@ export class VoxelRenderer {
   private textureLoads = new Map<string, symbol>()
   private previewPlugin?: ModelPreviewPlugin
   private preview?: ModelPreviewRenderer
+  private occlusion?: ModelOcclusion
   get hasPreviewRenderer() { return !!this.previewPlugin }
+
+  /** Internal experiment. Enable only after measuring orbit/zoom on the target GPU. */
+  get occlusionCulling() { return !!this.occlusion }
+  set occlusionCulling(enabled: boolean) {
+    if (this.disposed || enabled === this.occlusionCulling) return
+    this.occlusion?.clear()
+    this.occlusion = enabled ? new ModelOcclusion() : undefined
+    if (this.occlusion) for (const [id, chunk] of this.chunkMeshes) chunk.traverse(object => {
+      if (object instanceof THREE.Mesh && this.materials.includes(object.material as THREE.MeshPhysicalMaterial)) this.occlusion!.register(object, id)
+    })
+    this.content.cullOpaque = enabled ? frame => {
+      if (this.modelSuspended || this.preview?.root.visible || this.inFlight || this.queued.size || this.meshFailed) return
+      return this.occlusion?.cull(frame)
+    } : undefined
+    this.viewport.render()
+  }
 
   constructor(host: HTMLElement | Viewport, document: VoxelDocument, settings: ViewSettings, callbacks: RendererCallbacks, previewPlugin?: ModelPreviewPlugin) {
     this.ownsViewport = !(host instanceof Viewport)
@@ -1261,13 +1279,13 @@ export class VoxelRenderer {
       }
       if (result.normal) {
         for (const child of [...chunkMesh.children]) if (!child.userData.layerIsolation) this.removeSurface(child)
-        const normal = this.createSurface(result.normal)
+        const normal = this.createSurface(result.normal, result.id)
         for (const child of [...normal.children]) chunkMesh.add(child)
         Object.assign(chunkMesh.userData, { version: result.version, quads: result.normal.quads, faceGridReady: normal.userData.faceGridReady })
       }
       if (acceptIsolation && result.active) {
         for (const child of [...chunkMesh.children]) if (child.userData.layerIsolation) this.removeSurface(child)
-        const isolated = this.createSurface(result.active)
+        const isolated = this.createSurface(result.active, result.id)
         Object.assign(isolated.userData, { layerIsolation: true, layerId: result.layerId, version: result.version,
           quads: result.active.quads + (result.context?.quads ?? 0) })
         if (result.context?.positions.length) {
@@ -1298,7 +1316,7 @@ export class VoxelRenderer {
     this.pump()
   }
 
-  private createSurface(data: MeshData) {
+  private createSurface(data: MeshData, chunkId: number) {
     const surface = new THREE.Group()
     surface.userData.faceGridReady = !data.positions.length
     if (!data.positions.length) return surface
@@ -1326,6 +1344,7 @@ export class VoxelRenderer {
       mesh.matrixAutoUpdate = false
       mesh.castShadow = castsRealtimeShadow(this.document.materials[group.materialIndex])
       mesh.receiveShadow = true
+      this.occlusion?.register(mesh, chunkId)
       surface.add(mesh)
     }
     if (data.faceLines.length) this.installFaceGrid(surface, data.faceLines)
@@ -1371,7 +1390,10 @@ export class VoxelRenderer {
   }
 
   private removeSurface(surface: THREE.Object3D) {
-    surface.traverse(child => { if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments || child instanceof THREE.Points) child.geometry.dispose() })
+    surface.traverse(child => {
+      if (child instanceof THREE.Mesh) this.occlusion?.remove(child)
+      if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments || child instanceof THREE.Points) child.geometry.dispose()
+    })
     surface.removeFromParent()
   }
 

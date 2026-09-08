@@ -892,7 +892,7 @@ export class Viewport {
     this.fpsIdleTimer = setTimeout(() => this.resetFps(), 750)
   }
 
-  private renderRaster(camera = this.camera, raster = this.raster, shadows = !this.pathTracingEnabled()) {
+  private renderRaster(camera = this.camera, raster = this.raster, shadows = !this.pathTracingEnabled(), live = false) {
     if (this.contextLost) return
     raster.pbrMaterials = this.settings.pbrMaterials || this.previewSelected()
     // FXAA washes out pixel-wide triangle edges; keep the topology inspection view sharp.
@@ -914,7 +914,11 @@ export class Viewport {
     try {
       this.sceneContent?.prepareRaster?.({ renderer: this.renderer, camera, light: this.sunlight, settings: this.settings,
         width: raster.readBuffer.width, height: raster.readBuffer.height })
-      raster.render(camera)
+      // Only scheduled live frames opt in. Captures and tracer/inspection previews stay complete.
+      const cullOpaque = live && camera === this.camera && raster === this.raster && !this.captures
+        && !this.pathTracingEnabled() && !this.pathTracingBuildRunning && !this.previewSelected()
+        ? this.sceneContent?.cullOpaque : undefined
+      raster.render(camera, undefined, cullOpaque)
     }
     finally {
       this.hemisphere.intensity = ambient
@@ -964,7 +968,7 @@ export class Viewport {
       try {
         const monitor = this.performanceMonitor, started = monitor ? performance.now() : 0
         if (traced && !this.presentationDirty) this.renderPathTrace(true)
-        else { this.renderRaster(); this.applyTiltShift() }
+        else { this.renderRaster(this.camera, this.raster, !this.pathTracingEnabled(), true); this.applyTiltShift() }
         monitor?.onRender(performance.now() - started)
       }
       catch (error) {

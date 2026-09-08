@@ -8,6 +8,7 @@ import { VoxelRenderer, type RendererCallbacks } from '../src/editors/model/rend
 import { DEFAULT_SETTINGS, type ViewSettings } from '../src/shared/rendering/settings'
 import { runRenderingChecks, runRendererStateChecks, runPathTracingChecks, runTiltShiftChecks, runInteractionDprChecks } from './rendering'
 import { runSkyboxChecks } from './skybox'
+import { runOcclusionChecks, runOcclusionBenchmark } from './occlusion'
 
 const host = document.createElement('div')
 host.style.cssText = 'width:100vw;height:100vh'
@@ -243,6 +244,8 @@ Object.assign(window, { transparencyTest: {
   runTiltShiftChecks: () => runTiltShiftChecks(renderer, settings, errors),
   runInteractionDprChecks: () => runInteractionDprChecks(renderer, settings, errors),
   runSkyboxChecks: (samples = 8) => runSkyboxChecks(renderer, settings, errors, samples),
+  runOcclusionChecks: () => runOcclusionChecks(renderer, settings, errors),
+  runOcclusionBenchmark: () => runOcclusionBenchmark(renderer, settings, errors),
   get status() { return status },
 } })
 await scene('pool')

@@ -204,6 +204,68 @@ function meshProbe(document: VoxelDocument, faceGrid = true) {
 const isolation = (chunk: Object3D) => chunk.children.find(child => child.userData.layerIsolation)!
 const grid = (surface: Object3D) => surface.children.find(child => child.userData.faceGrid) as LineSegments | undefined
 
+test('occlusion opt-in follows installed surfaces, pending work, layer scope and adapter disposal', async () => {
+  const document = new VoxelDocument({ x: 32, y: 32, z: 64 }), active = document.activeLayerId
+  for (const index of [5, 6]) Object.assign(document.materials[index], { opacity: 1, transmission: 0 })
+  document.setVoxel(16, 16, 8, 6)
+  document.createLayer()
+  for (let y = 0; y < 32; y++) for (let x = 0; x < 32; x++) document.setVoxel(x, y, 47, 5)
+  document.setActiveLayer(active)
+  const harness = meshProbe(document, false), { probe } = harness
+  probe.content = {}
+  const camera = new OrthographicCamera(-32, 32, 32, -32, -1000, 2000)
+  camera.position.set(0, 16, 100); camera.lookAt(0, 16, 0); camera.updateMatrixWorld(true)
+  const evaluate = () => {
+    probe.model.updateMatrixWorld(true)
+    const opaqueMeshes = new Set<Mesh>()
+    probe.model.traverseVisible((object: Object3D) => {
+      if (object instanceof Mesh && object.material instanceof MeshPhysicalMaterial) opaqueMeshes.add(object)
+    })
+    return probe.content.cullOpaque?.({ camera, width: 512, height: 512, opaqueMeshes }) as ReadonlySet<Mesh> | undefined
+  }
+  try {
+    probe.markDirty(document.chunks.keys()); await harness.flush()
+    expect(probe.occlusionCulling).toBe(false)
+    expect(probe.occlusion).toBeUndefined()
+    expect(evaluate()).toBeUndefined()
+    probe.occlusionCulling = true
+    const occlusion = probe.occlusion
+    expect(evaluate()?.size).toBe(1)
+    probe.occlusionCulling = true
+    expect(probe.occlusion).toBe(occlusion)
+    for (const key of ['inFlight', 'meshFailed', 'modelSuspended']) {
+      const previous = probe[key]
+      probe[key] = 1
+      expect(evaluate()).toBeUndefined()
+      probe[key] = previous
+    }
+    probe.queued.add(0); expect(evaluate()).toBeUndefined(); probe.queued.clear()
+    probe.preview = { root: new Group() }
+    expect(evaluate()).toBeUndefined()
+    probe.preview = undefined
+    probe.setToolState('select', 'paint')
+    expect(evaluate()).toBeUndefined()
+    await harness.flush()
+    expect(evaluate()?.size).toBe(0)
+    probe.setTool('layer'); await harness.flush()
+    expect(evaluate()?.size).toBe(1)
+    const removed = new Set<Mesh>()
+    for (const mesh of occlusion.entries.keys() as Iterable<Mesh>) mesh.geometry.addEventListener('dispose', () => removed.add(mesh))
+    document.setVoxel(17, 16, 8, 6)
+    probe.markDirty(document.chunks.keys()); await harness.flush()
+    expect(evaluate()?.size).toBe(1)
+    expect(removed.size).toBeGreaterThan(0)
+    // Hidden isolation variants can remain installed; only disposed surfaces must be forgotten.
+    expect([...removed].every(mesh => !occlusion.entries.has(mesh))).toBe(true)
+    probe.suspendModelMeshes()
+    expect(occlusion.entries.size).toBe(0)
+    expect(evaluate()).toBeUndefined()
+    probe.occlusionCulling = false
+    expect(probe.occlusion).toBeUndefined()
+    expect(probe.content.cullOpaque).toBeUndefined()
+  } finally { harness.dispose() }
+})
+
 test('selection alone toggles visual isolation, retaining normal and late cached surfaces for standard and sprites', async () => {
   for (const sprites of [false, true]) {
     const { document, active, cells } = layeredDocument()

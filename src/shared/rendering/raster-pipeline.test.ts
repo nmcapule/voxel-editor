@@ -17,7 +17,8 @@ function harness(scene: THREE.Scene, occupancy: number[] = [0]) {
   let onRead: () => void = () => {}
   const renderer = {
     capabilities: { maxTextureSize: 8192, logarithmicDepthBuffer: false, reversedDepthBuffer: false },
-    autoClear: true, shadowMap: { autoUpdate: true, needsUpdate: true }, xr: { enabled: true },
+    autoClear: true, shadowMap: { enabled: false, autoUpdate: true, needsUpdate: true }, xr: { enabled: true },
+    clippingPlanes: [] as THREE.Plane[],
     toneMapping: THREE.ReinhardToneMapping, toneMappingExposure: 1.08, outputColorSpace: THREE.LinearSRGBColorSpace,
     state: { buffers: { depth: { setClear(value: number) { state.clearDepth = value } } } },
     getContext: () => ({ DEPTH_CLEAR_VALUE: 0x0b73, getParameter: () => state.clearDepth, isContextLost: () => state.lost }),
@@ -97,7 +98,7 @@ test('terminates on the first empty peel, not an arbitrary fixed layer cap', () 
   scene.add(new THREE.Mesh(triangles(300), new THREE.MeshPhysicalMaterial({ transmission: 1 })))
   const h = harness(scene, [...Array<number>(257).fill(255), 0])
   h.pipeline.render(new THREE.OrthographicCamera())
-  expect(h.pipeline.lastFrame).toEqual({ layers: 257, triangleBound: 300, complete: true })
+  expect(h.pipeline.lastFrame).toEqual({ layers: 257, triangleBound: 300, occludedMeshes: 0, complete: true })
   expect(h.state.reads).toBe(258)
   expect(h.draws.at(-1)?.target).toBe(h.pipeline.readBuffer)
   h.pipeline.dispose()
@@ -113,7 +114,7 @@ test('layer bound counts billboard geometry instances and permits every transpar
   expect(transparentTriangleBound(mesh)).toBe(24)
   const h = harness(scene, [...Array<number>(12).fill(255), 0])
   h.pipeline.render(new THREE.OrthographicCamera())
-  expect(h.pipeline.lastFrame).toEqual({ layers: 12, triangleBound: 24, complete: true })
+  expect(h.pipeline.lastFrame).toEqual({ layers: 12, triangleBound: 24, occludedMeshes: 0, complete: true })
   geometry.instanceCount = 0
   expect(transparentTriangleBound(mesh)).toBe(0)
   h.pipeline.dispose()
@@ -279,7 +280,7 @@ test('non-PBR raster uses cached opaque palette materials without changing sourc
     source.roughness = 0.8
     source.needsUpdate = true
     h.pipeline.render(camera)
-    expect(h.pipeline.lastFrame).toEqual({ layers: 0, triangleBound: 0, complete: true })
+    expect(h.pipeline.lastFrame).toEqual({ layers: 0, triangleBound: 0, occludedMeshes: 0, complete: true })
     expect(h.state.reads).toBe(0)
     expect(mesh.material).toBe(original)
     expect(mesh.geometry).toBe(geometry)
@@ -502,6 +503,344 @@ test('culled layered parents skip preparation without hiding children or opaque 
     expect(configure.mock.calls.map(([source]) => source)).toEqual([originalParent, uncullable.material])
   } finally {
     configure.mockRestore()
+    h.pipeline.dispose()
+  }
+})
+
+test('opaque culling receives current matrices, raster pixels and only visible in-frustum eligible draws', () => {
+  const scene = new THREE.Scene(), group = new THREE.Group(), camera = new THREE.OrthographicCamera()
+  const map = new THREE.Texture()
+  const sources = [new THREE.MeshBasicMaterial({ map, alphaMap: map }), new THREE.MeshLambertMaterial({ normalMap: map }),
+    new THREE.MeshStandardMaterial({ map, normalMap: map, depthFunc: THREE.LessDepth }), new THREE.MeshPhysicalMaterial()]
+  const eligible = sources.map(source => new THREE.Mesh(triangles(1), source))
+  const excluded = Array.from({ length: 7 }, () => new THREE.Mesh(triangles(1), new THREE.MeshBasicMaterial()))
+  excluded[0].visible = false
+  excluded[1].material.visible = false
+  excluded[2].layers.set(1)
+  excluded[3].position.x = 100
+  excluded[4].position.x = 100
+  excluded[4].frustumCulled = false
+  excluded[5].geometry.setDrawRange(0, 0)
+  excluded[6].geometry.setDrawRange(3, 3)
+  const invisible = new THREE.Group(), invisibleChild = new THREE.Mesh(triangles(1), sources[0])
+  invisible.visible = false
+  invisible.add(invisibleChild)
+  group.add(...eligible, ...excluded, invisible)
+  group.position.x = 12
+  camera.position.x = 12
+  scene.add(group)
+  const h = harness(scene), target = new THREE.WebGLRenderTarget(1, 1)
+  const frames: ReadonlySet<THREE.Mesh>[] = []
+  try {
+    for (const [width, height] of [[11, 13], [5, 7]]) {
+      h.pipeline.setSize(width, height)
+      const output = h.pipeline.render(camera, target, frame => {
+        expect(frame.camera).toBe(camera)
+        expect([frame.width, frame.height]).toEqual([width, height])
+        expect(camera.matrixWorld.elements[12]).toBe(12)
+        expect(camera.matrixWorldInverse.elements[12]).toBe(-12)
+        expect(eligible.every(mesh => mesh.matrixWorld.elements[12] === 12)).toBe(true)
+        expect([...frame.opaqueMeshes]).toEqual(eligible)
+        expect(eligible.map(mesh => mesh.material)).toEqual(sources)
+        expect(h.draws.filter(draw => draw.object === scene)).toHaveLength(frames.length * 2)
+        frames.push(frame.opaqueMeshes)
+        return new Set([...eligible, ...excluded, invisibleChild])
+      })
+      expect(output).toBe(target)
+      expect(h.pipeline.lastFrame.occludedMeshes).toBe(4)
+      expect(eligible.map(mesh => mesh.material)).toEqual(sources)
+    }
+    expect(frames[0]).not.toBe(frames[1])
+  } finally {
+    h.pipeline.dispose(); target.dispose(); map.dispose()
+  }
+})
+
+test('opaque eligibility uses effective non-PBR materials, without admitting overlays or deformed meshes', () => {
+  const scene = new THREE.Scene(), camera = new THREE.OrthographicCamera()
+  const source = new THREE.MeshPhysicalMaterial({ transparent: true, opacity: 0.4, transmission: 1,
+    depthTest: false, depthWrite: false, depthFunc: THREE.AlwaysDepth, alphaTest: 0.5, wireframe: true, displacementMap: new THREE.Texture() })
+  source.onBeforeCompile = () => {}
+  const mesh = new THREE.Mesh(triangles(1), source as THREE.Material)
+  const overlay = new THREE.Mesh(triangles(1), source as THREE.Material)
+  overlay.userData.editorOverlay = true
+  const deformed = new THREE.Mesh(triangles(1), source as THREE.Material)
+  deformed.geometry.morphAttributes.position = [triangles(1).getAttribute('position')]
+  const h = harness(scene)
+  scene.add(mesh, overlay, deformed)
+  h.pipeline.pbrMaterials = false
+  try {
+    h.pipeline.render(camera, undefined, frame => {
+      expect([...frame.opaqueMeshes]).toEqual([mesh])
+      expect(mesh.material).toBeInstanceOf(THREE.MeshLambertMaterial)
+      expect(mesh.material).toMatchObject({ transparent: false, opacity: 1, depthTest: true, depthWrite: true,
+        depthFunc: THREE.LessEqualDepth, alphaTest: 0, wireframe: false, displacementMap: null })
+      expect(overlay.material).toBe(source)
+      expect(mesh.castShadow).toBe(true)
+      return new Set([mesh, overlay, deformed])
+    })
+    expect(h.pipeline.lastFrame).toEqual({ layers: 0, triangleBound: 0, occludedMeshes: 1, complete: true })
+    expect(mesh.material).toBe(source)
+    expect(mesh.castShadow).toBe(false)
+    h.pipeline.pbrMaterials = true
+    h.pipeline.render(camera, undefined, frame => {
+      expect(frame.opaqueMeshes.size).toBe(0)
+      return new Set([mesh])
+    })
+    expect(h.pipeline.lastFrame.occludedMeshes).toBe(0)
+    expect(h.pipeline.lastFrame.triangleBound).toBe(2)
+  } finally {
+    h.pipeline.dispose(); source.displacementMap!.dispose()
+  }
+})
+
+test('opaque culling is pass-local, identity-guarded and preserves opaque, glass and overlay descendants', () => {
+  const scene = new THREE.Scene(), camera = new THREE.OrthographicCamera(), source = new THREE.MeshBasicMaterial()
+  const parent = new THREE.Mesh(triangles(1), source), sibling = new THREE.Mesh(triangles(1), source)
+  const child = new THREE.Mesh(triangles(1), source)
+  const glass = new THREE.Mesh(triangles(2), new THREE.MeshPhysicalMaterial({ transmission: 1 }))
+  const lines = new THREE.LineSegments(triangles(1), new THREE.LineBasicMaterial())
+  const context = new THREE.Mesh(triangles(1), new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.18, depthWrite: false }))
+  const overlay = new THREE.Mesh(triangles(1), new THREE.MeshBasicMaterial({ depthTest: false, depthFunc: THREE.AlwaysDepth }))
+  const overlayGroup = new THREE.Group()
+  overlayGroup.userData.editorOverlay = true
+  overlayGroup.add(context, overlay)
+  const unsupported = new THREE.Mesh(triangles(1), new THREE.MeshBasicMaterial({ wireframe: true }))
+  const unrelated = new THREE.Mesh(triangles(1), source)
+  parent.add(child, glass, lines, overlayGroup)
+  scene.add(parent, sibling, unsupported)
+  const originals = [glass.material, lines.material, context.material, overlay.material, unsupported.material] as const
+  const h = harness(scene, [255, 0]), phases: boolean[][] = []
+  let culling = true
+  h.onScene(() => {
+    phases.push([parent.material.visible, child.material.visible, glass.material.visible, lines.material.visible, context.material.visible])
+    expect(parent.visible && child.visible && glass.visible).toBe(true)
+    expect(parent.layers.mask).toBe(1)
+    expect(source.visible).toBe(true)
+    expect(unrelated.material).toBe(source)
+    if (phases.length === 1) {
+      expect(parent.material.visible).toBe(!culling)
+      expect(sibling.material).toBe(source)
+      expect(child.material).toBe(source)
+      expect(unsupported.material).toBe(originals[4])
+    }
+    if (lines.material.visible) {
+      expect([lines.material, context.material, overlay.material]).toEqual([originals[1], originals[2], originals[3]])
+    }
+  })
+  try {
+    h.pipeline.render(camera, undefined, frame => {
+      expect([...frame.opaqueMeshes]).toEqual([parent, child, sibling])
+      // Even a runtime violation of ReadonlySet must not expand pipeline eligibility.
+      for (const mesh of [glass, context, overlay, unsupported, unrelated]) (frame.opaqueMeshes as Set<THREE.Mesh>).add(mesh)
+      return new Set([parent, glass, context, overlay, unsupported, unrelated])
+    })
+    expect(phases).toEqual([[false, true, false, false, false], [false, false, true, false, false],
+      [false, false, true, false, false], [false, false, true, false, false], [false, false, false, true, true]])
+    expect(h.pipeline.lastFrame).toEqual({ layers: 1, triangleBound: 2, occludedMeshes: 1, complete: true })
+    expect(parent.material).toBe(source)
+    expect([glass.material, lines.material, context.material, overlay.material, unsupported.material]).toEqual([...originals])
+    culling = false
+    for (const provider of [undefined, () => undefined]) {
+      phases.length = 0
+      h.pipeline.render(camera, undefined, provider)
+      expect(phases[0][0]).toBe(true)
+      expect(h.pipeline.lastFrame.occludedMeshes).toBe(0)
+    }
+  } finally {
+    h.pipeline.dispose()
+  }
+})
+
+test.each([
+  [true, true, true], [true, true, false], [true, false, true], [true, false, false],
+  [false, true, true], [false, true, false], [false, false, true], [false, false, false],
+])('opaque culling respects shadow enabled=%s autoUpdate=%s needsUpdate=%s', (enabled, autoUpdate, needsUpdate) => {
+  const scene = new THREE.Scene(), mesh = new THREE.Mesh(triangles(1), new THREE.MeshStandardMaterial())
+  mesh.castShadow = true
+  scene.add(mesh)
+  const h = harness(scene), source = mesh.material, bypass = enabled && (autoUpdate || needsUpdate)
+  Object.assign(h.renderer.shadowMap, { enabled, autoUpdate, needsUpdate })
+  let calls = 0, draws = 0
+  h.onScene(() => {
+    if (draws++ !== 0) return
+    expect(h.renderer.shadowMap).toEqual({ enabled, autoUpdate, needsUpdate })
+    expect(mesh.material.visible).toBe(bypass)
+    expect(mesh.castShadow).toBe(true)
+  })
+  try {
+    h.pipeline.render(new THREE.OrthographicCamera(), undefined, () => {
+      calls++
+      expect(h.renderer.shadowMap).toEqual({ enabled, autoUpdate, needsUpdate })
+      return new Set([mesh])
+    })
+    expect(calls).toBe(bypass ? 0 : 1)
+    expect(h.pipeline.lastFrame.occludedMeshes).toBe(bypass ? 0 : 1)
+    expect(mesh.material).toBe(source)
+    expect(h.renderer.shadowMap.enabled).toBe(enabled)
+    expect(h.renderer.shadowMap.autoUpdate).toBe(autoUpdate)
+  } finally {
+    h.pipeline.dispose()
+  }
+})
+
+test.each(['callback', 'opaque', 'peel', 'overlay'])('opaque culling restores sources and renderer after %s throws, then resets on retry', failure => {
+  const scene = new THREE.Scene(), camera = new THREE.OrthographicCamera()
+  const source = new THREE.MeshPhysicalMaterial({ transmission: 1 }), mesh = new THREE.Mesh(triangles(1), source as THREE.Material)
+  const glass = new THREE.Mesh(triangles(1), new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.4 }))
+  scene.background = new THREE.Color(0xabcdef)
+  scene.overrideMaterial = new THREE.MeshNormalMaterial()
+  scene.add(mesh, glass)
+  const background = scene.background, override = scene.overrideMaterial, originalGlass = glass.material
+  const h = harness(scene)
+  h.pipeline.pbrMaterials = false
+  let draws = 0
+  h.onScene(() => {
+    const phase = ['opaque', 'peel', 'overlay'][draws++]
+    if (phase === failure) throw new Error('culling failure')
+  })
+  try {
+    expect(() => h.pipeline.render(camera, undefined, frame => {
+      expect([...frame.opaqueMeshes]).toEqual([mesh])
+      expect(mesh.material).toBeInstanceOf(THREE.MeshLambertMaterial)
+      if (failure === 'callback') throw new Error('culling failure')
+      return new Set([mesh])
+    })).toThrow('culling failure')
+    expect(h.pipeline.lastFrame.complete).toBe(false)
+    expect(h.draws.some(draw => draw.target === h.pipeline.readBuffer)).toBe(false)
+    expect(mesh.material).toBe(source)
+    expect(mesh.castShadow).toBe(false)
+    expect(mesh.visible && source.visible).toBe(true)
+    expect(glass.material).toBe(originalGlass)
+    expect(scene.background).toBe(background)
+    expect(scene.overrideMaterial).toBe(override)
+    expect(h.renderer.shadowMap).toEqual({ enabled: false, autoUpdate: true, needsUpdate: true })
+    expect(h.renderer.autoClear && h.renderer.xr.enabled).toBe(true)
+    expect(h.renderer.toneMapping).toBe(THREE.ReinhardToneMapping)
+    expect(h.renderer.outputColorSpace).toBe(THREE.LinearSRGBColorSpace)
+    expect(h.state.target).toBe(h.initialTarget)
+    expect(h.state.viewport.toArray()).toEqual([2, 3, 7, 9])
+    expect(h.state.scissor.toArray()).toEqual([1, 2, 5, 6])
+    expect([h.state.face, h.state.mip, h.state.scissorTest, h.state.clearDepth, h.state.clearAlpha]).toEqual([2, 1, true, 0.9, 0.7])
+    expect(h.state.clearColor.getHex()).toBe(0x123456)
+    h.onScene(() => {})
+    h.pipeline.render(camera)
+    expect(h.pipeline.lastFrame).toEqual({ layers: 0, triangleBound: 1, occludedMeshes: 0, complete: true })
+  } finally {
+    h.pipeline.dispose()
+  }
+})
+
+test('mixed unsupported opaque properties fail open without bypassing ordinary stage floors', () => {
+  const scene = new THREE.Scene(), geometry = triangles(1), texture = new THREE.Texture()
+  const safe = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial())
+  const floor = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ side: THREE.DoubleSide }))
+  floor.receiveShadow = true
+  const unsupported: THREE.Mesh[] = [floor, ...[
+    { alphaTest: 0.5 }, { alphaHash: true }, { alphaToCoverage: true }, { wireframe: true },
+    { displacementMap: texture }, { clippingPlanes: [new THREE.Plane()] }, { polygonOffset: true },
+    { side: THREE.BackSide }, { depthWrite: false }, { blending: THREE.AdditiveBlending },
+    { transparent: true }, { opacity: 0.5 },
+  ].map(options => new THREE.Mesh(geometry, new THREE.MeshStandardMaterial(options))),
+  new THREE.Mesh(geometry, new THREE.MeshPhysicalMaterial({ transmission: 1 })),
+  new THREE.Mesh(geometry, new THREE.MeshPhongMaterial()),
+  new THREE.Mesh(geometry, [safe.material]),
+  new (class CustomMesh extends THREE.Mesh {})(geometry, safe.material)]
+  const instances = new THREE.InstancedMesh(geometry, safe.material, 1)
+  instances.setMatrixAt(0, new THREE.Matrix4())
+  const skinned = new THREE.SkinnedMesh(geometry, safe.material)
+  geometry.computeBoundingSphere()
+  skinned.boundingSphere = geometry.boundingSphere!.clone()
+  const instancedGeometry = new THREE.InstancedBufferGeometry()
+  instancedGeometry.setAttribute('position', geometry.getAttribute('position'))
+  instancedGeometry.instanceCount = 1
+  const morph = new THREE.Mesh(triangles(1), safe.material)
+  morph.geometry.morphAttributes.position = [geometry.getAttribute('position')]
+  const customVertex = new THREE.Mesh(geometry, safe.material)
+  customVertex.getVertexPosition = (_index, target) => target.set(0, 0, -1)
+  unsupported.push(instances, skinned, new THREE.Mesh(instancedGeometry, safe.material), morph, customVertex)
+  scene.add(safe, ...unsupported)
+  const originals = unsupported.map(mesh => mesh.material), h = harness(scene)
+  let draws = 0, calls = 0
+  h.onScene(() => {
+    if (draws++ !== 0) return
+    expect(safe.material.visible).toBe(false)
+    for (const [index, mesh] of unsupported.entries()) {
+      const source = originals[index]
+      if (Array.isArray(source)) expect(mesh.material).toEqual(source)
+      else if (!source.transparent && source.opacity === 1 && !(source as THREE.MeshPhysicalMaterial).transmission) expect(mesh.material).toBe(source)
+    }
+  })
+  try {
+    h.pipeline.render(new THREE.OrthographicCamera(), undefined, frame => {
+      calls++
+      expect([...frame.opaqueMeshes]).toEqual([safe])
+      return new Set([safe, ...unsupported])
+    })
+    expect(calls).toBe(1)
+    expect(h.pipeline.lastFrame.occludedMeshes).toBe(1)
+    expect(unsupported.map(mesh => mesh.material)).toEqual(originals)
+  } finally {
+    h.pipeline.dispose(); texture.dispose()
+  }
+})
+
+test.each([
+  ['never depth', (mesh: THREE.Mesh) => { (mesh.material as THREE.Material).depthFunc = THREE.NeverDepth }],
+  ['always depth', (mesh: THREE.Mesh) => { (mesh.material as THREE.Material).depthFunc = THREE.AlwaysDepth }],
+  ['equal depth', (mesh: THREE.Mesh) => { (mesh.material as THREE.Material).depthFunc = THREE.EqualDepth }],
+  ['greater depth', (mesh: THREE.Mesh) => { (mesh.material as THREE.Material).depthFunc = THREE.GreaterDepth }],
+  ['greater-equal depth', (mesh: THREE.Mesh) => { (mesh.material as THREE.Material).depthFunc = THREE.GreaterEqualDepth }],
+  ['not-equal depth', (mesh: THREE.Mesh) => { (mesh.material as THREE.Material).depthFunc = THREE.NotEqualDepth }],
+  ['disabled depth test', (mesh: THREE.Mesh) => { (mesh.material as THREE.Material).depthTest = false }],
+  ['custom fragment depth', (mesh: THREE.Mesh) => { mesh.material = new THREE.ShaderMaterial({ fragmentShader: 'void main() { gl_FragDepth = 1.0; }' }) }],
+  ['raw shader', (mesh: THREE.Mesh) => { mesh.material = new THREE.RawShaderMaterial() }],
+  ['custom material', (mesh: THREE.Mesh) => { mesh.material = new (class CustomMaterial extends THREE.MeshStandardMaterial {})() }],
+  ['shader callback', (mesh: THREE.Mesh) => { (mesh.material as THREE.Material).onBeforeCompile = () => {} }],
+  ['material callback', (mesh: THREE.Mesh) => { (mesh.material as THREE.Material).onBeforeRender = () => {} }],
+  ['program key', (mesh: THREE.Mesh) => { (mesh.material as THREE.Material).customProgramCacheKey = () => 'custom' }],
+  ['custom defines', (mesh: THREE.Mesh) => { (mesh.material as THREE.Material).defines = { USE_DISPLACEMENTMAP: '' } }],
+  ['before-render callback', (mesh: THREE.Mesh) => { mesh.onBeforeRender = () => {} }],
+  ['after-render callback', (mesh: THREE.Mesh) => { mesh.onAfterRender = () => {} }],
+  ['stencil', (mesh: THREE.Mesh) => { (mesh.material as THREE.Material).stencilWrite = true }],
+] as const)('unsafe opaque %s bypasses the provider even in mixed material arrays', (_name, configure) => {
+  const scene = new THREE.Scene(), geometry = triangles(2), safe = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial())
+  const hazard = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial() as THREE.Material | THREE.Material[])
+  configure(hazard)
+  const unsafeMaterial = hazard.material as THREE.Material
+  hazard.material = [safe.material, unsafeMaterial]
+  geometry.addGroup(0, 3, 0)
+  geometry.addGroup(3, 3, 1)
+  scene.add(safe, hazard)
+  const h = harness(scene), source = safe.material
+  let calls = 0, draws = 0
+  h.onScene(() => {
+    if (draws++ === 0) expect(safe.material).toBe(source)
+  })
+  try {
+    h.pipeline.render(new THREE.OrthographicCamera(), undefined, () => { calls++; return new Set([safe, hazard]) })
+    expect(calls).toBe(0)
+    expect(h.pipeline.lastFrame.occludedMeshes).toBe(0)
+    expect(safe.material).toBe(source)
+    expect(hazard.material).toEqual([source, unsafeMaterial])
+  } finally {
+    h.pipeline.dispose()
+  }
+})
+
+test.each(['global clipping', 'scene before-render', 'scene after-render'])('%s bypasses opaque culling', hazard => {
+  const scene = new THREE.Scene(), mesh = new THREE.Mesh(triangles(1), new THREE.MeshBasicMaterial())
+  scene.add(mesh)
+  const h = harness(scene)
+  if (hazard === 'global clipping') h.renderer.clippingPlanes.push(new THREE.Plane())
+  if (hazard === 'scene before-render') scene.onBeforeRender = () => {}
+  if (hazard === 'scene after-render') scene.onAfterRender = () => {}
+  let calls = 0
+  try {
+    h.pipeline.render(new THREE.OrthographicCamera(), undefined, () => { calls++; return new Set([mesh]) })
+    expect(calls).toBe(0)
+    expect(h.pipeline.lastFrame.occludedMeshes).toBe(0)
+  } finally {
     h.pipeline.dispose()
   }
 })

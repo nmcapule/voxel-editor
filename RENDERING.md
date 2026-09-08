@@ -347,6 +347,79 @@ excluding padding, transport, upload and BVH generation. They are not GPU frame-
 - Conditional blend targets avoid approximately 142 MiB of unused RGBA32F color storage
   at a 1920x1080 CSS viewport, DPR 2 and 0.75 trace scale on native-float-blending devices.
 
+## Model Occlusion Experiment
+
+Standard model rendering has an internal, default-off CPU occlusion filter:
+`voxelRenderer.occlusionCulling = true`. There is no persisted preference or UI
+switch. Disabled adapters allocate no occluder cache and perform no geometry
+extraction. Scene composition does not opt in.
+
+`src/editors/model/occlusion.ts` copies compact rectangles from installed greedy
+quad geometry, coalesces exact coplanar full edges across chunk/material seams,
+and groups tight surface bounds by chunk. It never treats a sparse chunk box as
+solid or fills holes with a bounding rectangle. Geometry replacement/removal and
+changes in eligible meshes or translations rebuild the merged cache; camera
+projections and hidden results are evaluated for each live frame.
+
+A chunk is omitted only when its complete bounds lie behind a retained opaque
+face and all eight projected corners lie inside that face, with a two-pixel
+combined safety margin. Both perspective and orthographic cameras, including
+negative near planes, are supported. Eye/near crossings, clipping uncertainty,
+unsupported transforms/materials, coplanarity and budget overflow fail open.
+Selected occluder-owner chunks remain drawn.
+The implementation limits extraction to 2,048 quads per mesh / 65,536 retained
+scanned quads, four exact merge passes, 8,192 merged rectangles, 32 selected
+occluders and 4,096 candidate chunks. Small merged faces are discarded before
+per-frame projection. Geometry remains available for meshing, picking and tracing.
+
+The optional `SceneContent.cullOpaque` contract receives effective opaque meshes
+after raster material substitution. `RasterPipeline` only substitutes a hidden
+material for approved primary opaque surfaces and restores sources in `finally`.
+It bypasses the filter when shadows need refreshing, keeping all shadow casters;
+ordinary orbiting can use the existing shadow cache. Transparent surfaces, ghost
+context and editor overlays remain independent. Pending model work, Cube sprites,
+progressive previews/builds, captures and inspection views bypass the filter.
+CPU caches contain no context-bound GPU handles and survive graphics recovery.
+
+Run these in the dedicated `/tests/transparency.html` harness, sequentially:
+
+```js
+await transparencyTest.runOcclusionChecks();
+const benchmark = await transparencyTest.runOcclusionBenchmark();
+// Optional manual live experiment; turn off again after profiling.
+transparencyTest.renderer.occlusionCulling = true;
+```
+
+The checks compare preserved live-canvas pixels, not captures that intentionally
+bypass the optimization. They cover front/rear orbiting, zoom/near crossings,
+opaque material seams, openings, remeshing/undo/redo, material transitions,
+isolation, AO, shadow refresh/cache, DPR, capture/inspection and context recovery.
+The benchmark uses 64-chunk wall/detail, sparse and checkerboard-pocket fixtures,
+12 paired orbit/zoom views with alternating on/off order and two paired warmups.
+It reports actual WebGL draws, CPU culling time, main-thread render time and
+diagnostic `gl.finish`-synchronized frame time; these are not achieved FPS or
+isolated GPU timings. Registration cost is outside its steady-state measurements.
+
+The September 8, 2026 Chromium/ANGLE/SwiftShader run passed all 47 live checks
+with zero RGBA difference, including recovery, and reported these diagnostic
+192x192 results (12 paired views per fixture):
+
+| Fixture | Front-view draws off / on | Median orbit frame ms off / on |
+| --- | --- | --- |
+| Wall and rear detail | 130 / 34 | 1.30 / 1.90 |
+| Sparse | 66 / 66 | 0.65 / 1.00 |
+| Checkerboard pockets | 66 / 66 | 1.20 / 1.40 |
+
+These software-GPU measurements show draw savings, not a net speedup. Keep the feature
+default-off until native-GPU measurements show a net benefit on representative
+models, including negative controls. Single-rectangle containment intentionally
+misses occlusion requiring several differently oriented surfaces. It reduces
+draw submission, not scene traversal, geometry residency or transparency passes.
+
+This change passed 479 Bun tests, production build/typecheck and the rendering-file
+detector. The broader legacy transparency run stalled during SwiftShader execution
+(CDP evaluation timeouts); it is not counted among the passing browser checks above.
+
 ## Verification
 
 ```sh

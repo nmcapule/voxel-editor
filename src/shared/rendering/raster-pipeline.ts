@@ -3,6 +3,7 @@ import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js'
 import { FXAAShader } from 'three/addons/shaders/FXAAShader.js'
+import type { SceneContent } from './contracts'
 
 type Surface = THREE.Mesh | THREE.Line | THREE.Points | THREE.Sprite
 type Phase = 'opaque' | 'peel' | 'shade' | 'overlay'
@@ -93,7 +94,7 @@ export class RasterPipeline {
   renderToScreen = true
   /** False substitutes opaque palette-only diffuse shading for physical mesh materials. */
   pbrMaterials = true
-  readonly lastFrame = { layers: 0, triangleBound: 0, complete: false }
+  readonly lastFrame = { layers: 0, triangleBound: 0, occludedMeshes: 0, complete: false }
 
   private readonly renderer: THREE.WebGLRenderer
   private readonly scene: THREE.Scene
@@ -352,9 +353,10 @@ export class RasterPipeline {
     return this.pixel[0] !== 0
   }
 
-  render(camera: THREE.Camera, target: THREE.WebGLRenderTarget | null = this.renderToScreen ? null : this.readBuffer) {
+  render(camera: THREE.Camera, target: THREE.WebGLRenderTarget | null = this.renderToScreen ? null : this.readBuffer,
+    cullOpaque?: SceneContent['cullOpaque']) {
     if (this.disposed || this.rendering) throw new Error('RasterPipeline is disposed or already rendering.')
-    Object.assign(this.lastFrame, { layers: 0, triangleBound: 0, complete: false })
+    Object.assign(this.lastFrame, { layers: 0, triangleBound: 0, occludedMeshes: 0, complete: false })
     const renderer = this.renderer
     const scene = this.scene
     const gl = renderer.getContext()
@@ -380,6 +382,12 @@ export class RasterPipeline {
     if (camera.parent === null && camera.matrixWorldAutoUpdate) camera.updateMatrixWorld()
     const frustum = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse))
     const materials = new Set<THREE.Material>()
+    const opaqueMeshes = new Set<THREE.Mesh>(), occludedMeshes = new Set<THREE.Mesh>()
+    // The primary scene draw also updates shadows; never remove its shadow contributors.
+    let cullingSafe = !!cullOpaque && !(renderer.shadowMap.enabled && (renderer.shadowMap.autoUpdate || renderer.shadowMap.needsUpdate))
+      && !renderer.clippingPlanes.length
+      && scene.onBeforeRender === THREE.Object3D.prototype.onBeforeRender
+      && scene.onAfterRender === THREE.Object3D.prototype.onAfterRender
     const objects: { object: Surface; material: Surface['material']; rasterMaterial: Surface['material']; castShadow: boolean; overlay: boolean; visible: boolean; inView: boolean }[] = []
     const show = (phase: Phase) => {
       for (const { object, rasterMaterial, overlay, inView } of objects) {
@@ -387,7 +395,7 @@ export class RasterPipeline {
         const select = (source: THREE.Material) => {
           if (!source.visible) return source
           if (overlay) return phase === 'overlay' ? source : this.hidden
-          if (!isLayered(source)) return phase === 'opaque' ? source : this.hidden
+          if (!isLayered(source)) return phase === 'opaque' && !occludedMeshes.has(object as THREE.Mesh) ? source : this.hidden
           if (!inView) return this.hidden
           return phase === 'peel' || phase === 'shade' ? this.variants.get(source)![phase] : this.hidden
         }
@@ -422,6 +430,40 @@ export class RasterPipeline {
         if (object instanceof THREE.Mesh) this.lastFrame.triangleBound += transparentTriangleBound(object)
         for (const source of Array.isArray(surface.material) ? surface.material : [surface.material]) {
           if (source.visible && isLayered(source)) materials.add(source)
+          if (!cullingSafe || !source.visible || isLayered(source)) continue
+          const conventionalDepth = source.depthFunc === THREE.LessDepth || source.depthFunc === THREE.LessEqualDepth
+          const builtin = [THREE.MeshBasicMaterial, THREE.MeshLambertMaterial, THREE.MeshStandardMaterial, THREE.MeshPhysicalMaterial,
+            THREE.MeshPhongMaterial, THREE.MeshToonMaterial, THREE.MeshMatcapMaterial, THREE.MeshNormalMaterial,
+            THREE.MeshDepthMaterial, THREE.MeshDistanceMaterial, THREE.ShadowMaterial].some(type => source.constructor === type)
+          const customDefines = Object.entries(source.defines ?? {}).some(([name, value]) => value !== '' || !(
+            name === 'STANDARD' && source instanceof THREE.MeshStandardMaterial
+            || name === 'PHYSICAL' && source instanceof THREE.MeshPhysicalMaterial
+            || name === 'TOON' && source instanceof THREE.MeshToonMaterial
+            || name === 'MATCAP' && source instanceof THREE.MeshMatcapMaterial))
+          // Even an ineligible opaque draw can invalidate earlier depth evidence or callbacks.
+          if (!builtin || customDefines || !conventionalDepth || !source.depthTest || source.stencilWrite
+            || source.onBeforeCompile !== THREE.Material.prototype.onBeforeCompile
+            || source.onBeforeRender !== THREE.Material.prototype.onBeforeRender
+            || source.customProgramCacheKey !== THREE.Material.prototype.customProgramCacheKey
+            || object.onBeforeRender !== THREE.Object3D.prototype.onBeforeRender
+            || object.onAfterRender !== THREE.Object3D.prototype.onAfterRender) {
+            cullingSafe = false
+            continue
+          }
+          if (!(object instanceof THREE.Mesh) || object.constructor !== THREE.Mesh || Array.isArray(surface.material)
+            || (object.geometry as THREE.InstancedBufferGeometry).isInstancedBufferGeometry
+            || object.getVertexPosition !== THREE.Mesh.prototype.getVertexPosition
+            || object.morphTargetInfluences?.length || Object.keys(object.geometry.morphAttributes).length
+            || ![THREE.MeshBasicMaterial, THREE.MeshLambertMaterial, THREE.MeshStandardMaterial, THREE.MeshPhysicalMaterial].some(type => source.constructor === type)) continue
+          const material = source as THREE.MeshStandardMaterial
+          if (source.opacity !== 1 || !source.depthWrite || source.side !== THREE.FrontSide
+            || ((source as THREE.MeshPhysicalMaterial).transmission !== undefined && (source as THREE.MeshPhysicalMaterial).transmission !== 0)
+            || source.alphaTest !== 0 || source.alphaHash || source.alphaToCoverage || material.wireframe
+            || material.displacementMap || source.clippingPlanes?.length || source.polygonOffset
+            || (source.blending !== THREE.NormalBlending && source.blending !== THREE.NoBlending)) continue
+          const geometry = object.geometry, { start, count } = geometry.drawRange
+          const end = Math.min(geometry.index?.count ?? geometry.getAttribute('position')?.count ?? 0, start + count)
+          if (end - Math.max(0, start) >= 3 && (object.frustumCulled || frustum.intersectsObject(object))) opaqueMeshes.add(object)
         }
       })
       if (!Number.isSafeInteger(this.lastFrame.triangleBound)) throw new Error('RasterPipeline triangle bound is not a safe integer.')
@@ -433,6 +475,12 @@ export class RasterPipeline {
       renderer.outputColorSpace = THREE.SRGBColorSpace
       scene.overrideMaterial = null
       renderer.state.buffers.depth.setClear(1)
+      if (cullingSafe && cullOpaque) {
+        const hidden = cullOpaque({ camera, width: this.beauty.width, height: this.beauty.height, opaqueMeshes: new Set(opaqueMeshes) })
+        // Keep eligibility private even if a provider mutates its borrowed set at runtime.
+        for (const mesh of opaqueMeshes) if (hidden?.has(mesh)) occludedMeshes.add(mesh)
+        this.lastFrame.occludedMeshes = occludedMeshes.size
+      }
       show('opaque')
       renderer.setRenderTarget(this.beauty)
       renderer.clear(true, true, true)

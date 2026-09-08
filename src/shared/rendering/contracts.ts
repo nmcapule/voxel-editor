@@ -31,8 +31,18 @@ export interface SceneContent {
   /** Optional orthographic, raster-only model preview. Absent plugins leave normal rendering intact. */
   previewRendererId?: string
   prepareRaster?(frame: PreviewFrame): void
+  /** Optional current-camera opaque draw filter. Never used for shadows or secondary views. */
+  cullOpaque?(frame: OcclusionFrame): ReadonlySet<THREE.Mesh> | undefined
   onContextLost?(): void
   prepareFullDetail?(signal: AbortSignal): Promise<PreparedSceneContent>
+}
+
+export interface OcclusionFrame {
+  camera: THREE.Camera
+  width: number
+  height: number
+  /** Currently displayed, supported opaque depth-writing meshes, after raster substitution. */
+  opaqueMeshes: ReadonlySet<THREE.Mesh>
 }
 
 export interface PreviewFrame {

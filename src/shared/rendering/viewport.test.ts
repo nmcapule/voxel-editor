@@ -198,6 +198,47 @@ function photoProbe() {
   return { probe, calls, pathTracer }
 }
 
+test('opaque culling is passed only to live primary frames outside captures and progressive previews', () => {
+  const { probe } = photoProbe(), cullOpaque = mock(() => new Set<THREE.Mesh>())
+  const render = mock(), secondary = { render: mock() }
+  probe.sceneContent.cullOpaque = cullOpaque
+  probe.raster.render = render
+  probe.settings.pathTracing = false
+  const draw = (live = true) => probe.renderRaster(undefined, undefined, undefined, live)
+  draw(false)
+  expect(render).toHaveBeenLastCalledWith(probe.camera, undefined, undefined)
+  draw()
+  expect(render).toHaveBeenLastCalledWith(probe.camera, undefined, cullOpaque)
+  for (const state of [{ captures: 1 }, { pathTracingBuildRunning: true }, { contextLost: true }]) {
+    Object.assign(probe, { captures: 0, pathTracingBuildRunning: false, contextLost: false }, state)
+    render.mockClear(); draw()
+    if (state.contextLost) expect(render).not.toHaveBeenCalled()
+    else expect(render).toHaveBeenLastCalledWith(probe.camera, undefined, undefined)
+  }
+  Object.assign(probe, { captures: 0, pathTracingBuildRunning: false, contextLost: false })
+  probe.renderRaster(new THREE.OrthographicCamera(), undefined, true, true)
+  expect(render.mock.calls.at(-1)?.[2]).toBeUndefined()
+  probe.renderRaster(probe.camera, secondary, true, true)
+  expect(secondary.render).toHaveBeenLastCalledWith(probe.camera, undefined, undefined)
+  probe.settings.pathTracing = true; draw()
+  expect(render.mock.calls.at(-1)?.[2]).toBeUndefined()
+  probe.settings.pathTracing = false; probe.previewSelected = () => true; draw()
+  expect(render.mock.calls.at(-1)?.[2]).toBeUndefined()
+  probe.previewSelected = () => false
+  const request = globalThis.requestAnimationFrame
+  let frame: FrameRequestCallback | undefined
+  globalThis.requestAnimationFrame = callback => { frame = callback; return 1 }
+  try {
+    probe.render()
+    expect(frame).toBeDefined()
+    frame!(0)
+    expect(render).toHaveBeenLastCalledWith(probe.camera, undefined, cullOpaque)
+    probe.sceneContent.cullOpaque = undefined
+    draw()
+    expect(render.mock.calls.at(-1)?.[2]).toBeUndefined()
+  } finally { globalThis.requestAnimationFrame = request }
+})
+
 test('performance monitoring times live render work without extra frames and counts full PBR samples', async () => {
   const { probe, pathTracer } = photoProbe()
   const request = globalThis.requestAnimationFrame, cancel = globalThis.cancelAnimationFrame

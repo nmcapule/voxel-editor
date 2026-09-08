@@ -407,7 +407,7 @@ function modelGestureProbe(fail = false) {
   const remove = (type: string, listener: (event: any) => void) => events.set(type, events.get(type)?.filter(entry => entry.listener !== listener) ?? [])
   const ownerDocument = { defaultView: { addEventListener: listen }, hidden: false, addEventListener: listen, removeEventListener: remove }
   const canvas = { ownerDocument, addEventListener: listen, removeEventListener: remove, style: {}, clientWidth: 100, clientHeight: 100,
-    getRootNode: () => ownerDocument, setPointerCapture() {}, releasePointerCapture() {}, hasPointerCapture: () => false,
+    getRootNode: () => ownerDocument, focus: mock(), setPointerCapture() {}, releasePointerCapture() {}, hasPointerCapture: () => false,
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) }
   const document = new VoxelDocument({ x: 16, y: 16, z: 16 }), cell = { x: 2, y: 2, z: 2 }
   document.setVoxel(2, 2, 2, 1)
@@ -421,7 +421,7 @@ function modelGestureProbe(fail = false) {
     tool: 'select', selectionMode: 'point', paintMode: 'paint', sculptMode: 'push', fillShape: 'box', fillDepth: 1, activeColor: 1,
     viewport: { renderMode: false, camera: new PerspectiveCamera(), renderer: { domElement: canvas },
       controls: { touches: { ONE: -1, TWO: TOUCH.DOLLY_ROTATE }, mouseButtons: { LEFT: -1, MIDDLE: MOUSE.PAN, RIGHT: MOUSE.ROTATE } },
-      render() {}, moveFocus() {}, cancelFocusAnimation() {},
+      render() {}, moveFocus() {}, cancelFocusAnimation() {}, focusViewport: Viewport.prototype.focusViewport,
       setRasterInteraction(source: string, active: boolean) { expect(source).toBe('model'); raster.push(active) } },
     callbacks: { onSelectionChange: commit, onPaint: commit, onErase: commit, onFillCommit: commit, onPushPullCommit: commit, onPushPullPreview() {}, onHover() {} },
     targetAt: () => target, refreshLayerScope() {},
@@ -437,6 +437,30 @@ function modelGestureProbe(fail = false) {
     dispose() { probe.cancelPaint(); probe.cancelPushPull(); probe.cancelMarquee(); probe.clearSelectionPreview(); probe.hover.geometry.dispose(); probe.hover.material.dispose(); probe.marqueePreview.geometry.dispose(); probe.marqueePreview.material.dispose() },
   }
 }
+
+test('model pointer gestures restore canvas keyboard focus unless the model is suspended', () => {
+  const gesture = modelGestureProbe(), { probe, emit, target } = gesture
+  const focus = probe.viewport.renderer.domElement.focus
+  try {
+    for (const tool of ['layer', 'select', 'paint', 'sculpt']) {
+      probe.setTool(tool)
+      for (const pointerType of ['mouse', 'pen', 'touch']) {
+        for (const occupied of [true, false]) {
+          probe.targetAt = () => occupied ? target : undefined
+          focus.mockClear()
+          emit('pointerdown', { pointerType })
+          expect(focus).toHaveBeenCalledTimes(1)
+          expect(focus).toHaveBeenCalledWith({ preventScroll: true })
+          emit('pointercancel', { pointerType })
+        }
+      }
+    }
+    probe.modelSuspended = true
+    focus.mockClear()
+    emit('pointerdown')
+    expect(focus).not.toHaveBeenCalled()
+  } finally { gesture.dispose() }
+})
 
 test('empty selections cancel focus without retargeting; nonempty selections retain focus and notification policy', () => {
   const gesture = modelGestureProbe(), { probe, target } = gesture

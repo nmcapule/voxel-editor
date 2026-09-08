@@ -486,6 +486,7 @@ export class VoxelRenderer {
     const options = { signal: this.listeners.signal }
     canvas.addEventListener('pointerdown', event => {
       if (this.modelSuspended) return
+      this.focusViewport()
       this.layerClick = undefined
       // Capture runs before OrbitControls; projection changes replace the controls object.
       const controls = this.viewport.controls

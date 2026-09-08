@@ -514,6 +514,7 @@ export class VoxelRenderer {
           return
         }
         this.paintPointer = event.pointerId
+        this.syncRasterInteraction()
         canvas.setPointerCapture(event.pointerId)
         return
       }
@@ -570,25 +571,28 @@ export class VoxelRenderer {
       }
       if (this.marqueeDrag && this.activePointer === event.pointerId) {
         const action = this.marqueeDrag.action
-        if (action === 'fill') {
-          const { min, max } = boxBounds(this.marqueeDrag.target.cell, this.marqueeDrag.end, this.marqueeDrag.target.normal, this.fillDepth)
-          this.callbacks.onFillCommit(min, max, this.marqueeDrag.target.normal, this.fillShape)
-        } else if (this.marqueeDrag.moved) this.selectMarquee(this.marqueeDrag)
-        else if (action) this.resolveActionTarget(this.marqueeDrag.target)
-        else this.selectTarget(this.marqueeDrag.target, this.marqueeDrag.additive)
-        this.cancelMarquee()
+        try {
+          if (action === 'fill') {
+            const { min, max } = boxBounds(this.marqueeDrag.target.cell, this.marqueeDrag.end, this.marqueeDrag.target.normal, this.fillDepth)
+            this.callbacks.onFillCommit(min, max, this.marqueeDrag.target.normal, this.fillShape)
+          } else if (this.marqueeDrag.moved) this.selectMarquee(this.marqueeDrag)
+          else if (action) this.resolveActionTarget(this.marqueeDrag.target)
+          else this.selectTarget(this.marqueeDrag.target, this.marqueeDrag.additive)
+        } finally { this.cancelMarquee() }
         if (action === 'paint') this.callbacks.onPaint([...this.selection.values()])
         if (action === 'erase') this.callbacks.onErase([...this.selection.values()])
       } else if (this.pushPullDrag && this.activePointer === event.pointerId) {
         const { cells, normal, distance, move } = this.pushPullDrag
-        if (distance || this.floatingSelection) {
+        try {
+          if (distance || this.floatingSelection) {
             this.callbacks.onPushPullCommit(cells, normal, distance, move, this.floatingSelection)
-        }
-        this.cancelPushPull()
+          }
+        } finally { this.cancelPushPull() }
       } else if (this.paintPointer === event.pointerId) {
-        const target = this.targetAt(event)
-        if (this.resolveActionTarget(target)) this.callbacks.onPaint([...this.selection.values()])
-        this.cancelPaint()
+        try {
+          const target = this.targetAt(event)
+          if (this.resolveActionTarget(target)) this.callbacks.onPaint([...this.selection.values()])
+        } finally { this.cancelPaint() }
       }
     }, options)
     canvas.addEventListener('pointercancel', event => {
@@ -599,6 +603,18 @@ export class VoxelRenderer {
       this.cancelPushPull()
       this.cancelMarquee()
     }, options)
+    const cancelAbandonedDrag = () => {
+      if (this.modelSuspended || this.paintPointer === undefined && !this.marqueeDrag && !this.pushPullDrag) return
+      this.touchPointers.clear(); this.orbitTouch = undefined
+      this.cancelPaint(); this.cancelPushPull(); this.cancelMarquee()
+    }
+    canvas.addEventListener('lostpointercapture', event => {
+      if (this.paintPointer === event.pointerId || this.activePointer === event.pointerId) cancelAbandonedDrag()
+    }, options)
+    canvas.addEventListener('webglcontextlost', cancelAbandonedDrag, options)
+    const ownerDocument = canvas.ownerDocument
+    ownerDocument.defaultView?.addEventListener('blur', cancelAbandonedDrag, options)
+    ownerDocument.addEventListener('visibilitychange', () => { if (ownerDocument.hidden) cancelAbandonedDrag() }, options)
     canvas.addEventListener('pointerleave', () => {
       if (this.modelSuspended) return
       this.hover.visible = false
@@ -664,8 +680,13 @@ export class VoxelRenderer {
     this.callbacks.onHover(this.keyboardCell)
   }
 
+  private syncRasterInteraction() {
+    this.viewport.setRasterInteraction('model', this.paintPointer !== undefined || !!this.marqueeDrag || !!this.pushPullDrag)
+  }
+
   private cancelPaint() {
     this.paintPointer = undefined
+    this.syncRasterInteraction()
   }
 
   private startMarquee(event: PointerEvent, target: ToolTarget, additive: boolean, action?: MarqueeDrag['action']) {
@@ -679,6 +700,7 @@ export class VoxelRenderer {
       action,
     }
     this.activePointer = event.pointerId
+    this.syncRasterInteraction()
     this.viewport.renderer.domElement.setPointerCapture(event.pointerId)
   }
 
@@ -745,6 +767,7 @@ export class VoxelRenderer {
 
   private cancelMarquee() {
     this.marqueeDrag = undefined
+    this.syncRasterInteraction()
     this.marqueePreview.visible = false
     this.clearFillPreview()
     this.activePointer = undefined
@@ -956,6 +979,7 @@ export class VoxelRenderer {
       screenX,
       screenY,
     }
+    this.syncRasterInteraction()
 
     this.pushPullPreview = this.createGhostPreview(move ? cells.length : pushPullFaces(cells, target.normal).length, 0x2864dc)
     this.updatePushPullPreview()
@@ -1055,17 +1079,19 @@ export class VoxelRenderer {
   }
 
   private cancelPushPull() {
+    const drag = this.pushPullDrag
+    this.pushPullDrag = undefined
+    this.syncRasterInteraction()
     if (this.pushPullPreview) {
       this.root.remove(this.pushPullPreview)
       this.pushPullPreview.dispose()
       this.pushPullPreview.geometry.dispose()
       ;(this.pushPullPreview.material as THREE.Material).dispose()
     }
-    if (this.pushPullDrag) this.callbacks.onPushPullPreview()
     this.pushPullPreview = undefined
-    this.pushPullDrag = undefined
     if (this.selectionPreview) this.selectionPreview.visible = !this.viewport.renderMode && !this.modelSuspended
     this.activePointer = undefined
+    if (drag) this.callbacks.onPushPullPreview()
     this.viewport.render()
   }
 

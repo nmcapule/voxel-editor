@@ -51,6 +51,28 @@ composited linear background, preserving material maps, transmission and roughne
 Source materials and scene visibility are restored before returning, including failures.
 Inspection uses its own offscreen pipeline without changing the live camera or canvas.
 
+Raster camera gestures, animated focus, model tool drags, and scene marquee/transform
+drags temporarily cap drawing-buffer DPR at 1. Normal quality remains
+`min(devicePixelRatio, 2)` and returns in a scheduled frame 150 ms after the last
+gesture ends. Overlapping gestures hold quality independently; wheel bursts share the
+settling delay. Pointer cancellation, lost capture, blur, hidden pages, editor changes,
+context loss, and disposal release abandoned interaction state. Hover-only previews
+and sidebar controls do not start reduced quality. DPR-1 displays are unchanged.
+
+DPR-only transitions resize pixel buffers, retaining the half-resolution AO policy,
+without changing camera projection, notifying scene/picking listeners, invalidating
+shadows, or rebuilding meshes/BVHs. Actual viewport resizes still recheck scene budgets
+at normal-quality pixel dimensions. Progressive PBR, including preparation and its
+existing low-resolution previews, stays at normal DPR. PNG captures hold normal DPR
+through preparation and encoding (also for overlapping requests), then restore the
+current gesture policy. Capture metadata describes the full-resolution image.
+
+Run `transparencyTest.runInteractionDprChecks()` in `/tests/transparency.html` at DPR 1
+and 2 for real WebGL checks of camera gestures, wheel settling, capture dimensions,
+unchanged geometry, and matching restored pixels with AO, glass, grids, and shadows.
+Pixel reduction is not an FPS claim: measure frame times and transition costs on target
+hardware; software-GPU checks only establish rendering correctness.
+
 Skybox presets generate a 256x128 linear equirectangular texture for the background
 and traced environment, with a 64-pixel-face PMREM for realtime materials. Ambient
 scales sky illumination and reflections; the hemisphere is disabled in sky mode.

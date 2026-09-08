@@ -93,6 +93,91 @@ async function withViewport<T>(renderer: VoxelRenderer, size: number, run: () =>
   }
 }
 
+export async function runInteractionDprChecks(renderer: VoxelRenderer, settings: ViewSettings, errors: string[]) {
+  const { VoxelDocument } = await import('../src/shared/voxel/document')
+  return withViewport(renderer, 256, async () => {
+    const viewport = renderer.viewport, webgl = viewport.renderer, canvas = webgl.domElement
+    const normal = Math.min(devicePixelRatio, 2), interactive = Math.min(devicePixelRatio, 1)
+    const errorStart = errors.length
+    const document = new VoxelDocument({ x: 16, y: 16, z: 16 })
+    fill(document, 7, 4, 1, 4, 12, 9, 10)
+    fill(document, 12, 4, 1, 11, 12, 9, 12)
+    renderer.setDocument(document)
+    renderer.setSettings({ ...settings, pathTracing: false, ambientOcclusion: true, shadows: true, grid: true, faceGrid: true })
+    await renderer.whenMeshIdle()
+    const results: object[] = []
+    try {
+      for (const projection of ['orthographic', 'perspective'] as const) {
+        renderer.setSettings({ ...viewport.settings, projection })
+        renderer.setView({ position: { x: 21, y: 18, z: 24 }, target: { x: 0, y: 5, z: 0 }, zoom: 1, orthographicSpan: 20 })
+        const before = await image(renderer), view = renderer.getView()
+        const meshes = renderer.meshState()
+        viewport.controls.dispatchEvent({ type: 'start' })
+        viewport.controls.dispatchEvent({ type: 'start' })
+        check(webgl.getPixelRatio() === interactive, 'Camera gesture must reduce raster DPR')
+        await until(() => Reflect.get(viewport, 'rasterFrame') === undefined, 'interaction raster frame')
+        check(canvas.width === Math.floor(256 * interactive) && canvas.height === Math.floor(256 * interactive), 'Interaction buffer dimensions')
+        check(!webgl.shadowMap.needsUpdate, 'DPR alone must not invalidate shadows')
+        const captures = await Promise.all([renderer.capture(), renderer.capture()])
+        for (const capture of captures) {
+          const bitmap = await createImageBitmap(capture.blob)
+          try {
+            check(bitmap.width === before.width && bitmap.height === before.height, 'Capture during a gesture must retain full dimensions')
+            check(capture.view.viewport.width === bitmap.width && capture.view.viewport.height === bitmap.height, 'Capture metadata must match encoded pixels')
+          } finally { bitmap.close() }
+        }
+        check(webgl.getPixelRatio() === interactive, 'Capture must return to the active gesture policy')
+        viewport.controls.dispatchEvent({ type: 'end' })
+        check(webgl.getPixelRatio() === interactive, 'Gesture end must wait for the settling delay')
+        await until(() => Reflect.get(viewport, 'rasterRestoreTimer') === undefined && Reflect.get(viewport, 'rasterFrame') === undefined, 'sharp idle frame')
+        check(webgl.getPixelRatio() === normal, 'Idle frame must restore normal DPR')
+        check(JSON.stringify(renderer.getView()) === JSON.stringify(view), 'DPR transitions must not change the camera')
+        check(JSON.stringify(renderer.meshState()) === JSON.stringify(meshes), 'DPR transitions must not remesh geometry')
+        const after = await image(renderer)
+        const delta = difference(before.data, after.data)
+        check(delta.max <= 1, `Restored pixels must match full-quality pixels: ${JSON.stringify(delta)}`)
+        results.push({ projection, normal, interactive, pixels: before.width * before.height, restoredPixelDifference: delta })
+      }
+      canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: 50, clientX: 128, clientY: 128, cancelable: true }))
+      check(webgl.getPixelRatio() === interactive, 'Wheel start/end must leave a reduced frame scheduled')
+      await until(() => Reflect.get(viewport, 'rasterRestoreTimer') === undefined && Reflect.get(viewport, 'rasterFrame') === undefined, 'wheel settling')
+      check(webgl.getPixelRatio() === normal, 'Wheel burst must restore quality')
+      renderer.setRenderMode(true)
+      // Synthetic pointer IDs cannot own native capture; still exercise the real touch event routing.
+      const setCapture = canvas.setPointerCapture, releaseCapture = canvas.releasePointerCapture
+      canvas.setPointerCapture = canvas.releasePointerCapture = () => {}
+      const touch = (type: string, id: number, x: number) => canvas.dispatchEvent(new PointerEvent(type, {
+        pointerId: id, pointerType: 'touch', clientX: x, clientY: 100, bubbles: true, cancelable: true,
+      }))
+      try {
+        touch('pointerdown', 61, 80)
+        touch('pointerdown', 62, 160)
+        touch('pointermove', 62, 170)
+        touch('pointerup', 61, 80)
+        touch('lostpointercapture', 61, 80)
+        await new Promise(resolve => setTimeout(resolve, 200))
+        check(Reflect.get(viewport, 'rasterInteractions').has('controls') && webgl.getPixelRatio() === interactive, 'Lifting one touch must not release the surviving orbit gesture')
+        touch('pointermove', 62, 180)
+        touch('pointerup', 62, 180)
+        await until(() => Reflect.get(viewport, 'rasterRestoreTimer') === undefined, 'last touch settling')
+        check(webgl.getPixelRatio() === normal, 'Releasing the final touch must restore quality')
+      } finally {
+        touch('pointerup', 61, 80); touch('pointerup', 62, 180)
+        canvas.setPointerCapture = setCapture; canvas.releasePointerCapture = releaseCapture
+      }
+      viewport.controls.dispatchEvent({ type: 'start' })
+      window.dispatchEvent(new Event('blur'))
+      check(webgl.getPixelRatio() === normal && Reflect.get(viewport, 'rasterInteractions').size === 0, 'Abandoned gesture must restore quality')
+      viewport.controls.dispatchEvent({ type: 'end' })
+      check(errors.length === errorStart, errors.slice(errorStart).join('\n'))
+      return results
+    } finally {
+      viewport.controls.dispatchEvent({ type: 'end' })
+      Reflect.get(viewport, 'clearRasterInteractions').call(viewport)
+    }
+  })
+}
+
 export async function runRenderingChecks(renderer: VoxelRenderer, settings: ViewSettings, errors: string[]) {
   const viewport = renderer.viewport
   const [{ VoxelDocument }, THREE] = await Promise.all([import('../src/shared/voxel/document'), import('three')])
@@ -607,7 +692,7 @@ export async function runRendererStateChecks(renderer: VoxelRenderer) {
       pathTracer: tracer, pathTracingFrame: undefined, pathTracingReady: false, pathTracingFailed: false,
       pathTracingBuildRunning: false, pathTracingBuildRequested: false, fpsIdleTimer: undefined, rasterFrame: undefined,
       callbacks: new Proxy({ onError: (message: string) => log.errors.push(message), onPathTracingStatus: (message: string) => log.statuses.push(message) }, { get: (target, key) => Reflect.get(target, key) ?? (() => {}) }),
-      ensurePathTracer: async () => tracer, renderRaster: () => log.raster++, resetFps() {}, recordFrame() {},
+      ensurePathTracer: async () => tracer, renderRaster: () => log.raster++, syncRasterResolution() { return false }, resetFps() {}, recordFrame() {},
     })
     return { probe, log }
   }

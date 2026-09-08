@@ -36,10 +36,14 @@ export class Viewport {
     this.sunlight.target = this.sunlightTarget
     this.sunlight.shadow.mapSize.set(2048, 2048)
     const options = { signal: this.listeners.signal }
+    const abandonInteraction = () => { this.cancelFocusAnimation(); this.clearRasterInteractions() }
+    window.addEventListener('blur', abandonInteraction, options)
+    document.addEventListener('visibilitychange', () => { if (document.hidden) abandonInteraction() }, options)
     this.renderer.domElement.addEventListener('contextmenu', event => event.preventDefault(), options)
     this.renderer.domElement.addEventListener('webglcontextlost', event => {
       event.preventDefault()
       this.contextLost = true
+      abandonInteraction()
       this.pathTracingRevision++
       this.pathTracingReady = false
       this.stopPathTracingSamples()
@@ -60,6 +64,7 @@ export class Viewport {
       this.raster = new RasterPipeline(this.renderer, this.scene, { ambientOcclusion: this.settings.ambientOcclusion })
       this.raster.setSize(this.renderer.domElement.width, this.renderer.domElement.height)
       this.environmentTarget = this.createEnvironment(this.skyTexture)
+      this.syncRasterResolution()
       this.setSettings(this.settings)
       this.renderer.shadowMap.needsUpdate = true
       this.pathTracingFailed = false
@@ -79,6 +84,10 @@ export class Viewport {
   controls: OrbitControls
   private raster: RasterPipeline
   private rasterFrame?: number
+  private rasterInteractions = new Set<'controls' | 'focus' | 'model' | 'scene'>()
+  private rasterRestoreTimer?: ReturnType<typeof setTimeout>
+  private captures = 0
+  private normalPixelRatio = Math.min(devicePixelRatio, 2)
   private contextLost = false
   private rasterError?: string
   private presentationDirty = true
@@ -199,13 +208,16 @@ export class Viewport {
     controls.addEventListener('start', () => {
       if (!interacting) { changed = false; this.callbacks.onViewStart?.() }
       interacting = true
+      this.setRasterInteraction('controls', true)
       this.cancelFocusAnimation()
     })
     controls.addEventListener('change', () => { if (interacting) changed = true; this.cameraChanged() })
     controls.addEventListener('end', () => {
+      // A single touch losing capture is not the end of a multi-touch controls gesture.
       const report = interacting && changed
       interacting = false
       changed = false
+      this.setRasterInteraction('controls', false)
       if (report) this.callbacks.onViewChange?.(this.getView())
     })
     return controls
@@ -225,6 +237,7 @@ export class Viewport {
       return
     }
     const startPosition = this.camera.position.clone()
+    this.setRasterInteraction('focus', true)
     const started = performance.now()
     const step = (now: number) => {
       const progress = Math.min(1, (now - started) / 220)
@@ -234,7 +247,7 @@ export class Viewport {
       this.controls.update()
       this.render()
       if (progress < 1) this.focusAnimation = requestAnimationFrame(step)
-      else this.focusAnimation = undefined
+      else { this.focusAnimation = undefined; this.setRasterInteraction('focus', false) }
     }
     this.focusAnimation = requestAnimationFrame(step)
   }
@@ -242,6 +255,53 @@ export class Viewport {
   private cancelFocusAnimation() {
     if (this.focusAnimation !== undefined) cancelAnimationFrame(this.focusAnimation)
     this.focusAnimation = undefined
+    this.setRasterInteraction('focus', false)
+  }
+
+  /** Idempotent ownership: touch starts can repeat and editor drags can overlap camera focus. */
+  setRasterInteraction(source: 'controls' | 'focus' | 'model' | 'scene', active: boolean) {
+    if (this.disposed || this.contextLost) return
+    if (active) {
+      if (this.rasterInteractions.has(source)) return
+      this.rasterInteractions.add(source)
+      clearTimeout(this.rasterRestoreTimer)
+      this.rasterRestoreTimer = undefined
+    } else {
+      if (!this.rasterInteractions.delete(source) || this.rasterInteractions.size) return
+      // OrbitControls emits start/end in one wheel event; keep its scheduled frame reduced.
+      this.rasterRestoreTimer = setTimeout(() => {
+        this.rasterRestoreTimer = undefined
+        this.render()
+      }, 150)
+    }
+    this.render()
+  }
+
+  private clearRasterInteractions() {
+    this.rasterInteractions.clear()
+    clearTimeout(this.rasterRestoreTimer)
+    this.rasterRestoreTimer = undefined
+    this.render()
+  }
+
+  /** Pixel-only changes must not notify camera listeners, invalidate picks, or rebuild scene detail. */
+  private syncRasterResolution() {
+    if (this.disposed || this.contextLost) return false
+    if (this.normalPixelRatio !== Math.min(devicePixelRatio, 2)) {
+      // Moving between displays is a real resize: recheck budgets and restart PBR if needed.
+      this.resize()
+      return true
+    }
+    const progressive = this.renderMode && this.settings.pathTracing && !this.pathTracingFailed
+      && !!this.sceneContent && (!this.worldScale || !!this.sceneContent.prepareFullDetail)
+    const reduced = !progressive && this.captures === 0 && (this.rasterInteractions.size > 0 || this.rasterRestoreTimer !== undefined)
+    const ratio = Math.min(devicePixelRatio, reduced ? 1 : 2)
+    if (this.renderer.getPixelRatio() === ratio) return false
+    this.renderer.setPixelRatio(ratio)
+    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2())
+    this.raster.setSize(size.x, size.y)
+    this.presentationDirty = true
+    return true
   }
 
   focusViewport() {
@@ -258,6 +318,8 @@ export class Viewport {
   }
 
   private startPathTracingSamples(reset = true) {
+    if (!this.pathTracer || !this.pathTracingEnabled() || !this.pathTracingReady) return
+    this.syncRasterResolution()
     if (!this.pathTracer || !this.pathTracingEnabled() || !this.pathTracingReady) return
     this.stopPathTracingSamples()
     if (reset) { this.pathTracer.reset(); this.presentationDirty = true }
@@ -335,6 +397,7 @@ export class Viewport {
     let buildingTracer: WebGLPathTracer | undefined
     let buildingRevision = this.pathTracingRevision
     try {
+      this.syncRasterResolution()
       while (this.pathTracingEnabled() && this.pathTracingBuildRequested && this.contentReady()) {
         const revision = this.pathTracingRevision
         buildingRevision = revision
@@ -546,6 +609,7 @@ export class Viewport {
 
   private switchProjection(projection: ViewSettings['projection']) {
     this.cancelFocusAnimation()
+    this.setRasterInteraction('controls', false)
     const position = this.camera.position.clone()
     const target = this.controls.target.clone()
     this.controls.dispose()
@@ -661,7 +725,7 @@ export class Viewport {
     if (this.disposed) throw new Error('Viewport is disposed')
     const previous = this.sceneContent
     if (!previous && !content) return
-    if (previous !== content) { this.disposePathTracer(); this.releaseSceneDetail(); this.pathTracingFailed = false }
+    if (previous !== content) { this.clearRasterInteractions(); this.disposePathTracer(); this.releaseSceneDetail(); this.pathTracingFailed = false }
     this.sceneContent = content
     this.cancelFocusAnimation()
     this.sceneInteraction = false
@@ -806,14 +870,15 @@ export class Viewport {
   }
 
   resize() {
-    if (this.disposed) return
+    if (this.disposed || this.contextLost) return
     const width = Math.max(1, this.host.clientWidth)
     const height = Math.max(1, this.host.clientHeight)
     const aspect = width / height
     const pixelRatio = Math.min(devicePixelRatio, 2)
+    this.normalPixelRatio = pixelRatio
     const size = this.renderer.getSize(new THREE.Vector2())
-    if (this.renderer.getPixelRatio() !== pixelRatio) this.renderer.setPixelRatio(pixelRatio)
     if (size.x !== width || size.y !== height) this.renderer.setSize(width, height, false)
+    this.syncRasterResolution()
     if (this.camera instanceof THREE.PerspectiveCamera) this.camera.aspect = aspect
     else {
       this.camera.left = -this.orthographicSpan * aspect / 2
@@ -824,7 +889,8 @@ export class Viewport {
     this.camera.updateProjectionMatrix()
     this.renderer.getDrawingBufferSize(size)
     this.raster.setSize(size.x, size.y)
-    if (this.sceneContent && (this.fullContent || this.fullPreparation) && this.fullViewportPixels !== size.x * size.y) this.invalidateSceneContent()
+    const fullPixels = Math.floor(width * pixelRatio) * Math.floor(height * pixelRatio)
+    if (this.sceneContent && (this.fullContent || this.fullPreparation) && this.fullViewportPixels !== fullPixels) this.invalidateSceneContent()
     this.cameraChanged()
   }
 
@@ -903,6 +969,7 @@ export class Viewport {
 
   render() {
     if (this.disposed || this.contextLost) return
+    this.syncRasterResolution()
     const traced = this.pathTracingEnabled() && this.pathTracingReady
     if (traced && !this.tiltShiftDirty) return
     if (!traced) this.presentationDirty = true
@@ -928,6 +995,17 @@ export class Viewport {
   /** exact=true is a full-scene LOD-1 raster capture with all shadow contributors.
    * The bounded adapter rejects oversized/missing dependencies; no partial PNG is returned. */
   async capture(exact = false) {
+    this.captures++
+    try {
+      if (this.syncRasterResolution()) this.render()
+      return await this.captureImage(exact)
+    } finally {
+      this.captures--
+      if (this.syncRasterResolution()) this.render()
+    }
+  }
+
+  private async captureImage(exact: boolean) {
     if (this.disposed) throw new Error('Viewport is disposed')
     const content = this.sceneContent
     const viewBefore = exact ? JSON.stringify(this.getView()) : undefined
@@ -1047,6 +1125,7 @@ export class Viewport {
   dispose() {
     if (this.disposed) return
     this.disposed = true
+    this.clearRasterInteractions()
     this.pathTracingRevision++
     this.pathTracingReady = false
     this.listeners.abort()

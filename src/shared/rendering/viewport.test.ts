@@ -22,6 +22,8 @@ test('viewport teardown cancels owned work, detaches borrowed content and dispos
   let finish!: (detail: object) => void
   const probe = Object.assign(Object.create(Viewport.prototype), {
     scene, grid, sunlight: light, listeners, fullEpoch: 0, pathTracingRevision: 0,
+    rasterInteractions: new Set(['controls']), captures: 0,
+    rasterRestoreTimer: setTimeout(() => { throw new Error('Disposed restore timer fired') }, 1000),
     sceneContent: { root, prepareFullDetail: () => new Promise(resolve => { finish = resolve }) },
     focusAnimation: 11, rasterFrame: 12, pathTracingFrame: 13,
     callbacks: {}, resizeObserver: { disconnect() { resources.observer++ } },
@@ -36,6 +38,8 @@ test('viewport teardown cancels owned work, detaches borrowed content and dispos
     const preparing = probe.prepareSceneContent()
     probe.dispose(); probe.dispose()
     expect(listeners.signal.aborted).toBe(true)
+    expect(probe.rasterInteractions.size).toBe(0)
+    expect(probe.rasterRestoreTimer).toBeUndefined()
     expect(probe.fullAbort).toBeUndefined()
     expect(root.parent).toBeNull()
     expect(root.children).toEqual([mesh])
@@ -92,7 +96,7 @@ test('bounded stage fitting preserves local cameras, light position and guide ge
 function photoProbe() {
   const calls: string[] = []
   const pathTracer = {
-    samples: 128, pausePathTracing: false, reset: mock(),
+    samples: 128, pausePathTracing: false, reset: mock(), setCamera: mock(), dispose: mock(),
     renderSample: mock(function (this: { samples: number; pausePathTracing: boolean }) {
       calls.push(this.pausePathTracing ? 'present trace' : 'sample trace')
       if (!this.pausePathTracing) this.samples++
@@ -102,6 +106,7 @@ function photoProbe() {
     scene: new THREE.Scene(), camera: new THREE.PerspectiveCamera(),
     sceneContent: { root: new THREE.Group(), stage: 'bounded', bounds: new THREE.Box3(new THREE.Vector3(-1, 0, -1), new THREE.Vector3(1, 2, 1)), onViewportChange() {}, whenReady: async () => {} },
     settings: { ...DEFAULT_SETTINGS, tiltShift: true }, renderMode: true,
+    captures: 0, syncRasterResolution() { return false },
     pathTracingReady: true, presentationDirty: false, tiltShiftDirty: false, fullEpoch: 0, pathTracingRevision: 0,
     hemisphere: new THREE.HemisphereLight(), sunlight: new THREE.DirectionalLight(), sunlightTarget: new THREE.Object3D(),
     callbacks: {}, resetFps() {}, recordFrame() {},
@@ -113,6 +118,283 @@ function photoProbe() {
   })
   return { probe, calls, pathTracer }
 }
+
+function resolutionProbe(dpr = 2) {
+  const { probe, pathTracer } = photoProbe()
+  const originalDpr = Object.getOwnPropertyDescriptor(globalThis, 'devicePixelRatio')
+  Object.defineProperty(globalThis, 'devicePixelRatio', { configurable: true, writable: true, value: dpr })
+  const frames = new Map<number, FrameRequestCallback>(), timers = new Map<number, () => void>()
+  let next = 0, ratio = Math.min(dpr, 2)
+  const request = globalThis.requestAnimationFrame, cancel = globalThis.cancelAnimationFrame
+  globalThis.requestAnimationFrame = callback => { frames.set(++next, callback); return next }
+  globalThis.cancelAnimationFrame = id => { frames.delete(id) }
+  const timeout = spyOn(globalThis, 'setTimeout').mockImplementation(((callback: () => void, delay: number) => {
+    expect(delay).toBe(150)
+    timers.set(++next, callback)
+    return next
+  }) as typeof setTimeout)
+  const clear = spyOn(globalThis, 'clearTimeout').mockImplementation(id => { timers.delete(Number(id)) })
+  const size = new THREE.Vector2(161, 81), canvas = probe.renderer.domElement
+  const updateCanvas = () => { canvas.width = Math.floor(size.x * ratio); canvas.height = Math.floor(size.y * ratio) }
+  updateCanvas()
+  Object.assign(probe, {
+    renderMode: false, settings: { ...DEFAULT_SETTINGS, pathTracing: false, tiltShift: false },
+    rasterInteractions: new Set(), normalPixelRatio: ratio, host: { clientWidth: size.x, clientHeight: size.y },
+    controls: { target: new THREE.Vector3() }, cameraChanged: mock(), invalidateSceneContent: mock(),
+    syncRasterResolution: Reflect.get(Viewport.prototype, 'syncRasterResolution'), getView: Viewport.prototype.getView,
+  })
+  Object.assign(probe.renderer, {
+    getPixelRatio: () => ratio,
+    setPixelRatio: mock((value: number) => { ratio = value; updateCanvas() }),
+    getSize: (target: THREE.Vector2) => target.copy(size),
+    setSize: mock((width: number, height: number) => { size.set(width, height); updateCanvas() }),
+    getDrawingBufferSize: (target: THREE.Vector2) => target.set(canvas.width, canvas.height),
+  })
+  probe.raster.setSize = mock()
+  probe.raster.render = mock()
+  probe.sceneContent.onViewportChange = mock()
+  return {
+    probe, pathTracer, frames, timers,
+    frame() { const entry = frames.entries().next().value; if (entry) { frames.delete(entry[0]); entry[1](0) } },
+    settle() { for (const [id, callback] of [...timers]) { timers.delete(id); callback() } },
+    restore() {
+      globalThis.requestAnimationFrame = request; globalThis.cancelAnimationFrame = cancel
+      timeout.mockRestore(); clear.mockRestore()
+      if (originalDpr) Object.defineProperty(globalThis, 'devicePixelRatio', originalDpr)
+      else Reflect.deleteProperty(globalThis, 'devicePixelRatio')
+    },
+  }
+}
+
+test('raster gestures coalesce, overlap, settle once, and never notify camera or scene dependencies', () => {
+  for (const dpr of [0.75, 1, 1.5, 2, 3]) {
+    const h = resolutionProbe(dpr), { probe } = h, renderer = probe.renderer
+    const camera = probe.camera.toJSON()
+    try {
+      probe.setRasterInteraction('controls', true)
+      probe.setRasterInteraction('controls', true)
+      probe.setRasterInteraction('focus', true)
+      expect(renderer.getPixelRatio()).toBe(Math.min(dpr, 1))
+      expect(renderer.setPixelRatio).toHaveBeenCalledTimes(dpr > 1 ? 1 : 0)
+      expect(h.frames.size).toBe(1)
+      h.frame()
+      probe.setRasterInteraction('controls', false)
+      expect(h.timers.size).toBe(0)
+      probe.setRasterInteraction('focus', false)
+      expect(h.timers.size).toBe(1)
+      expect(renderer.getPixelRatio()).toBe(Math.min(dpr, 1))
+      probe.setRasterInteraction('scene', true)
+      expect(h.timers.size).toBe(0)
+      probe.setRasterInteraction('scene', false)
+      h.settle(); h.frame()
+      expect(renderer.getPixelRatio()).toBe(Math.min(dpr, 2))
+      expect(renderer.setPixelRatio).toHaveBeenCalledTimes(dpr > 1 ? 2 : 0)
+      expect(probe.raster.render).toHaveBeenCalledTimes(2)
+      expect(probe.camera.toJSON()).toEqual(camera)
+      expect(probe.cameraChanged).not.toHaveBeenCalled()
+      expect(probe.sceneContent.onViewportChange).not.toHaveBeenCalled()
+      expect(probe.invalidateSceneContent).not.toHaveBeenCalled()
+      expect(renderer.shadowMap.needsUpdate).toBe(false)
+    } finally { h.restore() }
+  }
+})
+
+test('wheel bursts retain a reduced frame; abandonment restores the current display DPR without later timer work', () => {
+  const h = resolutionProbe(), { probe } = h
+  try {
+    for (let i = 0; i < 3; i++) {
+      probe.setRasterInteraction('controls', true)
+      probe.setRasterInteraction('controls', false)
+    }
+    expect(h.timers.size).toBe(1)
+    expect(probe.renderer.getPixelRatio()).toBe(1)
+    h.frame()
+    expect(probe.raster.render).toHaveBeenCalledTimes(1)
+    globalThis.devicePixelRatio = 1.5
+    probe.clearRasterInteractions()
+    expect(probe.renderer.getPixelRatio()).toBe(1.5)
+    expect(h.timers.size).toBe(0)
+    h.frame()
+    expect(probe.raster.render).toHaveBeenCalledTimes(2)
+    probe.setRasterInteraction('model', true)
+    probe.contextLost = true
+    probe.clearRasterInteractions()
+    probe.setRasterInteraction('model', true)
+    expect(probe.rasterInteractions.size).toBe(0)
+    expect(probe.renderer.getPixelRatio()).toBe(1)
+    probe.contextLost = false
+    probe.render()
+    expect(probe.renderer.getPixelRatio()).toBe(1.5)
+  } finally { h.restore() }
+})
+
+test('PBR preparation, paused scene interaction and converged sampling retain normal DPR without an accumulation reset', () => {
+  const h = resolutionProbe(), { probe, pathTracer } = h
+  try {
+    probe.setRasterInteraction('controls', true)
+    expect(probe.renderer.getPixelRatio()).toBe(1)
+    probe.renderMode = probe.settings.pathTracing = true
+    probe.pathTracingReady = false
+    probe.render()
+    expect(probe.renderer.getPixelRatio()).toBe(2)
+    probe.pathTracingReady = true
+    probe.sceneInteraction = true
+    probe.render()
+    expect(probe.renderer.getPixelRatio()).toBe(2)
+    probe.sceneInteraction = false
+    probe.startPathTracingSamples(false)
+    expect(pathTracer.reset).not.toHaveBeenCalled()
+    expect(pathTracer.samples).toBe(128)
+    probe.pathTracingFailed = true
+    probe.render()
+    expect(probe.renderer.getPixelRatio()).toBe(1)
+    probe.pathTracingFailed = false
+    probe.sceneContent.stage = 'world'
+    probe.render()
+    expect(probe.renderer.getPixelRatio()).toBe(1)
+    probe.sceneContent.prepareFullDetail = mock()
+    probe.render()
+    expect(probe.renderer.getPixelRatio()).toBe(2)
+    expect(probe.sceneContent.prepareFullDetail).not.toHaveBeenCalled()
+  } finally { h.restore() }
+})
+
+test('ordinary resize honors gesture DPR but checks scene budgets at normal pixel dimensions', () => {
+  const h = resolutionProbe(), { probe } = h
+  try {
+    probe.fullContent = {}
+    probe.fullViewportPixels = 322 * 162
+    probe.setRasterInteraction('model', true)
+    probe.resize()
+    expect(probe.renderer.getPixelRatio()).toBe(1)
+    expect(probe.raster.setSize).toHaveBeenLastCalledWith(161, 81)
+    expect(probe.invalidateSceneContent).not.toHaveBeenCalled()
+    probe.host.clientWidth = 200
+    probe.resize()
+    expect(probe.raster.setSize).toHaveBeenLastCalledWith(200, 81)
+    expect(probe.invalidateSceneContent).toHaveBeenCalledTimes(1)
+    expect(probe.camera.aspect).toBe(200 / 81)
+    probe.setRasterInteraction('model', false)
+    h.settle()
+    expect(probe.raster.setSize).toHaveBeenLastCalledWith(400, 162)
+  } finally { h.restore() }
+})
+
+test('a display DPR change repaints converged PBR through the genuine resize path', () => {
+  const h = resolutionProbe(), { probe, pathTracer } = h
+  try {
+    probe.renderMode = probe.settings.pathTracing = true
+    probe.cameraChanged = Reflect.get(Viewport.prototype, 'cameraChanged')
+    pathTracer.setCamera = mock()
+    pathTracer.reset.mockImplementation(() => { pathTracer.samples = 0 })
+    globalThis.devicePixelRatio = 1.5
+    probe.render()
+    expect(probe.renderer.getPixelRatio()).toBe(1.5)
+    expect(pathTracer.reset).toHaveBeenCalledTimes(1)
+    expect(pathTracer.setCamera).toHaveBeenCalledTimes(1)
+    expect(h.frames.size).toBe(1)
+    h.frame()
+    expect(pathTracer.renderSample).toHaveBeenCalledTimes(1)
+    expect(pathTracer.samples).toBe(1)
+  } finally { h.restore() }
+})
+
+test('capture schedules a full-resolution presentation before asynchronous mesh readiness', async () => {
+  const h = resolutionProbe(), { probe } = h
+  let ready!: () => void
+  probe.sceneContent.whenReady = () => new Promise<void>(resolve => { ready = resolve })
+  try {
+    probe.setRasterInteraction('model', true)
+    h.frame()
+    expect(probe.raster.render).toHaveBeenCalledTimes(1)
+    const capture = probe.capture()
+    expect(probe.renderer.getPixelRatio()).toBe(2)
+    expect(h.frames.size).toBe(1)
+    h.frame()
+    expect(probe.raster.render).toHaveBeenCalledTimes(2)
+    expect(probe.captures).toBe(1)
+    ready()
+    await capture
+    expect(probe.captures).toBe(0)
+    expect(probe.renderer.getPixelRatio()).toBe(1)
+  } finally { h.restore() }
+})
+
+test('native DPR budget invalidation can dispose a world tracer before sampling starts', () => {
+  const h = resolutionProbe(), { probe, pathTracer } = h
+  try {
+    probe.renderMode = probe.settings.pathTracing = true
+    probe.sceneContent.stage = 'world'
+    probe.sceneContent.prepareFullDetail = mock()
+    probe.fullContent = { dispose: mock() }
+    probe.fullViewportPixels = 322 * 162
+    pathTracer.dispose = mock()
+    probe.invalidateSceneContent = Viewport.prototype.invalidateSceneContent
+    probe.requestPathTraceRebuild = mock(() => { probe.pathTracingReady = false })
+    globalThis.devicePixelRatio = 1.5
+    expect(() => probe.startPathTracingSamples()).not.toThrow()
+    expect(pathTracer.dispose).toHaveBeenCalledTimes(1)
+    expect(pathTracer.reset).not.toHaveBeenCalled()
+    expect(probe.requestPathTraceRebuild).toHaveBeenCalledTimes(1)
+    expect(probe.pathTracer).toBeUndefined()
+  } finally { h.restore() }
+})
+
+test('overlapping captures hold full DPR through encoding and release it even on failure', async () => {
+  const h = resolutionProbe(), { probe } = h
+  const encodes: ((blob: Blob | null) => void)[] = []
+  probe.renderer.domElement.toBlob = (callback: (blob: Blob | null) => void) => encodes.push(callback)
+  try {
+    probe.setRasterInteraction('controls', true)
+    probe.setRasterInteraction('controls', false)
+    const first = probe.capture(), second = probe.capture().catch((error: Error) => error)
+    expect(probe.captures).toBe(2)
+    expect(probe.renderer.getPixelRatio()).toBe(2)
+    h.settle()
+    probe.setRasterInteraction('model', true)
+    await Promise.resolve()
+    expect(encodes).toHaveLength(2)
+    encodes[0](new Blob(['png']))
+    const result = await first
+    expect(result.view.viewport).toEqual({ width: 322, height: 162 })
+    expect(probe.captures).toBe(1)
+    expect(probe.renderer.getPixelRatio()).toBe(2)
+    encodes[1](null)
+    expect((await second).message).toContain('Could not capture')
+    expect(probe.captures).toBe(0)
+    expect(probe.renderer.getPixelRatio()).toBe(1)
+    probe.setRasterInteraction('model', false)
+    h.settle(); h.frame()
+    expect(probe.renderer.getPixelRatio()).toBe(2)
+  } finally { h.restore() }
+})
+
+test('exact capture preflights at full DPR and rejects genuine camera changes without leaking its override', async () => {
+  const h = resolutionProbe(), { probe } = h
+  let finish!: (value: object) => void
+  probe.sceneContent.stage = 'world'
+  probe.sceneContent.prepareFullDetail = () => {
+    expect(probe.renderer.getPixelRatio()).toBe(2)
+    expect(probe.fullViewportPixels).toBe(322 * 162)
+    return new Promise(resolve => { finish = resolve })
+  }
+  const detail = { root: new THREE.Group(), scope: 'full-scene', triangles: 2, peakBytes: 1024, dispose() {} }
+  try {
+    probe.setRasterInteraction('scene', true)
+    const capture = probe.capture(true).catch((error: Error) => error)
+    probe.camera.position.x++
+    finish(detail)
+    expect((await capture).message).toContain('Scene or camera changed')
+    expect(probe.captures).toBe(0)
+    expect(probe.renderer.getPixelRatio()).toBe(1)
+    probe.setRasterInteraction('scene', false)
+    const next = probe.capture(true)
+    h.settle()
+    const result = await next
+    expect(result.view.viewport).toEqual({ width: 322, height: 162 })
+    expect(probe.renderer.getPixelRatio()).toBe(2)
+  } finally { h.restore() }
+})
 
 test('Edit, disabled miniature and zero strength do not allocate the effect; Render allocates it once', () => {
   const { probe } = photoProbe()

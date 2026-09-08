@@ -120,6 +120,11 @@ data uses tabular figures.
   viewport and raster fallback, using half-resolution effect buffers to preserve
   interaction speed. Progressive PBR relies on physically traced occlusion
   instead; its FPS readout counts completed full samples rather than tile passes.
+- During raster camera gestures, animated focus, and model/scene editing drags,
+  temporarily cap viewport DPR at 1 and restore the normal DPR cap of 2 after a
+  150 ms settling delay. Only the canvas becomes softer; interface controls remain
+  sharp. PNG captures and Progressive PBR retain normal resolution. Hover-only
+  previews and sidebar controls do not activate this interaction policy.
 - Realtime shadow maps omit opaque silhouettes from transmissive and
   alpha-transparent voxels. Progressive PBR traces their transmitted light;
   opaque materials continue to cast direct ground shadows in both modes.

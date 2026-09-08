@@ -109,7 +109,7 @@ test('either staggered face previews and keyboard push-pulls the whole selection
   const onPushPullCommit = mock(() => {}), updateGhostPreview = mock((_preview: unknown, _cells: unknown) => {})
   const probe = Object.assign(Object.create(VoxelRenderer.prototype), {
     document, modelSuspended: false, tool: 'sculpt', sculptMode: 'push', selectionMode: 'body', selection: new Map(), root: new Group(),
-    viewport: { renderMode: false, camera: new OrthographicCamera(), render() {}, moveFocus() {},
+    viewport: { renderMode: false, camera: new OrthographicCamera(), render() {}, moveFocus() {}, setRasterInteraction() {},
       renderer: { domElement: { getBoundingClientRect: () => ({ width: 320, height: 240 }) } } },
     callbacks: { onSelectionChange() {}, onPushPullPreview() {}, onPushPullCommit }, updateGhostPreview,
   })
@@ -146,7 +146,7 @@ test('scope refresh cancels layer, lock and visibility changes, versions stale w
     queued: new Set(), queuedGrids: new Set(), versions: new Map(), chunkMeshes: new Map(), chunkQuads: new Map(), meshWaiters: [],
     model: new Group(), hover: { visible: true }, marqueePreview: { visible: false }, settings: {},
     worker: { postMessage }, callbacks: { onMeshStats() {}, onPushPullPreview() {} }, createSurface: mock(() => new Group()),
-    viewport: { renderMode: false, renderer: { shadowMap: {} }, requestPathTraceRebuild() {}, contentBecameReady() {}, render() {} },
+    viewport: { renderMode: false, renderer: { shadowMap: {} }, requestPathTraceRebuild() {}, contentBecameReady() {}, render() {}, setRasterInteraction() {} },
   })
   probe.refreshLayerScope()
   const [request, transfers] = postMessage.mock.calls[0]

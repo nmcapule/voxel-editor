@@ -278,7 +278,17 @@ export class SceneRenderer {
     viewport.canvas.addEventListener('pointermove', event => this.pointerMove(event), options)
     viewport.canvas.addEventListener('pointerup', event => this.pointerUp(event), options)
     viewport.canvas.addEventListener('pointercancel', () => { this.touches.clear(); this.blockedTouches = false; this.cancelInteraction() }, options)
-    viewport.canvas.addEventListener('lostpointercapture', () => { if (this.pointer) this.cancelInteraction() }, options)
+    const cancelAbandonedDrag = () => {
+      if (!this.active || !this.pointer && !this.drag) return
+      this.touches.clear(); this.blockedTouches = false; this.cancelInteraction()
+    }
+    viewport.canvas.addEventListener('lostpointercapture', event => {
+      if (this.pointer?.id === event.pointerId || !this.pointer && this.drag) cancelAbandonedDrag()
+    }, options)
+    viewport.canvas.addEventListener('webglcontextlost', cancelAbandonedDrag, options)
+    const ownerDocument = viewport.canvas.ownerDocument
+    ownerDocument.defaultView?.addEventListener('blur', cancelAbandonedDrag, { signal: this.listeners.signal })
+    ownerDocument.addEventListener('visibilitychange', () => { if (ownerDocument.hidden) cancelAbandonedDrag() }, options)
     viewport.canvas.addEventListener('pointerleave', () => { if (!this.pointer) { this.ghost.visible = false; this.host.render() } }, options)
     viewport.canvas.addEventListener('keydown', event => {
       if (!this.active || event.key !== 'Escape') return
@@ -889,10 +899,15 @@ export class SceneRenderer {
     this.gizmo.attach(this.proxy)
   }
 
+  private syncRasterInteraction() {
+    this.host.setRasterInteraction('scene', !!this.drag || !!this.pointer && (this.pointer.gizmo || this.tool === 'select' || this.tool === 'transform'))
+  }
+
   private startTransform() {
     const originals = new Map<string, SceneTransform>()
     for (const id of this.selection) { const entry = this.entries.get(id); if (entry) originals.set(id, structuredClone({ position: entry.instance.position, rotation: entry.instance.rotation, scale: entry.instance.scale })) }
     this.drag = { originals, center: this.proxy.position.clone(), changed: false }
+    this.syncRasterInteraction()
     this.host.setSceneInteraction(true)
     this.host.getSceneViewport().controls.enabled = false
   }
@@ -924,7 +939,7 @@ export class SceneRenderer {
     this.drag = undefined
     this.host.setSceneInteraction(false)
     this.host.getSceneViewport().controls.enabled = true
-    if (!drag) return
+    if (!drag) { this.syncRasterInteraction(); return }
     const transforms = [...this.previews].filter(([id, t]) => {
       const old = drag.originals.get(id)!
       const before = sceneInstanceMatrix(old, { x: 0, y: 0, z: 0 }).elements
@@ -933,7 +948,7 @@ export class SceneRenderer {
     this.previews.clear()
     try { if (drag.changed && transforms.length) this.callbacks.onTransform(transforms) }
     catch (error) { this.callbacks.onError(error instanceof Error ? error.message : 'Transform rejected') }
-    finally { this.refresh() }
+    finally { this.syncRasterInteraction(); this.refresh() }
   }
 
   private cancelInteraction() {
@@ -946,6 +961,7 @@ export class SceneRenderer {
     this.gizmo.axis = null
     const pointer = this.pointer
     this.pointer = undefined
+    this.syncRasterInteraction()
     const { canvas, controls } = this.host.getSceneViewport()
     if (pointer && canvas.hasPointerCapture(pointer.id)) canvas.releasePointerCapture(pointer.id)
     controls.enabled = true
@@ -988,6 +1004,7 @@ export class SceneRenderer {
     this.host.focusViewport()
     if (this.gizmo.object) { this.gizmo.getHelper().updateMatrixWorld(true); this.gizmo.pointerHover(this.coordinates(event)); this.gizmo.pointerDown(this.coordinates(event)) }
     this.pointer = { id: event.pointerId, x: event.clientX, y: event.clientY, additive: event.shiftKey, moved: false, gizmo: !!this.drag }
+    this.syncRasterInteraction()
     if (this.drag) { event.preventDefault(); event.stopImmediatePropagation() }
     this.host.getSceneViewport().canvas.setPointerCapture(event.pointerId)
   }
@@ -1010,12 +1027,17 @@ export class SceneRenderer {
     if (!pointer || pointer.id !== event.pointerId) return
     this.pointer = undefined
     this.marquee.visible = false
-    if (pointer.gizmo) { event.stopImmediatePropagation(); this.gizmo.pointerUp(this.coordinates(event)); this.updateGizmo() }
-    else if (pointer.moved && (this.tool === 'select' || this.tool === 'transform')) this.selectMarquee(pointer, event)
-    else if (!pointer.moved) void this.click(event, pointer.additive)
-    const canvas = this.host.getSceneViewport().canvas
-    if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId)
-    this.host.render()
+    try {
+      if (pointer.gizmo) { event.stopImmediatePropagation(); this.gizmo.pointerUp(this.coordinates(event)); this.updateGizmo() }
+      else if (pointer.moved && (this.tool === 'select' || this.tool === 'transform')) this.selectMarquee(pointer, event)
+      else if (!pointer.moved) void this.click(event, pointer.additive)
+    } finally {
+      if (pointer.gizmo && (this.drag || this.gizmo.dragging)) this.cancelInteraction()
+      this.syncRasterInteraction()
+      const canvas = this.host.getSceneViewport().canvas
+      if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId)
+      this.host.render()
+    }
   }
 
   private drawMarquee(event: PointerEvent) {

@@ -29,7 +29,7 @@ function rendererProbe(document: SceneDocument) {
     diagnostics: { meshJobs: 0, chunkReads: 0, uploads: 0, staleResults: 0, matrixUpdates: 0 },
     host: { getSceneViewport: () => viewport, getSceneShadowVolume: (receivers: THREE.Box3[], bounds: THREE.Box3) => sceneShadowVolume(viewport.camera, bounds, receivers, viewport.shadowMatrix, viewport.groundY),
       applyEnvironment(material: THREE.MeshStandardMaterial) { Viewport.prototype.applyEnvironment.call({ environment: viewport.environment, scene: viewport.scene, settings: document.data.settings } as Viewport, material) },
-      setSceneContent() {}, setSettings() {}, invalidateSceneContent() {}, setSceneInteraction() {} },
+      setSceneContent() {}, setSettings() {}, invalidateSceneContent() {}, setSceneInteraction() {}, setRasterInteraction() {} },
     callbacks: { onError(message: string) { throw new Error(message) }, onStats() {} }, updateGizmo() {}, schedule() {},
   })
 }
@@ -190,27 +190,109 @@ test('inactive model input and scene-only viewport tracing never access a model 
 
 test('transform preview stays outside the document, mouseup commits once, Escape restores orbit without a command', () => {
   const original: SceneTransform = { position: { x: 0, y: 10, z: 0 }, rotation: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: 1, y: 2, z: 3 } }
-  let commits = 0, committed: SceneTransform | undefined
+  let commits = 0, committed: SceneTransform | undefined, interacting = false, fail = false
   const controls = { enabled: true }, proxy = new THREE.Object3D()
+  const captures = new Set<number>()
+  const canvas = { setPointerCapture(id: number) { captures.add(id) }, hasPointerCapture: (id: number) => captures.has(id), releasePointerCapture(id: number) { captures.delete(id) },
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) }
   proxy.position.copy(original.position); proxy.scale.copy(original.scale)
   const probe = Object.assign(Object.create(SceneRenderer.prototype), {
     active: true, pickGeneration: 0, selection: new Set(['one']), entries: new Map([['one', { instance: original }]]),
-    proxy, previews: new Map(), mode: 'translate', gizmo: { dragging: true, axis: 'X' }, marquee: { visible: false },
-    host: { getSceneViewport: () => ({ controls, canvas: {} }), setSceneInteraction() {} },
-    callbacks: { onTransform(transforms: SceneTransform[]) { commits++; committed = transforms[0] }, onError(message: string) { throw new Error(message) } },
+    proxy, previews: new Map(), mode: 'translate', tool: 'transform', touches: new Set(),
+    gizmo: { dragging: true, axis: 'X', pointerUp() { probe.finishTransform(); this.dragging = false } }, marquee: { visible: false },
+    host: { getSceneViewport: () => ({ controls, canvas }), setSceneInteraction() {}, focusViewport() {}, render() {},
+      setRasterInteraction(source: string, active: boolean) { expect(source).toBe('scene'); interacting = active } },
+    callbacks: { onTransform(transforms: SceneTransform[]) { commits++; committed = transforms[0]; if (fail) throw new Error('commit failed') }, onError(message: string) { throw new Error(message) } },
     updateGizmo() { proxy.position.copy(original.position); proxy.scale.copy(original.scale) }, schedule() {}, refresh() {},
   })
   probe.startTransform()
+  expect(interacting).toBe(true)
   expect(controls.enabled).toBe(false)
   proxy.position.x = 2; probe.previewTransform()
   proxy.position.x = 5; probe.previewTransform()
   expect(original.position.x).toBe(0)
   expect(commits).toBe(0)
   probe.finishTransform()
+  expect(interacting).toBe(false)
   expect(commits).toBe(1); expect(committed?.position.x).toBe(5); expect(controls.enabled).toBe(true)
   probe.startTransform(); proxy.position.x = 8; probe.previewTransform(); probe.cancelInteraction()
+  expect(interacting).toBe(false)
   expect(commits).toBe(1); expect(probe.previews.size).toBe(0); expect(controls.enabled).toBe(true)
   expect(proxy.position.x).toBe(0); expect(probe.gizmo.dragging).toBe(false)
+  const event = { pointerId: 0, button: 0, clientX: 50, clientY: 50, preventDefault() {}, stopImmediatePropagation() {} }
+  probe.startTransform(); probe.pointerDown(event)
+  proxy.position.x = 3; probe.previewTransform(); probe.finishTransform()
+  expect(interacting).toBe(true) // The pointer still owns the same named source.
+  probe.pointerUp(event)
+  expect(interacting).toBe(false); expect(captures.size).toBe(0); expect(commits).toBe(2)
+  fail = true
+  probe.startTransform(); probe.gizmo.dragging = true; probe.pointerDown(event)
+  proxy.position.x = 4; probe.previewTransform()
+  expect(() => probe.pointerUp(event)).toThrow('commit failed')
+  expect(interacting).toBe(false); expect(captures.size).toBe(0)
+  expect(probe.drag).toBeUndefined(); expect(probe.pointer).toBeUndefined()
+  expect(probe.gizmo.dragging).toBe(false); expect(controls.enabled).toBe(true)
+  probe.tool = 'select'
+  probe.pointerDown(event)
+  expect(interacting).toBe(true)
+  probe.pointer.moved = true
+  probe.selectMarquee = () => { throw new Error('selection failed') }
+  expect(() => probe.pointerUp(event)).toThrow('selection failed')
+  expect(interacting).toBe(false); expect(captures.size).toBe(0)
+  expect(probe.pointer).toBeUndefined(); expect(probe.marquee.visible).toBe(false)
+})
+
+test('scene marquee and transform cancellation releases DPR on abandonment, tool/render switches and deactivation', () => {
+  const ownerDocument = Object.assign(new EventTarget(), { defaultView: new EventTarget(), hidden: false })
+  const captures = new Set<number>(), raster: boolean[] = []
+  const canvas = Object.assign(new EventTarget(), { ownerDocument, style: {},
+    setPointerCapture(id: number) { captures.add(id) }, hasPointerCapture: (id: number) => captures.has(id), releasePointerCapture(id: number) { captures.delete(id) },
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) })
+  const viewport = { canvas, camera: new THREE.PerspectiveCamera(), controls: { enabled: true, touches: {} }, renderMode: false }
+  const host = { content: undefined as any, getSceneViewport: () => viewport, getView: () => ({}),
+    setSceneContent(content: any) { this.content = content; content?.onViewportChange() },
+    setRenderMode(active: boolean) { viewport.renderMode = active; this.content?.onViewportChange() },
+    setRasterInteraction(source: string, active: boolean) { expect(source).toBe('scene'); raster.push(active) },
+    setSceneInteraction() {}, setSettings() {}, setView() {}, frameSceneBounds() {}, focusViewport() {}, render() {},
+  }
+  const renderer = new SceneRenderer(host as unknown as Viewport, new SceneDocument(createScene(defaultSettings)), {
+    onSelect() {}, onPlace() {}, onTransform() {}, onLayer() {}, onStats() {}, onError(message) { throw new Error(message) },
+  })
+  const schedule = spyOn(renderer as any, 'schedule').mockImplementation(() => {})
+  const probe = renderer as any
+  const emit = (type: string, pointerId = 0) => canvas.dispatchEvent(Object.assign(new Event(type), { pointerId, pointerType: 'touch', button: 0, clientX: 50, clientY: 50 }))
+  try {
+    renderer.setActive(true)
+    raster.length = 0
+    emit('pointermove'); ownerDocument.defaultView.dispatchEvent(new Event('blur'))
+    renderer.setSnap(false); renderer.setPlacementAsset()
+    expect(raster).toEqual([])
+    for (const transform of [false, true]) for (const event of ['pointercancel', 'lostpointercapture', 'blur', 'hidden', 'contextlost', 'tool', 'render', 'deactivate']) {
+      renderer.setActive(true); host.setRenderMode(false); renderer.setTool('select')
+      if (transform) probe.gizmo.dispatchEvent({ type: 'mouseDown' })
+      emit('pointerdown')
+      expect(raster.at(-1)).toBe(true)
+      emit('lostpointercapture', 99)
+      ownerDocument.hidden = false; ownerDocument.dispatchEvent(new Event('visibilitychange'))
+      expect(raster.at(-1)).toBe(true)
+      if (event === 'blur') ownerDocument.defaultView.dispatchEvent(new Event('blur'))
+      else if (event === 'hidden') { ownerDocument.hidden = true; ownerDocument.dispatchEvent(new Event('visibilitychange')) }
+      else if (event === 'contextlost') emit('webglcontextlost')
+      else if (event === 'tool') renderer.setTool('place')
+      else if (event === 'render') host.setRenderMode(true)
+      else if (event === 'deactivate') renderer.setActive(false)
+      else emit(event)
+      expect(raster.at(-1)).toBe(false)
+      expect(probe.pointer).toBeUndefined(); expect(probe.drag).toBeUndefined()
+      expect(captures.size).toBe(0); expect(viewport.controls.enabled).toBe(true)
+      const calls = raster.length
+      ownerDocument.defaultView.dispatchEvent(new Event('blur'))
+      expect(raster).toHaveLength(calls)
+    }
+    renderer.setActive(true); host.setRenderMode(false)
+    emit('pointerdown'); emit('pointerdown', 1)
+    expect(raster.at(-1)).toBe(false)
+  } finally { renderer.dispose(); schedule.mockRestore() }
 })
 
 test('scene capture waits for scene dependencies and hides overlays only for raster pixels', async () => {
@@ -218,6 +300,7 @@ test('scene capture waits for scene dependencies and hides overlays only for ras
   let ready = false, pixels = ''
   const probe = Object.assign(Object.create(Viewport.prototype), {
     sceneContent: { root, async whenReady() { ready = true } },
+    captures: 0, syncRasterResolution() { return false },
     whenMeshIdle() { throw new Error('Must not wait for the hidden model') },
     renderRaster() { expect(ready).toBe(true); expect(overlay.visible).toBe(false); pixels = 'scene' },
     render() {}, getView() { return {} },
@@ -293,14 +376,15 @@ test('scene skies rebind cached, refreshed and streamed materials and restore co
     bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 65, y: 1, z: 1 } } }
   const doc = new SceneDocument(createScene(defaultSettings))
   doc.execute({ type: 'asset.add', asset }); doc.execute({ type: 'instance.place', assetId: asset.id, position: { x: 0, y: 0, z: 0 } }); doc.execute({ type: 'selection.set', ids: [] })
-  const canvas = Object.assign(new EventTarget(), { clientHeight: 800, width: 800, height: 600, style: {} })
+  const canvas = Object.assign(new EventTarget(), { clientHeight: 800, width: 800, height: 600, style: {},
+    ownerDocument: Object.assign(new EventTarget(), { defaultView: new EventTarget(), hidden: false }) })
   const camera = new THREE.OrthographicCamera(-1000, 1000, 1000, -1000, 0.1, 10000)
   camera.position.set(0, 400, 1000); camera.lookAt(0, 0, 0); camera.updateMatrixWorld()
   const environments = [new THREE.Texture()]
   const host = Object.assign(Object.create(Viewport.prototype), {
     camera, scene: new THREE.Scene(), settings: doc.data.settings, renderMode: false,
     renderer: { domElement: canvas, shadowMap: {} }, controls: { enabled: true, touches: {} }, environmentTarget: { texture: environments[0] },
-    render() {}, getView() { return {} }, frameSceneBounds() {}, getSceneShadowVolume() {}, invalidateSceneContent() {}, setSceneInteraction() {},
+    render() {}, getView() { return {} }, frameSceneBounds() {}, getSceneShadowVolume() {}, invalidateSceneContent() {}, setSceneInteraction() {}, setRasterInteraction() {},
     setSceneContent(content: unknown) { Reflect.set(this, 'sceneContent', content); Reflect.get(this, 'sceneContent')?.onViewportChange() },
     setSettings(settings: unknown) { Reflect.set(this, 'settings', settings); Reflect.get(this, 'sceneContent')?.onViewportChange() },
     setRenderMode(enabled: boolean) { this.renderMode = enabled; Reflect.get(this, 'sceneContent')?.onViewportChange() },
@@ -454,6 +538,7 @@ test('fitting scenes reach the tracer as complete ordinary geometry; oversized p
     renderer: { domElement: { width: 320, height: 240 }, getContext: () => ({ isContextLost: () => false }) },
     fullEpoch: 0, pathTracingRevision: 0, pathTracingBuildRequested: true, pathTracingBuildRunning: false, pathTracingFailed: false, pathTracingReady: false,
     renderMode: true, settings: { pathTracing: true }, inFlight: 0, queued: new Set(),
+    syncRasterResolution() { return false },
     callbacks: { onPathTracingStatus: (status: string) => statuses.push(status), onError: (message: string) => errors.push(message) },
     render() { rasters++ }, resetFps() {}, stopPathTracingSamples() {}, startPathTracingSamples() { samples++ },
     requestPathTraceRebuild() { this.pathTracingRevision++; this.pathTracingBuildRequested = true; this.pathTracingReady = false },
@@ -508,6 +593,7 @@ test('exact capture uses full geometry and raster environment, restores live con
   let captures = 0
   const probe = Object.assign(Object.create(Viewport.prototype), {
     fullEpoch: 0, scene, environmentTarget: { texture: environment }, renderMode: true, settings: { pathTracing: true },
+    captures: 0, syncRasterResolution() { return false },
     sceneContent: { root, prepareFullDetail: async () => detail },
     renderer: { shadowMap: {}, getContext: () => ({ isContextLost: () => false }), domElement: { width: 100, height: 100, toBlob(callback: (blob: Blob) => void) { captures++; callback(new Blob(['exact'])) } } },
     render() {}, getView: () => ({ name: 'stable' }),

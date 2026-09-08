@@ -62,6 +62,7 @@ test('captures flush current camera/material pixels without waiting for RAF', as
     sceneContent: { root: new Group(), stage: 'bounded', whenReady: async () => {} },
     pathTracingReady: true, pathTracingBuildRunning: false, pathTracingFailed: false,
     queued: new Set(), queuedGrids: new Set(), inFlight: 0, presentationDirty: false,
+    captures: 0, syncRasterResolution() { return false },
     pathTracer: { reset() {}, setCamera() {}, updateMaterials() {} },
     resetFps() {}, renderRaster() { pixels = state; this.presentationDirty = false },
     getView: () => ({ state }),
@@ -296,8 +297,11 @@ test('installed material-local meshes and vertex overlays do not multiply path-t
 })
 
 test('a model borrows one viewport, removes input hooks and jobs on unmount, and restores its own view on remount', () => {
-  const canvas = Object.assign(new EventTarget(), { width: 320, height: 240 })
-  let viewportDisposals = 0, hovers = 0, materialDisposals = 0
+  const ownerDocument = Object.assign(new EventTarget(), { defaultView: new EventTarget(), hidden: false })
+  const captures = new Set<number>()
+  const canvas = Object.assign(new EventTarget(), { width: 320, height: 240, ownerDocument,
+    setPointerCapture(id: number) { captures.add(id) }, hasPointerCapture: (id: number) => captures.has(id), releasePointerCapture(id: number) { captures.delete(id) } })
+  let viewportDisposals = 0, hovers = 0, materialDisposals = 0, interacting = false
   const settings = { ...DEFAULT_SETTINGS, pathTracing: false }
   const view = { projection: 'orthographic' as const, position: { x: 4, y: 8, z: 12 }, target: { x: 0, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, orthographicSpan: 24, viewport: { width: 320, height: 240 } }
   const viewport = Object.assign(Object.create(Viewport.prototype), {
@@ -308,6 +312,7 @@ test('a model borrows one viewport, removes input hooks and jobs on unmount, and
     setSettings(value: unknown) { Reflect.set(this, 'settings', value); Reflect.get(this, 'sceneContent')?.onViewportChange() },
     setRenderMode(value: boolean) { this.renderMode = value; Reflect.get(this, 'sceneContent')?.onViewportChange() },
     render() {}, requestPathTraceRebuild() {}, contentBecameReady() {},
+    setRasterInteraction(source: string, active: boolean) { expect(source).toBe('model'); interacting = active },
     dispose() { viewportDisposals++ },
   })
   const callbacks: RendererCallbacks = {
@@ -326,8 +331,16 @@ test('a model borrows one viewport, removes input hooks and jobs on unmount, and
     expect(viewport.content.stage).toBe('bounded')
     canvas.dispatchEvent(new Event('pointerleave'))
     expect(hovers).toBe(1)
-    viewport.setRenderMode(true)
+    const startDrag = () => Reflect.get(model, 'startMarquee').call(model, { pointerId: 0, clientX: 0, clientY: 0 }, { cell: { x: 0, y: 0, z: 0 } }, false)
+    startDrag(); expect(interacting).toBe(true)
     model.setActive(false)
+    expect(interacting).toBe(false)
+    model.setActive(true)
+    startDrag(); expect(interacting).toBe(true)
+    viewport.setRenderMode(true)
+    expect(interacting).toBe(false)
+    model.setActive(false)
+    expect(interacting).toBe(false)
     expect(viewport.content).toBeUndefined()
     expect(Reflect.get(model, 'listeners').signal.aborted).toBe(true)
     canvas.dispatchEvent(new Event('pointerleave'))
@@ -356,6 +369,94 @@ test('a model borrows one viewport, removes input hooks and jobs on unmount, and
     canvas.dispatchEvent(new Event('pointerleave'))
     expect(hovers).toBe(2)
   } finally { model.dispose(); viewport.environment.dispose() }
+})
+
+function modelGestureProbe(fail = false) {
+  const events = new Map<string, ((event: any) => void)[]>()
+  const listen = (type: string, listener: (event: any) => void) => events.set(type, [...events.get(type) ?? [], listener])
+  const ownerDocument = { defaultView: { addEventListener: listen }, hidden: false, addEventListener: listen }
+  const canvas = { ownerDocument, addEventListener: listen, setPointerCapture() {}, getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) }
+  const document = new VoxelDocument({ x: 16, y: 16, z: 16 }), cell = { x: 2, y: 2, z: 2 }
+  document.setVoxel(2, 2, 2, 1)
+  const target = { cell, normal: { x: 0, y: 1, z: 0 }, occupied: true, color: 1 }
+  const raster: boolean[] = []
+  let commits = 0
+  const commit = () => { commits++; if (fail) throw new Error('commit failed') }
+  const probe = Object.assign(Object.create(VoxelRenderer.prototype), {
+    document, modelSuspended: false, listeners: new AbortController(), touchPointers: new Set(),
+    root: new Group(), hover: new Mesh(), marqueePreview: new Mesh(), selection: new Map(), keyboardCell: cell,
+    tool: 'select', selectionMode: 'point', paintMode: 'paint', sculptMode: 'push', fillShape: 'box', fillDepth: 1, activeColor: 1,
+    viewport: { camera: new PerspectiveCamera(), renderer: { domElement: canvas }, controls: { touches: {} }, render() {}, moveFocus() {},
+      setRasterInteraction(source: string, active: boolean) { expect(source).toBe('model'); raster.push(active) } },
+    callbacks: { onSelectionChange: commit, onPaint: commit, onErase: commit, onFillCommit: commit, onPushPullCommit: commit, onPushPullPreview() {}, onHover() {} },
+    targetAt: () => target, refreshLayerScope() {},
+  })
+  probe.selection.set(probe.selectionKey(cell), cell)
+  probe.bindPointerEvents()
+  const pointer = { pointerId: 0, pointerType: 'mouse', button: 0, clientX: 50, clientY: 50, preventDefault() {} }
+  return { probe, raster, ownerDocument, target, pointer, commits: () => commits,
+    emit(type: string, patch = {}) { for (const listener of events.get(type) ?? []) listener({ ...pointer, ...patch }) },
+    dispose() { probe.cancelPaint(); probe.cancelPushPull(); probe.cancelMarquee(); probe.clearSelectionPreview(); probe.hover.geometry.dispose(); probe.hover.material.dispose(); probe.marqueePreview.geometry.dispose(); probe.marqueePreview.material.dispose() },
+  }
+}
+
+test('model selection, paint, fill, erase and push/move drags release raster DPR even when commits throw', () => {
+  for (const fail of [false, true]) for (const tool of [
+    { tool: 'select' }, { tool: 'paint' }, { tool: 'paint', selectionMode: 'surface' }, { tool: 'paint', paintMode: 'fill' },
+    { tool: 'sculpt', sculptMode: 'erase' }, { tool: 'sculpt' }, { tool: 'sculpt', sculptMode: 'move' },
+  ]) {
+    const gesture = modelGestureProbe(fail), { probe, raster, emit } = gesture
+    Object.assign(probe, tool)
+    try {
+      emit('pointerdown')
+      expect(raster.at(-1)).toBe(true)
+      if (probe.pushPullDrag) probe.pushPullDrag.distance = 1
+      if (fail) expect(() => emit('pointerup')).toThrow('commit failed')
+      else emit('pointerup')
+      expect(gesture.commits()).toBe(1)
+      expect(raster.at(-1)).toBe(false)
+      expect(probe.paintPointer).toBeUndefined()
+      expect(probe.marqueeDrag).toBeUndefined()
+      expect(probe.pushPullDrag).toBeUndefined()
+    } finally { gesture.dispose() }
+  }
+})
+
+test('model raster activity follows overlapping state and cancels abandoned drags without lowering hover or sidebar edits', () => {
+  const gesture = modelGestureProbe(), { probe, raster, emit, ownerDocument, target, pointer } = gesture
+  try {
+    emit('pointermove')
+    probe.setFillDepth(2); probe.setFillShape('sphere'); probe.setActiveColor(2)
+    emit('keydown', { key: ' ' })
+    expect(raster).toEqual([])
+    probe.paintPointer = 0
+    probe.startMarquee(pointer, target, false)
+    probe.startPushPull(pointer, target)
+    probe.cancelPaint(); expect(raster.at(-1)).toBe(true)
+    probe.cancelPushPull(); expect(raster.at(-1)).toBe(true)
+    probe.cancelMarquee(); expect(raster.at(-1)).toBe(false)
+    for (const event of ['pointercancel', 'lostpointercapture', 'blur', 'visibilitychange', 'webglcontextlost']) {
+      emit('pointerdown', { pointerType: 'touch' })
+      expect(raster.at(-1)).toBe(true)
+      emit('lostpointercapture', { pointerId: 99 })
+      ownerDocument.hidden = false; emit('visibilitychange')
+      expect(raster.at(-1)).toBe(true)
+      ownerDocument.hidden = true; emit(event)
+      expect(raster.at(-1)).toBe(false)
+      expect(probe.marqueeDrag).toBeUndefined()
+      expect(probe.touchPointers.size).toBe(0)
+      const calls = raster.length
+      emit(event)
+      if (event !== 'pointercancel') expect(raster).toHaveLength(calls)
+    }
+    emit('pointerdown', { pointerType: 'touch' })
+    emit('pointerdown', { pointerType: 'touch', pointerId: 1 })
+    expect(raster.at(-1)).toBe(false)
+    probe.touchPointers.clear()
+    emit('pointerdown'); probe.setTool('paint')
+    expect(raster.at(-1)).toBe(false)
+    expect(probe.marqueeDrag).toBeUndefined()
+  } finally { gesture.dispose() }
 })
 
 test('model material creation, property refreshes and viewport sync bind the current sky without remeshing', async () => {

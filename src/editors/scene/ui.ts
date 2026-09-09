@@ -24,6 +24,7 @@ export interface SceneUIHost {
   insertModel(snapshot: ProjectSnapshot, source?: { id: string; version: number }): Promise<void>
   openScene(snapshot: SceneManifest, library?: LibraryLink): Promise<void>
   newScene(): void | Promise<void>
+  createFromModel?(): Promise<void>
   leaveScene(): void | Promise<void>
   frame(): void
   renderMode(): void
@@ -74,6 +75,7 @@ export function mountSceneUI(root: HTMLElement, host: SceneUIHost, keyboardRoot:
       <strong>Scene</strong>
       ${button('save', 'Save scene...')}${button('browse-scenes', 'Browse scenes...')}${button('browse-models', 'Insert a model...')}
       ${button('import-scene', 'Import scene (.vscene)')}${button('export-scene', 'Export scene (.vscene)')}
+      ${host.createFromModel ? button('scene-from-model', 'Create scene from standalone model...') : ''}
       ${button('new-scene', 'New scene')}${button('capture', 'Capture PNG')}${button('leave', 'Return to model editor')}
     </aside>
     <div class="scene-status instrument scene-metrics" role="group" aria-label="Scene status">
@@ -736,6 +738,7 @@ export function mountSceneUI(root: HTMLElement, host: SceneUIHost, keyboardRoot:
           host.notify('Scene file exported, including its shared model assets but not texture image files.')
         }, 'Exporting scene...')
       case 'new-scene': if (replacementAllowed()) return run(() => host.newScene(), 'Creating scene...'); return
+      case 'scene-from-model': if (host.createFromModel && replacementAllowed()) return run(() => host.createFromModel!(), 'Creating scene from standalone model...'); return
       case 'leave': return run(() => host.leaveScene(), 'Returning to model editor...')
       case 'capture': {
         const exact = $<HTMLSelectElement>('#scene-capture-quality').value === 'full'

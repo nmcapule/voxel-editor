@@ -14,7 +14,8 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
         <div class="project-pill instrument">
           <details id="project-menu" class="project-menu">
             <summary aria-label="Open project menu" title="Project menu">${icon('menu')}</summary>
-            <div class="menu-sheet" role="menu">
+            <div class="menu-sheet">
+              <div class="project-actions" role="menu" aria-label="Project">
               <strong>Project</strong>
               <button type="button" data-action="save-model" role="menuitem">Save model...</button>
               <button type="button" data-action="browse-models" role="menuitem">Browse models...</button>
@@ -23,6 +24,7 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
               <button type="button" data-action="import" role="menuitem">Import VOX</button>
               <button type="button" data-action="export" role="menuitem">Export VOX</button>
               <button type="button" data-action="capture" role="menuitem">Capture PNG</button>
+              </div>
             </div>
           </details>
           <span class="brand-mark">${icon('logo')}</span>

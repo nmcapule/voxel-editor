@@ -32,3 +32,30 @@ test('editors depend only on their own feature and shared code; shared code is a
   }
   expect(violations).toEqual([])
 })
+
+test('app and core load scene modules only through dynamic imports', async () => {
+  const root = import.meta.dir
+  const violations: string[] = []
+  for await (const path of new Bun.Glob('{app,core}/**/*.{ts,tsx}').scan(root)) {
+    if (path.endsWith('.test.ts') || path.endsWith('.test.tsx')) continue
+    const source = ts.createSourceFile(path, await Bun.file(resolve(root, path)).text(), ts.ScriptTarget.Latest, true)
+    for (const node of source.statements) {
+      if (!(ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) || !node.moduleSpecifier || !ts.isStringLiteral(node.moduleSpecifier)) continue
+      if (ts.isImportDeclaration(node)) {
+        const clause = node.importClause
+        if (clause?.isTypeOnly) continue
+        const bindings = clause?.namedBindings
+        if (!clause?.name && bindings && ts.isNamedImports(bindings) && bindings.elements.length && bindings.elements.every(item => item.isTypeOnly)) continue
+      } else {
+        if (node.isTypeOnly) continue
+        const clause = node.exportClause
+        if (clause && ts.isNamedExports(clause) && clause.elements.length && clause.elements.every(item => item.isTypeOnly)) continue
+      }
+      const dependency = node.moduleSpecifier.text
+      if (!dependency.startsWith('.')) continue
+      const target = relative(root, resolve(root, dirname(path), dependency))
+      if (/^(editors\/scene|\.\.\/plugins\/scene)(\/|$)/.test(target)) violations.push(`${path} -> ${dependency}`)
+    }
+  }
+  expect(violations).toEqual([])
+})

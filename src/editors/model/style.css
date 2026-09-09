@@ -33,6 +33,7 @@
 :where(.model-editor) .menu-sheet strong { padding: 8px 10px 6px; font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
 :where(.model-editor) .menu-sheet button { min-height: 40px; padding: 0 10px; border: 0; border-radius: 9px; background: transparent; text-align: left; font-size: 0.88rem; }
 :where(.model-editor) .menu-sheet button:hover { background: #eef2f2; }
+:where(.model-editor) .project-actions { display: grid; gap: 2px; }
 :where(.model-editor) .save-status { display: flex; align-items: center; gap: 7px; padding: 0 7px 0 4px; color: var(--muted); font-size: 0.73rem; white-space: nowrap; }
 :where(.model-editor) .save-status i { width: 7px; height: 7px; border-radius: 50%; background: #55a56c; }
 :where(.model-editor) .save-status[data-state="saving"] i { background: #d09a40; }

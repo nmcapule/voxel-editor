@@ -68,12 +68,19 @@ data uses tabular figures.
   status sits below it on a slightly translucent surface. Volume keeps its active and recent
   material cubes inside its popup, and the active cube opens the full Palette.
 
-## Scene Workspace
+## Scene Plugin
 
-- The main project menu offers **Scene editor** and **Create scene from this model**.
+- Model editing and rendering remain the main workspace. The project menu keeps
+  a secondary **Plugins** disclosure containing **Scene editor**. Opening it loads
+  the plugin and resumes scene recovery; startup never opens or loads the scene
+  editor automatically. Loading feedback and retryable failures stay in the model
+  workspace without changing the standalone document.
+- The scene menu offers **Create scene from standalone model...**, not the main
+  project actions. It copies the preserved standalone model, not the last child.
   Child editing keeps a scene/model breadcrumb with the shared-instance count and
-  **Done: Return to scene**. The scene menu's **Return to model editor** restores
-  the standalone workspace; it is distinct from finishing a child edit.
+  **Done: Return to scene** plus **Export owning scene...** in the plugin's return
+  bar. The scene menu's **Return to model editor** restores the standalone workspace
+  and retains scene recovery; it is distinct from finishing a child edit.
 - Reuse the canvas-first instruments and responsive layout. The scene dock is
   **Select, Place, Transform, Layer**; Stage contains **Scene, Instance, Render**.
   Transform offers Move, Rotate, Scale, snapping, and exact single-instance TRS

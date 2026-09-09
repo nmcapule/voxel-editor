@@ -17,6 +17,7 @@ export interface SceneEditorOptions {
   recoveryEnabled?: boolean
   editAsset?(assetId: string): Promise<void>
   openScene?(snapshot: SceneManifest, library?: LibraryLink): Promise<void>
+  createFromModel?(): Promise<void>
   leaveScene?(): Promise<void>
   beforeSave?(): Promise<void>
   recoveryContext?(): Pick<SceneRecoveryContext, 'editingAssetId' | 'view'>
@@ -67,6 +68,7 @@ export class SceneEditor {
       insertModel: (snapshot, source) => this.insertModel(snapshot, source),
       openScene: (snapshot, library) => options.openScene ? options.openScene(snapshot, library) : this.open(snapshot, library),
       newScene: () => options.openScene ? options.openScene(createScene(this.scene.data.settings)) : this.open(createScene(this.scene.data.settings)),
+      createFromModel: options.createFromModel,
       leaveScene: () => options.leaveScene?.(),
       frame: () => { this.renderer.frameSelection(); this.viewChanged() },
       renderMode: () => { options.viewport.setRenderMode(!options.viewport.renderMode); this.ui.render() },

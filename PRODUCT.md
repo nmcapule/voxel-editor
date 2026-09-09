@@ -20,10 +20,10 @@ desktop software.
 
 ## Product Purpose
 
-Voxel Studio is a focused browser-based voxel editor and renderer. Success means
+Voxel Studio is a focused, model-first browser-based voxel editor and renderer. Success means
 a creator can open the app, shape and color a model directly in 3D, return to it
-later, exchange it with MagicaVoxel, arrange model instances into a larger scene,
-and capture a finished image.
+later, exchange it with MagicaVoxel, and capture a finished image. Scene composition
+is an optional plugin, not the focus of the app or its startup workspace.
 
 ## Positioning
 
@@ -43,7 +43,11 @@ Sculpt holds Push/Pull and Move. Layer activates the owner of a tapped or clicke
 voxel on release and pans the viewport on drag. Creators can also navigate the
 camera, adjust the palette and lighting, and import or export files.
 
-The separate scene editor places, selects, transforms, and layers model instances.
+The scene editor plugin is available under Plugins in the project menu and loads
+only when explicitly opened. Startup always restores the standalone model, even
+when scene recovery exists. Opening the plugin resumes that scene/child context,
+or starts an empty scene if there is no recovery; leaving retains scene recovery.
+The plugin places, selects, transforms, and layers model instances.
 Edit model enters the existing voxel editor for a shared scene asset; Done returns
 to the composition without replacing the standalone model workspace.
 

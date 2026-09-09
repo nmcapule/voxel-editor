@@ -3,26 +3,25 @@
 html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 body { min-width: 320px; }
 .studio { position: relative; width: 100%; height: 100dvh; isolation: isolate; background: var(--field); }
-.studio > .model-root, .studio > .scene-root { position: absolute; z-index: 2; inset: 0; background: transparent; }
-.studio:not([data-editor="scene"]) > .viewport canvas { cursor: crosshair; }
-.scene-return { position: absolute; z-index: 20; top: 82px; left: 18px; display: flex; align-items: center; gap: 12px; max-width: calc(100% - 36px); padding: 8px; border-radius: 13px; }
-.scene-return button { min-height: 44px; padding: 8px 12px; flex-shrink: 0; }
-.scene-return span { font-size: 13px; overflow-wrap: anywhere; }
+.studio > .model-root { position: absolute; z-index: 2; inset: 0; background: transparent; }
+.studio > .model-root:has(#project-menu[open]) { z-index: 21; }
+.studio > .viewport canvas { cursor: crosshair; }
+.studio .menu-sheet { max-height: calc(100dvh - 100px); overflow-y: auto; }
+.plugins-menu { margin-top: 6px; border-top: 1px solid var(--line); padding-top: 6px; }
+.studio .plugins-menu > summary { display: list-item; width: auto; height: auto; min-height: 44px; padding: 12px 10px; border-radius: 9px; list-style: disclosure-closed inside; font-size: 0.88rem; }
+.studio .plugins-menu[open] > summary { list-style-type: disclosure-open; }
+.studio .plugins-menu > summary::-webkit-details-marker { display: inline; }
+.plugin-actions { display: grid; padding-left: 12px; }
+.studio .plugin-actions button { min-height: 44px; }
 .performance-monitor { position: absolute; z-index: 1; top: max(82px, calc(env(safe-area-inset-top) + 64px)); left: max(18px, env(safe-area-inset-left)); display: flex; margin: 0; pointer-events: none; font-family: monospace; font-size: 12px; line-height: 1.4; font-variant-numeric: tabular-nums; }
 .performance-monitor > div { width: 96px; padding: 6px 8px 4px; }
 .performance-monitor dt { white-space: nowrap; }
 .performance-monitor dd { margin: 0; }
 .performance-monitor dd > span { display: block; min-height: 17px; }
 .performance-monitor canvas { display: block; }
-.studio[data-editor="asset"] .performance-monitor { top: 156px; }
 @media (min-width: 841px) {
-  .studio:not([data-editor="scene"]):has(.model-root .stage-panel[data-open="true"]) > .viewport .key-light-guide,
-  .studio[data-editor="scene"]:has(.scene-root .stage-panel[data-open="true"]) > .viewport .key-light-guide { right: 392px; }
+  .studio:has(.model-editor:not([hidden]) .stage-panel[data-open="true"]) > .viewport .key-light-guide { right: 392px; }
 }
 @media (max-width: 840px) {
   .studio[data-editor] .performance-monitor { top: auto; bottom: calc(114px + env(safe-area-inset-bottom)); left: max(10px, env(safe-area-inset-left)); }
-  .scene-return { top: 72px; left: 10px; max-width: calc(100% - 20px); gap: 8px; }
-  .scene-return button { font-size: 12px; max-width: 150px; }
-  .scene-return span { font-size: 12px; }
-  .studio[data-editor="asset"] .model-editor > .scene-status { top: 150px; }
 }

@@ -18,13 +18,13 @@ canvas bridge, and Vite. It uses your OpenCode provider authentication and prefe
 your configured model when compatible. It checks that the canvas tool is registered before starting Vite.
 Use `bun run dev:assistant --port 5180` if another dev server owns the default port.
 
-Open the project menu and choose **Enable assistant** to connect automatically.
+Open the project menu, expand **Plugins**, and choose **Enable assistant** to connect automatically.
 No frontend token is needed. **Reconnect** retries the connection without a token.
 
 The UI supports prompts, follow-ups, streamed model text/reasoning supplied by
 OpenCode, tool progress, Stop, and New conversation. Close collapses the panel
 while work continues; Disable stops it and removes the panel. Re-enable through
-the project menu. A disconnected socket ends its run; reconnect creates a fresh
+the project menu's **Plugins** section. A disconnected socket ends its run; reconnect creates a fresh
 conversation without replaying requests. Earlier transcript entries are local
 display only. One canvas can connect at a time.
 

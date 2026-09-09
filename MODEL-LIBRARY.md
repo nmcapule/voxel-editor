@@ -71,6 +71,9 @@ a save-token compare-and-swap (CAS) blocks stale-tab overwrites, including equal
 revisions. Conflicts keep the current work and require export or explicit reload.
 The context can retain scene camera, selection, library link, and editing asset ID,
 but not undo history. Standalone recovery is not replaced by child editing.
+Scene recovery is read only after opening **Project menu > Plugins > Scene editor**.
+Refresh starts in the standalone model editor; returning to it from the plugin
+retains the scene recovery marker and data for a later explicit opening.
 
 **Local recovery does not guarantee a complete offline scene.** Remote hash references
 may remain uncached; missing chunks load from the same-origin server and are verified
@@ -78,7 +81,7 @@ before caching. Reopening/editing, full-detail rendering, or export may require 
 online. A successful `.vscene` export is self-contained for voxel data, not images.
 
 Texture image bytes are session-only. `src/editors/model/editor.ts` retains map-set
-payloads per model session; `src/app/scene-model-bridge.ts` retains child maps by
+payloads per model session; `plugins/scene/client.ts` retains child maps by
 asset ID within the current scene. Rehydrating that asset can restore maps after
 child-history eviction. Opening another scene clears this cache; refresh, reopening
 a scene, and Make unique do not transfer images. Recovery, scene-library saves,

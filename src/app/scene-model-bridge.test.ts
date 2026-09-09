@@ -1,5 +1,6 @@
 import { expect, mock, spyOn, test } from 'bun:test'
 import type { AssistantHost } from '../../plugins/assistant/shared'
+import type { ScenePlugin } from '../../plugins/scene/client'
 import type { VoxelDocument } from '../shared/voxel/document'
 import type { RemoteCommand } from '../editors/model/protocol'
 import type { CameraSnapshot } from '../shared/rendering/contracts'
@@ -22,6 +23,14 @@ const cases = [
   'model effects synchronize tools once and reuse layer counts for metadata only',
   'visibility saves reuse raw chunks without losing pending voxel edits',
   'model palette retains regrouped operations and Select clicks clear selection',
+  'scene opening shares in-flight activation and reuses the plugin after leaving',
+  'failed recovery reads preserve recovery and allow an explicit retry',
+  'unload and disposal never mount or read an unopened scene plugin',
+  'leaving the scene retains recovery across a model-only refresh',
+  'createFromModel copies the standalone model rather than the last scene child',
+  'queued scene voxel commands cannot mutate standalone during leave texture hydration',
+  'recovery activation retries failed scene saves and resumes the recorded child',
+  'recovery activation retries failed child loads without replacing live scene work',
 ] as const
 
 for (const name of cases) {
@@ -54,12 +63,17 @@ async function integration(name: typeof cases[number]) {
   let standalone = storage.snapshotProject(original, settings, { id: 'source', version: 1, tags: ['test'], dirty: false })
   let recovery: { scene: SceneManifest; context: SceneRecoveryContext } | undefined
   const recoveryPauses: ReturnType<typeof gate>[] = []
+  let recoveryReadPause: ReturnType<typeof gate> | undefined
   let modelPause: ReturnType<typeof gate> | undefined
   let capturePause: ReturnType<typeof gate> | undefined
   let texturePause: ReturnType<typeof gate> | undefined
   let storageFailure = false
+  let recoveryReadFailure = false
+  let assetLoadFailure = false
   let modelFailure = false
   let standaloneWrites = 0
+  let sceneAssetLoads = 0
+  let recoveryReads = 0, recoveryDeactivations = 0, sceneMounts = 0, sceneRendererMounts = 0
   const disposedAdapters: string[] = []
 
   // Only the browser storage boundary is fake: asset hashing, dirty-chunk reuse and hydration are real.
@@ -97,8 +111,20 @@ async function integration(name: typeof cases[number]) {
   }))
   mock.module('../editors/scene/storage', () => ({
     ...sceneStorage,
-    loadSceneRecovery: async () => structuredClone(recovery),
-    deactivateSceneRecovery: async () => { recovery = undefined },
+    loadSceneAsset: async (asset: Parameters<typeof sceneStorage.loadSceneAsset>[0]) => {
+      sceneAssetLoads++
+      if (assetLoadFailure) throw new Error('Scene asset unavailable')
+      return sceneStorage.loadSceneAsset(asset)
+    },
+    loadSceneRecovery: async () => {
+      recoveryReads++
+      const pause = recoveryReadPause
+      recoveryReadPause = undefined
+      if (pause) { pause.entered.resolve(); await pause.release.promise }
+      if (recoveryReadFailure) throw new Error('Recovery read unavailable')
+      return structuredClone(recovery)
+    },
+    deactivateSceneRecovery: async () => { recoveryDeactivations++; recovery = undefined },
     saveSceneDocumentRecovery: async (scene: import('../editors/scene/document').SceneDocument, context: SceneRecoveryContext) => {
       const captured = structuredClone({ scene: scene.snapshot(), context }), pause = recoveryPauses.shift()
       if (pause) { pause.entered.resolve(); await pause.release.promise }
@@ -112,12 +138,14 @@ async function integration(name: typeof cases[number]) {
     dataset: Record<string, string> = {}
     style = {}
     classList = { add() {} }
+    className = ''
     value = ''
     textContent = ''
     innerHTML = ''
     hidden = false
     inert = false
     disabled = false
+    open = false
     files: Pick<File, 'name' | 'type' | 'arrayBuffer'>[] = []
     children: ElementStub[] = []
     nodes = new Map<string, ElementStub>()
@@ -127,12 +155,13 @@ async function integration(name: typeof cases[number]) {
     get ownerDocument(): ElementStub { return dom }
     constructor(tag = '') { this.tag = tag }
     querySelector(selector: string): ElementStub {
-      const child = this.children.find(child => child.tag === selector)
+      const child = this.children.find(child => child.tag === selector || selector.startsWith('.') && child.className.split(' ').includes(selector.slice(1)))
       if (child) return child
       if (!this.nodes.has(selector)) this.nodes.set(selector, new ElementStub(selector))
       return this.nodes.get(selector)!
     }
     querySelectorAll(selector: string) {
+      if (selector === 'button') return [...this.nodes].filter(([selector]) => selector.startsWith('button')).map(([, node]) => node)
       return selector === '.tool-dock, .context-dock' ? [this.querySelector('.tool-dock'), this.querySelector('.context-dock')] : []
     }
     addEventListener(type: string, listener: (event: unknown) => unknown, options?: { signal?: AbortSignal }) {
@@ -203,6 +232,7 @@ async function integration(name: typeof cases[number]) {
   let renderer!: RendererStub
   mock.module('../editors/model/renderer', () => ({ VoxelRenderer: class extends RendererStub { constructor(_host: unknown, document: VoxelDocument) { super(); this.document = document; renderer = this } } }))
   mock.module('../editors/scene/renderer', () => ({ SceneRenderer: class {
+    constructor() { sceneRendererMounts++ }
     stats = {}
     setActive() {}
     setDocument() {}
@@ -212,6 +242,7 @@ async function integration(name: typeof cases[number]) {
   } }))
   let ui!: SceneUIHost
   mock.module('../editors/scene/ui', () => ({ mountSceneUI: (_root: HTMLElement, host: SceneUIHost) => {
+    sceneMounts++
     ui = host
     return { element: new ElementStub(), setVisible() {}, setBusy() {}, render() {}, setSaveState() {}, dispose() {} }
   } }))
@@ -222,9 +253,19 @@ async function integration(name: typeof cases[number]) {
   mock.module('./remote', () => ({ connectRemote: (host: typeof remote) => { remote = host; return () => { remoteDisconnected = true } } }))
   const assistantReady = Promise.withResolvers<AssistantHost>()
   mock.module('../../plugins/assistant/client', () => ({ mountAssistant: (host: AssistantHost) => { assistantReady.resolve(host); return () => {} } }))
+  if (name === cases[13] || name === cases[14] || name === cases[18] || name === cases[19]) {
+    const { SceneDocument, createScene } = await import('../editors/scene/document')
+    const recoveredModel = new VoxelDocument(undefined, 'Recovered model')
+    recoveredModel.setVoxel(17, 1, 1, 12)
+    const asset = await sceneStorage.putSceneAsset(recoveredModel, settings)
+    const scene = new SceneDocument(createScene(settings, 'Recovered scene'))
+    scene.execute({ type: 'asset.add', asset })
+    scene.execute({ type: 'instance.place', assetId: asset.id, position: { x: 0, y: 0, z: 0 } })
+    recovery = { scene: scene.snapshot(), context: { editingAssetId: asset.id, selection: [...scene.selection] } }
+  }
   const { mountApplication } = await import('./application')
   let application = await mountApplication(dom as unknown as HTMLElement)
-  let workspace = application.bridge
+  let workspace!: ScenePlugin
   const currentModel = () => application.model.currentSession()
   const modelNode = (selector: string) => dom.querySelector('.studio').querySelector('.model-root').querySelector(selector)
   const assistant = await assistantReady.promise
@@ -235,6 +276,14 @@ async function integration(name: typeof cases[number]) {
   const savedModel = async () => (await sceneStorage.loadSceneAsset(recovery!.scene.assets[0])).document
 
   try {
+    expect(sceneMounts).toBe(0)
+    expect(sceneRendererMounts).toBe(0)
+    expect(recoveryReads).toBe(0)
+    expect(ui).toBeUndefined()
+    expect(dom.innerHTML).not.toContain('scene-root')
+    expect(dom.querySelector('.studio').children.some(child => child.className === 'scene-root')).toBe(false)
+    expect(renderer.document.name).toBe('Standalone')
+    expect(application.model.element.hidden).toBe(false)
     if (name === cases[0]) {
       await edit(2)
       await dispatch({ type: 'selection.set', cells: [{ x: 2, y: 1, z: 1 }] })
@@ -244,6 +293,7 @@ async function integration(name: typeof cases[number]) {
       expect(modelNode('.tool-dock').inert).toBe(true)
       const before = currentModel(), standaloneSnapshot = encodeProjectSnapshot(before.controller.document, before.controller.settings)
       const beforeState = before.controller.stateSnapshot()
+      workspace = await application.openScenePlugin()
       await workspace.start(true)
       const assetId = workspace.snapshot().assets[0].id
       await ui.command({ type: 'instance.place', assetId, position: { x: 100, y: 0, z: 0 } })
@@ -268,6 +318,7 @@ async function integration(name: typeof cases[number]) {
       expect(storage.restoreProjectSnapshot(standalone)!.document.getVoxel(17, 1, 1)).toBe(0)
       expect(standalone.library).toEqual({ id: 'source', version: 1, tags: ['test'], dirty: true })
     } else if (name === cases[1]) {
+      workspace = await application.openScenePlugin()
       await workspace.start(true)
       ui.frame()
       const sceneView = renderer.getView(), selection = [...ui.current().scene.selection]
@@ -289,8 +340,16 @@ async function integration(name: typeof cases[number]) {
       expect((await state()).saveState).toBe('saved')
       const previousWorkspace = workspace
       await application.dispose()
+      const mounts = sceneMounts, rendererMounts = sceneRendererMounts, reads = recoveryReads
       application = await mountApplication(dom as unknown as HTMLElement)
-      workspace = application.bridge
+      expect(sceneMounts).toBe(mounts)
+      expect(sceneRendererMounts).toBe(rendererMounts)
+      expect(recoveryReads).toBe(reads)
+      expect(dom.innerHTML).not.toContain('scene-root')
+      expect(dom.querySelector('.studio').children.some(child => child.className === 'scene-root')).toBe(false)
+      expect(renderer.document.name).toBe('Standalone')
+      expect(renderer.document.getVoxel(17, 1, 1)).toBe(0)
+      workspace = await application.openScenePlugin()
       expect(workspace).not.toBe(previousWorkspace)
       expect(workspace.active).toBe(false)
       expect(renderer.document.getVoxel(17, 1, 1)).toBe(12)
@@ -302,6 +361,7 @@ async function integration(name: typeof cases[number]) {
       await workspace.flush()
       expect(recovery!.context.view).toEqual(renderer.getView())
     } else if (name === cases[2]) {
+      workspace = await application.openScenePlugin()
       await workspace.start(true); await ui.leaveScene(); await edit(2)
       const pause = modelPause = gate(), resuming = workspace.start()
       await pause.entered.promise
@@ -335,6 +395,7 @@ async function integration(name: typeof cases[number]) {
       expect(standalone).toEqual(savedStandalone)
       expect(recovery!.scene.assets[0].model.name).toBe('Standalone')
     } else if (name === cases[3]) {
+      workspace = await application.openScenePlugin()
       await workspace.start(true); await enter()
       const map: Extract<RemoteCommand, { type: 'material.map.set' }> = { type: 'material.map.set', index: 5, map: 'map', name: 'albedo.png', mime: 'image/png', dataBase64: btoa('image bytes') }
       await dispatch(map); await workspace.returnToScene()
@@ -354,6 +415,7 @@ async function integration(name: typeof cases[number]) {
       expect(renderer.maps.size).toBe(0)
       expect((await state()).palette.find(color => color.index === 5)!.maps).toEqual({})
     } else if (name === cases[4]) {
+      workspace = await application.openScenePlugin()
       await workspace.start(true); await enter()
       const voxRead = Promise.withResolvers<ArrayBuffer>(), textureRead = Promise.withResolvers<ArrayBuffer>()
       const { exportVox } = await import('../shared/voxel/vox')
@@ -383,6 +445,7 @@ async function integration(name: typeof cases[number]) {
       await new Promise(resolve => setTimeout(resolve, 0))
       expect(renderer.maps.size).toBe(1)
     } else if (name === cases[5]) {
+      workspace = await application.openScenePlugin()
       await workspace.start(true); await enter()
       const saved = structuredClone(recovery)
       storageFailure = true
@@ -577,6 +640,7 @@ async function integration(name: typeof cases[number]) {
         expect(scans).toHaveBeenCalledTimes(6)
       } finally { scans.mockRestore() }
     } else if (name === cases[10]) {
+      workspace = await application.openScenePlugin()
       await workspace.start(true); await enter()
       const before = recovery!.scene.assets[0]
       const hashes = spyOn(crypto.subtle, 'digest')
@@ -643,6 +707,7 @@ async function integration(name: typeof cases[number]) {
       expect(controller.activeTool).toBe('paint')
       expect(controller.paintMode).toBe('fill')
       const session = currentModel()
+      workspace = await application.openScenePlugin()
       await workspace.start(true); await enter()
       await mode('push')
       await workspace.returnToScene(); await ui.leaveScene()
@@ -689,7 +754,9 @@ async function integration(name: typeof cases[number]) {
       expect(controller.renderMode).toBe(true)
       expect(popup.showPopover).toHaveBeenCalledTimes(2)
       await dispatch({ type: 'renderMode.set', enabled: false })
-    } else {
+    } else if (name === cases[8]) {
+      workspace = await application.openScenePlugin()
+      await ui.leaveScene()
       const shell = dom.querySelector('.studio'), nameInput = modelNode('#project-name')
       const captureGate = capturePause = gate()
       const capturing = dispatch({ type: 'view.capture' })
@@ -725,10 +792,252 @@ async function integration(name: typeof cases[number]) {
       expect(disposedAdapters).toEqual(['scene', 'model'])
       expect(nameInput.listeners.get('input')).toEqual([])
       expect(dom.nodes.size).toBe(0)
+    } else if (name === cases[12]) {
+      const menu = modelNode('#project-menu .menu-sheet').querySelector('details')
+      const button = menu.querySelector('[data-plugin="scene"]')
+      menu.open = true
+      await edit(2)
+      const reading = recoveryReadPause = gate(), saving = modelPause = gate()
+      const opening = application.openScenePlugin()
+      expect(application.openScenePlugin()).toBe(opening)
+      await reading.entered.promise
+      expect(sceneMounts).toBe(1)
+      expect(sceneRendererMounts).toBe(1)
+      expect(recoveryReads).toBe(1)
+      expect(button.disabled).toBe(true)
+      await expect(edit(3)).rejects.toMatchObject({ code: 'invalid_state' })
+      await expect(application.dispose()).rejects.toMatchObject({ code: 'invalid_state' })
+      expect(disposedAdapters).toEqual([])
+      reading.release.resolve()
+      await saving.entered.promise
+      expect(application.openScenePlugin()).toBe(opening)
+      expect(button.disabled).toBe(true)
+      const returnBar = dom.querySelector('.studio').querySelector('.scene-return')
+      expect(returnBar.querySelector('button.primary').disabled).toBe(true)
+      expect(returnBar.querySelector('button.secondary').disabled).toBe(true)
+      saving.release.resolve()
+      workspace = await opening
+      expect(workspace.active).toBe(true)
+      expect(workspace.hasScene).toBe(true)
+      expect(workspace.snapshot().assets).toEqual([])
+      expect(workspace.snapshot().instances).toEqual([])
+      expect(button.disabled).toBe(false)
+      expect(button.textContent).toBe('Scene editor')
+      expect(menu.open).toBe(false)
+      expect(returnBar.querySelector('button.primary').disabled).toBe(false)
+      expect(returnBar.querySelector('button.secondary').disabled).toBe(false)
+      await ui.command({ type: 'scene.rename', name: 'Keep this scene' })
+      await workspace.flush()
+      const snapshot = workspace.snapshot()
+      expect(await application.openScenePlugin()).toBe(workspace)
+      expect(workspace.snapshot()).toEqual(snapshot)
+      await ui.leaveScene()
+      expect(workspace.hasScene).toBe(false)
+      await edit(3)
+      const resuming = modelPause = gate(), reopening = application.openScenePlugin()
+      await resuming.entered.promise
+      expect(application.openScenePlugin()).toBe(reopening)
+      resuming.release.resolve()
+      expect(await reopening).toBe(workspace)
+      expect(workspace.active).toBe(true)
+      expect(workspace.snapshot()).toEqual(snapshot)
+      expect(sceneMounts).toBe(1)
+      expect(sceneRendererMounts).toBe(1)
+      expect(recoveryReads).toBe(1)
+      expect(storage.restoreProjectSnapshot(standalone)!.document.getVoxel(3, 1, 1)).toBe(6)
+      await application.dispose()
+      expect(returnBar.querySelector('button.primary').listeners.get('click')).toEqual([])
+      expect(returnBar.querySelector('button.secondary').listeners.get('click')).toEqual([])
+      expect(button.listeners.get('click')).toEqual([])
+    } else if (name === cases[13]) {
+      const saved = structuredClone(recovery), before = currentModel()
+      const button = modelNode('#project-menu .menu-sheet').querySelector('details').querySelector('[data-plugin="scene"]')
+      recoveryReadFailure = true
+      const reading = recoveryReadPause = gate()
+      const clicked = button.emit('click'), opening = application.openScenePlugin()
+      await clicked; await reading.entered.promise
+      reading.release.resolve()
+      await expect(opening).rejects.toThrow('Recovery read unavailable')
+      expect(recovery).toEqual(saved)
+      expect(recoveryDeactivations).toBe(0)
+      expect(recoveryReads).toBe(1)
+      expect(sceneMounts).toBe(1)
+      expect(button.disabled).toBe(false)
+      expect(button.textContent).toBe('Scene editor')
+      const toast = dom.querySelector('.studio').querySelector('.toast')
+      expect(toast.hidden).toBe(false)
+      expect(toast.dataset.tone).toBe('warning')
+      expect(toast.textContent).toContain('Recovery read unavailable')
+      expect(application.model.element.hidden).toBe(false)
+      expect(currentModel().controller).toBe(before.controller)
+      await edit(2); await dispatch({ type: 'save.flush' })
+      expect(recovery).toEqual(saved)
+      recoveryReadFailure = false
+      const retry = application.openScenePlugin()
+      expect(retry).not.toBe(opening)
+      workspace = await retry
+      expect(sceneMounts).toBe(1)
+      expect(sceneRendererMounts).toBe(1)
+      expect(recoveryReads).toBe(2)
+      expect(workspace.snapshot()).toEqual(saved!.scene)
+      expect(workspace.active).toBe(false)
+      expect(workspace.hasScene).toBe(true)
+      expect(renderer.document.name).toBe('Recovered model')
+      expect(renderer.document.getVoxel(17, 1, 1)).toBe(12)
+      expect(renderer.document.getVoxel(2, 1, 1)).toBe(0)
+      await workspace.returnToScene(); await ui.leaveScene()
+      expect(currentModel().controller).toBe(before.controller)
+      expect(renderer.document.getVoxel(2, 1, 1)).toBe(6)
+    } else if (name === cases[14]) {
+      const saved = structuredClone(recovery)
+      const browserWindow = window as unknown as ElementStub
+      const preventDefault = mock(() => {})
+      await browserWindow.emit('beforeunload', { preventDefault })
+      expect(preventDefault).not.toHaveBeenCalled()
+      await edit(2)
+      await browserWindow.emit('beforeunload', { preventDefault })
+      expect(preventDefault).toHaveBeenCalledTimes(1)
+      await dispatch({ type: 'save.flush' })
+      await browserWindow.emit('beforeunload', { preventDefault })
+      expect(preventDefault).toHaveBeenCalledTimes(1)
+      const nameInput = modelNode('#project-name')
+      const button = modelNode('#project-menu .menu-sheet').querySelector('details').querySelector('[data-plugin="scene"]')
+      await edit(3)
+      const saving = modelPause = gate(), closing = application.dispose()
+      expect(application.dispose()).toBe(closing)
+      await saving.entered.promise
+      await expect(application.openScenePlugin()).rejects.toMatchObject({ code: 'invalid_state' })
+      saving.release.resolve(); await closing
+      expect(disposedAdapters).toEqual(['model'])
+      expect(sceneMounts).toBe(0)
+      expect(sceneRendererMounts).toBe(0)
+      expect(recoveryReads).toBe(0)
+      expect(recoveryDeactivations).toBe(0)
+      expect(recovery).toEqual(saved)
+      expect(storage.restoreProjectSnapshot(standalone)!.document.getVoxel(3, 1, 1)).toBe(6)
+      expect(nameInput.listeners.get('input')).toEqual([])
+      expect(button.listeners.get('click')).toEqual([])
+      expect(browserWindow.listeners.get('beforeunload')).toEqual([])
+      expect(dom.nodes.size).toBe(0)
+    } else if (name === cases[15]) {
+      workspace = await application.openScenePlugin()
+      await workspace.start(true); await enter(); await edit(17); await workspace.returnToScene()
+      await ui.command({ type: 'scene.rename', name: 'Retained after leaving' })
+      ui.frame(); await workspace.flush()
+      const saved = structuredClone(recovery), previousWorkspace = workspace
+      await ui.leaveScene()
+      expect(workspace.active).toBe(false)
+      expect(workspace.hasScene).toBe(false)
+      expect(recoveryDeactivations).toBe(0)
+      expect(recovery).toEqual(saved)
+      await edit(2); await application.dispose()
+      expect(recovery).toEqual(saved)
+      const mounts = sceneMounts, rendererMounts = sceneRendererMounts, reads = recoveryReads
+      application = await mountApplication(dom as unknown as HTMLElement)
+      expect(sceneMounts).toBe(mounts)
+      expect(sceneRendererMounts).toBe(rendererMounts)
+      expect(recoveryReads).toBe(reads)
+      expect(dom.innerHTML).not.toContain('scene-root')
+      expect(dom.querySelector('.studio').children.some(child => child.className === 'scene-root')).toBe(false)
+      expect(renderer.document.getVoxel(2, 1, 1)).toBe(6)
+      expect(renderer.document.getVoxel(17, 1, 1)).toBe(0)
+      expect(recovery).toEqual(saved)
+      workspace = await application.openScenePlugin()
+      expect(workspace).not.toBe(previousWorkspace)
+      expect(workspace.active).toBe(true)
+      expect(workspace.snapshot()).toEqual(saved!.scene)
+      expect(renderer.getView()).toEqual(saved!.context.view!)
+      expect(ui.current().scene.selection).toEqual(saved!.context.selection!)
+      await enter()
+      expect(renderer.document.getVoxel(17, 1, 1)).toBe(6)
+      expect(renderer.document.getVoxel(2, 1, 1)).toBe(0)
+      await workspace.returnToScene(); await ui.leaveScene()
+      expect(renderer.document.getVoxel(2, 1, 1)).toBe(6)
+      expect(recoveryDeactivations).toBe(0)
+    } else if (name === cases[16]) {
+      await edit(2)
+      const before = currentModel(), snapshot = encodeProjectSnapshot(before.controller.document, before.controller.settings)
+      workspace = await application.openScenePlugin()
+      expect(workspace.snapshot().assets).toEqual([])
+      expect(ui.createFromModel).toBeFunction()
+      await ui.createFromModel!(); await enter()
+      await dispatch({ type: 'document.rename', name: 'Last scene child' }); await edit(17)
+      const child = currentModel().controller
+      await workspace.returnToScene()
+      expect(currentModel().controller).toBe(child)
+      const previousScene = workspace.snapshot().id
+      await ui.createFromModel!()
+      expect(workspace.active).toBe(true)
+      expect(workspace.snapshot().id).not.toBe(previousScene)
+      expect(workspace.snapshot().assets).toHaveLength(1)
+      expect(workspace.snapshot().instances).toHaveLength(1)
+      expect(encodeProjectSnapshot(await savedModel(), settings)).toEqual(snapshot)
+      await enter()
+      expect(currentModel().controller).not.toBe(child)
+      expect(renderer.document.name).toBe('Standalone')
+      expect(renderer.document.getVoxel(2, 1, 1)).toBe(6)
+      expect(renderer.document.getVoxel(17, 1, 1)).toBe(0)
+      await workspace.returnToScene(); await ui.leaveScene()
+      expect(currentModel().controller).toBe(before.controller)
+      expect(encodeProjectSnapshot(renderer.document, settings)).toEqual(snapshot)
+    } else if (name === cases[17]) {
+      await dispatch({ type: 'material.map.set', index: 5, map: 'map', name: 'standalone.png', mime: 'image/png', dataBase64: btoa('standalone texture') })
+      const before = currentModel(), snapshot = encodeProjectSnapshot(before.controller.document, settings)
+      workspace = await application.openScenePlugin()
+      const capturing = capturePause = gate(), capture = dispatch({ type: 'view.capture' })
+      await capturing.entered.promise
+      const stale = edit(17).then(() => undefined, error => error)
+      const hydration = texturePause = gate(), leaving = ui.leaveScene()
+      try {
+        await hydration.entered.promise
+        expect(application.model.busy).toBe(true)
+        expect(currentModel().controller).toBe(before.controller)
+        capturing.release.resolve(); await capture
+        const refused = await stale
+        expect(renderer.document.getVoxel(17, 1, 1)).toBe(0)
+        expect(['invalid_state', 'revision_conflict']).toContain(refused?.code)
+      } finally {
+        capturing.release.resolve(); hydration.release.resolve(); await leaving
+      }
+      expect(encodeProjectSnapshot(renderer.document, settings)).toEqual(snapshot)
+      expect(await renderer.maps.get('5:map')!.text()).toBe('standalone texture')
+      await dispatch({ type: 'save.flush' })
+      expect(storage.restoreProjectSnapshot(standalone)!.document.getVoxel(17, 1, 1)).toBe(0)
+    } else if (name === cases[18] || name === cases[19]) {
+      const saved = structuredClone(recovery)!, before = currentModel(), failingSave = name === cases[18]
+      storageFailure = failingSave; assetLoadFailure = !failingSave
+      const message = failingSave ? 'Recovery quota exceeded' : 'Scene asset unavailable'
+      try {
+        await expect(application.openScenePlugin()).rejects.toThrow(message)
+        const scene = ui.current().scene
+        expect(scene.data.id).toBe(saved.scene.id)
+        expect(currentModel().controller).toBe(before.controller)
+        expect((await state()).saveState).toBe(failingSave ? 'error' : 'saved')
+        await expect(application.openScenePlugin()).rejects.toThrow(message)
+        expect(sceneAssetLoads).toBe(failingSave ? 0 : 2)
+        if (failingSave) expect(recovery).toEqual(saved)
+        await ui.command({ type: 'scene.rename', name: 'Live work after recovery failure' })
+        storageFailure = assetLoadFailure = false
+        workspace = await application.openScenePlugin()
+        expect(recoveryReads).toBe(1)
+        expect(sceneMounts).toBe(1)
+        expect(sceneAssetLoads).toBe(failingSave ? 1 : 3)
+        expect(ui.current().scene).toBe(scene)
+        expect(workspace.snapshot().name).toBe('Live work after recovery failure')
+        expect(workspace.active).toBe(false)
+        expect(workspace.hasScene).toBe(true)
+        expect(workspace.saveState).toBe('saved')
+        expect(currentModel().controller).not.toBe(before.controller)
+        expect(renderer.document.name).toBe('Recovered model')
+        expect(renderer.document.getVoxel(17, 1, 1)).toBe(12)
+        expect(recovery!.scene.name).toBe('Live work after recovery failure')
+        expect(recovery!.context.editingAssetId).toBe(saved.context.editingAssetId!)
+      } finally { storageFailure = assetLoadFailure = false }
     }
   } finally {
     await application.dispose()
     expect(remoteDisconnected).toBe(true)
     await expect(application.dispatch({ type: 'state.get' })).rejects.toMatchObject({ code: 'invalid_state' })
+    await expect(application.openScenePlugin()).rejects.toMatchObject({ code: 'invalid_state' })
   }
 }

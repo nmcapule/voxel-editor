@@ -1,7 +1,8 @@
 # Voxel Studio
 
-A model-first voxel editor with an optional scene-composition workspace. The two
-editors are independent modules in one application, not separate deployments.
+A model-first voxel editor and renderer. Scene composition is an optional,
+lazy-loaded plugin available from **Project menu > Plugins > Scene editor** in
+the normal app, not a separate deployment or the startup workspace.
 
 ## Development
 
@@ -37,7 +38,7 @@ for backup, security, and deployment details.
 | --- | --- |
 | `src/main.ts` | Mount the application and handle hot-reload teardown |
 | `src/app/application.ts` | Model-first shell, active-editor command routing, integrations |
-| `src/app/scene-model-bridge.ts` | Cross-editor transitions, child sessions, save ownership |
+| `plugins/scene/` | On-demand scene integration, cross-editor transitions, child sessions, save ownership |
 | `src/editors/model/` | Model UI, `Studio` commands/history, voxel interactions, model recovery |
 | `src/editors/scene/` | Scene UI, instances/history, asset streaming, scene recovery and exchange |
 | `src/shared/voxel/` | Voxel documents, meshing, project snapshots, projections, VOX codecs |
@@ -55,12 +56,14 @@ Unit tests live beside their owners. Cross-editor regression tests live in
 
 ```text
 application -> model editor -> shared code
-application -> scene editor -> shared code
+application --on demand--> scene plugin -> scene editor -> shared code
+                                      -> model editor (session handoff)
 ```
 
 Neither editor imports the other or the application. Shared code imports neither
 editor, application, nor server implementation. `src/architecture.test.ts` enforces
 these rules for runtime imports, type imports, workers, and CSS imports.
+The app and model core must not statically import scene runtime code or styles.
 
 Put code in `shared/` only when it has a real cross-feature consumer. In particular,
 voxel documents and project snapshots are shared data; `Studio` is the model
@@ -74,6 +77,12 @@ modules, never browser storage or editor UI.
 standalone model editor into a sized element. Without an application host it owns
 its command queue, recovery, notifications, and viewport. Application-specific
 menu actions and save ownership are supplied as callbacks.
+
+`ScenePlugin` in `plugins/scene/client.ts` loads only when explicitly opened. It
+mounts scene controls and restores scene/child recovery, or starts an empty scene
+if none exists. Refresh always opens the standalone model editor without reading
+scene recovery. Leaving the plugin retains that recovery for the next explicit
+opening. The scene menu can create a scene from the preserved standalone model.
 
 `SceneEditor(root, options)` in `src/editors/scene/editor.ts` mounts scene controls
 against a shared `Viewport`. The host supplies a sized viewport element, settings,
@@ -97,7 +106,7 @@ The visible editor and the persistence owner are different concepts. A child mod
 uses the model editor UI, but its changes belong to the scene.
 
 - Standalone model edits use the existing standalone recovery slot.
-- The app bridge retains the standalone model session while composing a scene.
+- The scene plugin retains the standalone model session while composing a scene.
 - Opening a scene asset hydrates a model session; dirty chunks update the owning
   asset, affecting all its instances without modifying the source library model.
 - The last visited child retains model undo history. Scene history remains separate.

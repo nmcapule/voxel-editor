@@ -1,0 +1,17 @@
+.studio > .scene-root { position: absolute; z-index: 2; inset: 0; background: transparent; }
+.studio[data-editor="scene"] > .viewport canvas { cursor: auto; }
+.scene-return { position: absolute; z-index: 20; top: 82px; left: 18px; display: flex; align-items: center; gap: 12px; max-width: calc(100% - 36px); padding: 8px; border-radius: 13px; }
+.scene-return-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.scene-return button { min-height: 44px; padding: 8px 12px; }
+.scene-return span { font-size: 13px; overflow-wrap: anywhere; }
+.studio[data-editor="asset"] .performance-monitor { top: 156px; }
+@media (min-width: 841px) {
+  .studio[data-editor="scene"]:has(.scene-root .stage-panel[data-open="true"]) > .viewport .key-light-guide { right: 392px; }
+}
+@media (max-width: 840px) {
+  .scene-return { top: 72px; left: 10px; max-width: calc(100% - 20px); flex-direction: column; align-items: flex-start; gap: 8px; }
+  .scene-return-actions { flex-shrink: 1; }
+  .scene-return button { font-size: 12px; max-width: 132px; }
+  .scene-return span { font-size: 12px; max-height: 48px; overflow: auto; }
+  .studio[data-editor="asset"] .model-editor > .scene-status { top: 210px; }
+}

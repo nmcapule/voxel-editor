@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { VoxelDocument } from '../../shared/voxel/document'
 import { inspectionViews } from './inspection'
-import { PROTOCOL, SerialCommandQueue, parseRequest } from './protocol'
+import { PROTOCOL, SerialCommandQueue, parseRequest, type RemoteCommand } from './protocol'
 import { decodeProjectSnapshot, encodeProjectSnapshot, parseProjectSnapshot } from '../../shared/voxel/snapshot'
 import { restoreProjectSnapshot, snapshotProject } from './storage'
 import { DEFAULT_SETTINGS, SKYBOX_PRESETS, type SkyboxPreset } from '../../shared/rendering/settings'
@@ -10,6 +10,29 @@ import { Studio } from './studio'
 const settings = { ...DEFAULT_SETTINGS }
 
 describe('scripting protocol', () => {
+  test('keeps voxel-studio/1 while validating action, brush, modifier and write-scope commands', () => {
+    const parse = (command: unknown) => parseRequest({ protocol: PROTOCOL, id: 'tools', command }).command
+    expect(PROTOCOL).toBe('voxel-studio/1')
+    for (const command of [
+      { type: 'tool.action', action: 'attach' },
+      { type: 'tool.brush', brush: 'center' },
+      { type: 'tool.brush', brush: 'texture' },
+      { type: 'tool.brush', brush: 'body' },
+      { type: 'tool.mirror', axis: 'x', enabled: true },
+      { type: 'tool.wholeAxis', axis: 'z' },
+      { type: 'tool.secondary', tool: 'push' },
+      { type: 'edit.paint', cells: [{ x: 1, y: 2, z: 3 }], scope: 'occupied' },
+      { type: 'edit.setVoxels', voxels: [{ x: 1, y: 2, z: 3, color: 5 }], scope: 'empty' },
+    ] satisfies RemoteCommand[]) expect(parse(command)).toEqual(command)
+    for (const command of [
+      { type: 'tool.action', action: 'fill' },
+      { type: 'tool.brush', brush: 'sphere' },
+      { type: 'tool.mirror', axis: 'w' },
+      { type: 'tool.secondary', tool: 'move' },
+      { type: 'edit.paint', scope: 'vacant' },
+    ]) expect(() => parse(command)).toThrow()
+  })
+
   test('fog and sun marker settings validate finite ranges, six-digit colors, and booleans', () => {
     const parse = (patch: unknown) => parseRequest({ protocol: PROTOCOL, id: 'atmosphere', command: { type: 'settings.update', patch } }).command
     const document = new VoxelDocument(), snapshot = encodeProjectSnapshot(document, settings), stored = snapshotProject(document, settings)

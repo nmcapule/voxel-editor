@@ -16,14 +16,17 @@ import {
   type PaletteMaterial,
   type ResizeAnchor,
   type Vec3,
+  type WriteScope,
 } from '../../shared/voxel/document'
 import type { ViewSettings } from '../../shared/rendering/settings'
+import { noAxes, type AxisToggles, type BrushAxis, type BrushMode, type ModelAction } from './brush'
 
 export type Tool = 'select' | 'paint' | 'sculpt' | 'layer'
 export type PaintMode = 'paint' | 'fill'
 export type SculptMode = 'push' | 'move' | 'erase'
 export type AuxiliaryTool = 'pick'
 export type SelectionMode = 'point' | 'surface' | 'texture' | 'body'
+export type SecondaryTool = 'push' | 'fill' | 'layer' | 'texture' | 'body'
 export type PbrMap = 'map' | 'normalMap' | 'roughnessMap' | 'metalnessMap'
 export type SelectionState = { cells: Vec3[]; count: number; floating?: boolean }
 export type ClipboardVoxel = Vec3 & { color: number }
@@ -40,10 +43,10 @@ export type StudioCommand =
   | { type: 'document.new'; dimensions?: Dimensions; name?: string }
   | { type: 'document.rename'; name: string }
   | { type: 'document.resize'; dimensions: Dimensions; anchor: ResizeAnchor; allowCrop?: boolean }
-  | { type: 'edit.paint'; cells?: Vec3[]; color?: number; layerId?: number }
+  | { type: 'edit.paint'; cells?: Vec3[]; color?: number; layerId?: number; scope?: WriteScope }
   | { type: 'edit.erase'; cells?: Vec3[]; layerId?: number }
-  | { type: 'edit.setVoxels'; voxels: ClipboardVoxel[]; layerId?: number }
-  | { type: 'edit.fill'; min: Vec3; max: Vec3; color?: number; shape: FillShape; axis?: keyof Vec3; layerId?: number }
+  | { type: 'edit.setVoxels'; voxels: ClipboardVoxel[]; layerId?: number; scope?: WriteScope }
+  | { type: 'edit.fill'; min: Vec3; max: Vec3; color?: number; shape: FillShape; axis?: keyof Vec3; layerId?: number; scope?: WriteScope }
   | { type: 'edit.move'; cells?: Vec3[]; normal: Vec3; distance: number; layerId?: number }
   | { type: 'edit.pushPull'; cells?: Vec3[]; normal: Vec3; distance: number; layerId?: number }
   | { type: 'history.undo' }
@@ -67,6 +70,11 @@ export type StudioCommand =
   | { type: 'palette.setColor'; index: number; color: number }
   | { type: 'material.update'; index: number; patch: MaterialPatch }
   | { type: 'tool.set'; tool: Tool }
+  | { type: 'tool.action'; action: ModelAction }
+  | { type: 'tool.brush'; brush: BrushMode }
+  | { type: 'tool.mirror'; axis: BrushAxis; enabled?: boolean }
+  | { type: 'tool.wholeAxis'; axis: BrushAxis; enabled?: boolean }
+  | { type: 'tool.secondary'; tool?: SecondaryTool }
   | { type: 'tool.selectionMode'; mode: SelectionMode }
   | { type: 'tool.paintMode'; mode: PaintMode }
   | { type: 'tool.sculptMode'; mode: SculptMode }
@@ -121,8 +129,13 @@ export class Studio {
   document: VoxelDocument
   settings: ViewSettings
   revision = 0
-  activeTool: Tool = 'select'
-  paintMode: PaintMode = 'paint'
+  activeTool: Tool = 'paint'
+  action: ModelAction = 'attach'
+  brush: BrushMode = 'box'
+  mirrors: AxisToggles = noAxes()
+  wholeAxes: AxisToggles = noAxes()
+  secondaryTool?: SecondaryTool
+  paintMode: PaintMode = 'fill'
   sculptMode: SculptMode = 'push'
   fillShape: FillShape = 'box'
   fillDepth = 1
@@ -170,11 +183,11 @@ export class Studio {
         return this.replaceDocument(resized.document, true, { cropped: resized.cropped })
       }
       case 'edit.paint':
-        return this.setCells(command.cells ?? this.selection.cells, command.color ?? this.activeColor, command.layerId, 'Painted')
+        return this.setCells(command.cells ?? this.selection.cells, command.color ?? this.activeColor, command.layerId, 'Painted', undefined, command.scope)
       case 'edit.erase':
         return this.setCells(command.cells ?? this.selection.cells, 0, command.layerId, 'Erased', [])
       case 'edit.setVoxels':
-        return this.setVoxels(command.voxels, command.layerId)
+        return this.setVoxels(command.voxels, command.layerId, command.scope)
       case 'edit.fill':
         return this.fill(command)
       case 'edit.move':
@@ -247,15 +260,37 @@ export class Studio {
         return this.updateMaterial(command.index, command.patch)
       case 'tool.set':
         return this.setTool(command.tool)
+      case 'tool.action':
+        return this.setAction(command.action)
+      case 'tool.brush':
+        return this.setBrush(command.brush)
+      case 'tool.mirror':
+        return this.setAxisToggle('mirror', command.axis, command.enabled)
+      case 'tool.wholeAxis':
+        return this.setAxisToggle('whole axis', command.axis, command.enabled)
+      case 'tool.secondary':
+        return this.setSecondaryTool(command.tool)
       case 'tool.selectionMode': {
-        if (this.selectionMode === command.mode) return this.unchanged()
+        const brush = command.mode === 'point' ? 'voxel' : command.mode === 'surface' ? 'face' : command.mode
+        const canonical = this.activeTool !== 'select' || this.action === 'select' && !this.secondaryTool && this.brush === brush
+        if (this.selectionMode === command.mode && canonical) return this.unchanged()
         this.selectionMode = command.mode
+        if (this.activeTool === 'select') {
+          this.action = 'select'
+          this.brush = brush
+          this.secondaryTool = undefined
+        }
         return this.changed({ toolsChanged: true, preferencesChanged: true, announcement: `${command.mode} selection mode` }, { mode: command.mode })
       }
       case 'tool.paintMode': {
-        if (this.paintMode === command.mode && !this.auxiliaryTool) return this.unchanged()
+        const canonical = this.activeTool !== 'paint' || (command.mode === 'paint' ? this.action === 'paint' && !this.secondaryTool : this.secondaryTool === 'fill')
+        if (this.paintMode === command.mode && !this.auxiliaryTool && canonical) return this.unchanged()
         this.paintMode = command.mode
         this.auxiliaryTool = undefined
+        if (this.activeTool === 'paint') {
+          if (command.mode === 'paint') { this.action = 'paint'; this.secondaryTool = undefined }
+          else this.secondaryTool = 'fill'
+        }
         return this.changed({ toolsChanged: true, announcement: `${command.mode === 'paint' ? 'Paint' : 'Fill'} operation selected` }, { mode: command.mode })
       }
       case 'tool.sculptMode':
@@ -300,6 +335,7 @@ export class Studio {
     this.history = new History()
     this.pendingPaste = undefined
     this.clipboard = []
+    if (this.brush === 'pattern') this.brush = 'voxel'
     this.selection = { cells: [], count: 0 }
     if (!preserveMaterials) {
       this.activeColor = this.firstColor()
@@ -348,6 +384,11 @@ export class Studio {
         fillShape: this.fillShape,
         fillDepth: this.fillDepth,
         auxiliaryTool: this.auxiliaryTool ?? null,
+        action: this.action,
+        brush: this.brush,
+        mirrors: { ...this.mirrors },
+        wholeAxes: { ...this.wholeAxes },
+        secondaryTool: this.secondaryTool ?? null,
         selectionMode: this.selectionMode,
         activeColor: this.activeColor,
         recentColors: [...this.recentColors],
@@ -481,25 +522,25 @@ export class Studio {
     return this.updateSelection(command.additive ? this.mergeSelection(cells) : cells, false, command.focus === true)
   }
 
-  private setCells(cells: Vec3[], color: number, layerId = this.document.activeLayerId, verb = 'Updated', selectionAfter?: Vec3[]) {
+  private setCells(cells: Vec3[], color: number, layerId = this.document.activeLayerId, verb = 'Updated', selectionAfter?: Vec3[], scope: WriteScope = 'replace') {
     if (!cells.length) throw new StudioCommandError('invalid_state', `Select voxels before ${verb.toLowerCase()}.`)
     this.editableLayer(layerId)
     const paletteChanged = color !== 0 && !this.document.hasPaletteColor(color)
     const activeLayerId = this.document.activeLayerId
     const before = copyCells(this.selection.cells)
     const session = new EditSession(this.document, layerId)
-    for (const cell of cells) session.set(cell.x, cell.y, cell.z, color)
+    let count = 0
+    for (const cell of cells) if (session.set(cell.x, cell.y, cell.z, color, scope)) count++
     const edit = session.commit()
     if (!edit) return this.unchanged({ voxelCount: 0 })
     const selectionChanged = selectionAfter !== undefined && layerId === activeLayerId
     const next = selectionChanged ? this.selectionState(selectionAfter!).cells : before
     this.history.push(edit, before, next, activeLayerId, activeLayerId)
     if (selectionChanged) this.selection = this.selectionState(next)
-    const count = cells.length
     return this.changed({ dirtyChunks: [...dirtyChunks(this.document, edit.changes.map(change => change.id))], paletteChanged, factsChanged: true, selectionChanged, selectionFocus: selectionChanged, toolsChanged: selectionChanged, save: true, announcement: `${verb} ${count} ${count === 1 ? 'voxel' : 'voxels'}` }, { voxelCount: count })
   }
 
-  private setVoxels(voxels: ClipboardVoxel[], layerId = this.document.activeLayerId) {
+  private setVoxels(voxels: ClipboardVoxel[], layerId = this.document.activeLayerId, scope: WriteScope = 'replace') {
     if (!voxels.length) return this.unchanged({ voxelCount: 0 })
     this.editableLayer(layerId)
     let paletteChanged = false
@@ -507,7 +548,7 @@ export class Studio {
     let count = 0
     for (const voxel of voxels) {
       const newColor = voxel.color !== 0 && !this.document.hasPaletteColor(voxel.color)
-      if (session.set(voxel.x, voxel.y, voxel.z, voxel.color)) { count++; paletteChanged ||= newColor }
+      if (session.set(voxel.x, voxel.y, voxel.z, voxel.color, scope)) { count++; paletteChanged ||= newColor }
     }
     const edit = session.commit()
     if (!edit) return this.unchanged({ voxelCount: 0 })
@@ -521,7 +562,7 @@ export class Studio {
     const color = command.color ?? this.activeColor
     const paletteChanged = color !== 0 && !this.document.hasPaletteColor(color)
     const session = new EditSession(this.document, layerId)
-    session.fillShape(command.min, command.max, color, command.shape, command.axis)
+    session.fillShape(command.min, command.max, color, command.shape, command.axis, command.scope)
     const edit = session.commit()
     if (!edit) return this.unchanged({ voxelCount: 0 })
     this.history.push(edit, this.selection.cells, this.selection.cells, this.document.activeLayerId, this.document.activeLayerId)
@@ -582,6 +623,8 @@ export class Studio {
     this.pendingPaste = { voxels, selectionBefore: copyCells(this.selection.cells), layerId: this.document.activeLayerId }
     this.activeTool = 'sculpt'
     this.sculptMode = 'move'
+    this.action = 'move'
+    this.secondaryTool = undefined
     this.selection = { cells: voxels.map(({ color: _color, ...cell }) => cell), count: voxels.length, floating: true }
     return this.changed({ selectionChanged: true, selectionFocus: true, toolsChanged: true, announcement: `Pasted ${voxels.length} ${voxels.length === 1 ? 'voxel' : 'voxels'}; drag to place` }, { voxelCount: voxels.length })
   }
@@ -700,9 +743,33 @@ export class Studio {
       this.selection = { cells: [], count: 0 }
       selectionChanged = true
     }
-    if (this.activeTool === tool && !this.auxiliaryTool && !selectionChanged) return this.unchanged()
+    const secondary = tool === 'paint' ? this.paintMode === 'fill' ? 'fill' : undefined
+      : tool === 'sculpt' ? this.sculptMode === 'push' ? 'push' : undefined
+      : tool === 'layer' ? 'layer' : undefined
+    const actionMatches = tool === 'select' ? this.action === 'select'
+      : tool === 'paint' ? this.action === 'paint'
+      : tool === 'sculpt' && this.sculptMode !== 'push' ? this.action === this.sculptMode : true
+    const selectionBrush = this.selectionMode === 'point' ? 'voxel' : this.selectionMode === 'surface' ? 'face' : this.selectionMode
+    const brushMatches = tool === 'select' ? this.brush === selectionBrush
+      : tool === 'paint' && (this.selectionMode === 'point' || this.selectionMode === 'surface') ? this.brush === selectionBrush : true
+    if (this.activeTool === tool && !this.auxiliaryTool && !selectionChanged && this.secondaryTool === secondary && actionMatches && brushMatches) return this.unchanged()
     this.activeTool = tool
     this.auxiliaryTool = undefined
+    if (tool === 'select') {
+      this.action = 'select'
+      this.brush = selectionBrush
+      this.secondaryTool = undefined
+    } else if (tool === 'paint') {
+      this.action = 'paint'
+      if (this.selectionMode === 'point') this.brush = 'voxel'
+      if (this.selectionMode === 'surface') this.brush = 'face'
+      this.secondaryTool = this.paintMode === 'fill' ? 'fill' : undefined
+    } else if (tool === 'sculpt') {
+      this.action = this.sculptMode === 'move' ? 'move' : this.sculptMode === 'erase' ? 'erase' : this.action
+      this.secondaryTool = this.sculptMode === 'push' ? 'push' : undefined
+    } else {
+      this.secondaryTool = 'layer'
+    }
     return this.changed({ toolsChanged: true, selectionChanged, selectionFocus: selectionChanged, announcement: `${tool === 'paint' || tool === 'sculpt' && this.sculptMode === 'erase' ? 'Volume' : tool[0].toUpperCase() + tool.slice(1)} tool selected` }, { tool })
   }
 
@@ -713,8 +780,92 @@ export class Studio {
       this.selection = { cells: [], count: 0 }
       selectionChanged = true
     }
-    if (this.sculptMode === mode && !selectionChanged) return this.unchanged()
+    const canonical = this.activeTool !== 'sculpt' || (mode === 'push' ? this.secondaryTool === 'push' : mode === 'move' ? this.action === 'move' && !this.secondaryTool : this.action === 'erase' && !this.secondaryTool)
+    if (this.sculptMode === mode && !selectionChanged && canonical) return this.unchanged()
     this.sculptMode = mode
+    if (this.activeTool === 'sculpt') {
+      if (mode === 'push') this.secondaryTool = 'push'
+      else { this.action = mode; this.secondaryTool = undefined }
+    }
     return this.changed({ toolsChanged: true, selectionChanged, selectionFocus: selectionChanged, announcement: `${mode === 'push' ? 'Push/Pull' : mode[0].toUpperCase() + mode.slice(1)} operation selected` }, { mode })
+  }
+
+  private setAction(action: ModelAction) {
+    let selectionChanged = false
+    if (this.pendingPaste && action !== 'move') {
+      this.pendingPaste = undefined
+      this.selection = { cells: [], count: 0 }
+      selectionChanged = true
+    }
+    if (this.action === action && !this.secondaryTool && !this.auxiliaryTool && !selectionChanged) return this.unchanged()
+    this.action = action
+    this.secondaryTool = undefined
+    this.auxiliaryTool = undefined
+    if (action === 'select') this.activeTool = 'select'
+    else if (action === 'attach' || action === 'paint') {
+      this.activeTool = 'paint'
+      this.paintMode = action === 'attach' ? 'fill' : 'paint'
+    } else {
+      this.activeTool = 'sculpt'
+      this.sculptMode = action
+    }
+    const name = action[0].toUpperCase() + action.slice(1)
+    return this.changed({ toolsChanged: true, selectionChanged, selectionFocus: selectionChanged, announcement: `${name} action selected` }, { action })
+  }
+
+  private setBrush(brush: BrushMode) {
+    if (brush === 'pattern' && !this.clipboard.length) throw new StudioCommandError('invalid_state', 'Copy or cut voxels before using the Pattern brush.')
+    if (this.brush === brush && !this.secondaryTool && !this.auxiliaryTool) return this.unchanged()
+    this.brush = brush
+    this.secondaryTool = undefined
+    this.auxiliaryTool = undefined
+    if (brush === 'voxel' || brush === 'face' || brush === 'texture' || brush === 'body') {
+      this.selectionMode = brush === 'voxel' ? 'point' : brush === 'face' ? 'surface' : brush
+    }
+    if (this.action === 'select') this.activeTool = 'select'
+    else if (this.action === 'attach' || this.action === 'paint') {
+      this.activeTool = 'paint'
+      this.paintMode = this.action === 'attach' ? 'fill' : 'paint'
+    } else {
+      this.activeTool = 'sculpt'
+      this.sculptMode = this.action
+    }
+    const name = brush[0].toUpperCase() + brush.slice(1)
+    return this.changed({ toolsChanged: true, preferencesChanged: brush === 'voxel' || brush === 'face' || brush === 'texture' || brush === 'body', announcement: `${name} brush selected` }, { brush })
+  }
+
+  private setAxisToggle(kind: 'mirror' | 'whole axis', axis: BrushAxis, enabled?: boolean) {
+    const toggles = kind === 'mirror' ? this.mirrors : this.wholeAxes
+    const next = enabled ?? !toggles[axis]
+    if (toggles[axis] === next) return this.unchanged()
+    toggles[axis] = next
+    return this.changed({ toolsChanged: true, announcement: `${kind === 'mirror' ? 'Mirror' : 'Whole-axis'} ${axis.toUpperCase()} ${next ? 'on' : 'off'}` }, { axis, enabled: next })
+  }
+
+  private setSecondaryTool(tool?: SecondaryTool) {
+    let selectionChanged = false
+    if (this.pendingPaste && tool) {
+      this.pendingPaste = undefined
+      this.selection = { cells: [], count: 0 }
+      selectionChanged = true
+    }
+    if ((tool === 'texture' || tool === 'body') && this.action === 'select' && this.brush === tool && !this.secondaryTool && !selectionChanged) return this.unchanged()
+    if (this.secondaryTool === tool && !selectionChanged) return this.unchanged()
+    this.secondaryTool = tool
+    this.auxiliaryTool = undefined
+    if (tool === 'fill') { this.activeTool = 'paint'; this.paintMode = 'fill' }
+    else if (tool === 'push') { this.activeTool = 'sculpt'; this.sculptMode = 'push' }
+    else if (tool === 'layer') this.activeTool = 'layer'
+    else if (tool === 'texture' || tool === 'body') {
+      this.activeTool = 'select'
+      this.action = 'select'
+      this.brush = tool
+      this.selectionMode = tool
+      this.secondaryTool = undefined
+    }
+    else if (this.action === 'select') this.activeTool = 'select'
+    else if (this.action === 'attach' || this.action === 'paint') { this.activeTool = 'paint'; this.paintMode = this.action === 'attach' ? 'fill' : 'paint' }
+    else { this.activeTool = 'sculpt'; this.sculptMode = this.action }
+    return this.changed({ toolsChanged: true, selectionChanged, selectionFocus: selectionChanged, announcement: tool ? `${tool === 'push' ? 'Push/Pull' : tool[0].toUpperCase() + tool.slice(1)} tool selected` : undefined }, { tool: tool ?? null })
   }
 }

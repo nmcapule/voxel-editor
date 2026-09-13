@@ -56,6 +56,12 @@ Responses retain request order:
 
 UI changes still publish `state.changed` events with their own increasing `sequence`, even when the mutation `revision` stays the same. Scripted edits should specify cells, color, and layer explicitly: transient editing scope is intentionally not covered by the conflict guard.
 
+`edit.paint`, `edit.setVoxels`, and `edit.fill` accept an optional `scope`:
+`replace` (default) writes every target, `empty` writes only empty target cells,
+and `occupied` writes only occupied target cells. The interactive Attach and Paint
+actions use `empty` and `occupied` respectively; scripted commands keep the
+backward-compatible `replace` default.
+
 ## Inspection
 
 Use `state.get` for document, layer, palette, tool, selection, camera, mesh, and save summaries.
@@ -130,6 +136,8 @@ layer.create                 layer.activate               layer.rename
 layer.visibility             layer.lock                   layer.delete
 palette.activate             palette.duplicate            palette.setColor
 material.update              material.map.set             material.map.clear
+tool.action                  tool.brush                    tool.mirror
+tool.wholeAxis               tool.secondary
 tool.set                     tool.selectionMode           tool.paintMode
 tool.sculptMode              tool.auxiliary               tool.fill
 settings.update              renderMode.set
@@ -142,6 +150,25 @@ save.flush
 ```
 
 The runtime validator in `src/editors/model/protocol.ts` is the authoritative argument schema. Destructive resize, layer deletion, project replacement, and VOX replacement require their corresponding explicit approval flag.
+
+The canonical model controls are:
+
+- `tool.action`: `action` is `attach`, `erase`, `paint`, `select`, or `move`.
+- `tool.brush`: `brush` is `voxel`, `face`, `box`, `line`, `center`, `texture`,
+  `body`, or `pattern`.
+  Pattern requires clipboard voxels created by `clipboard.copy` or `clipboard.cut`.
+- `tool.mirror`: `axis` is `x`, `y`, or `z`; optional `enabled` sets the value,
+  while omitting it toggles the value.
+- `tool.wholeAxis`: the same axis and optional `enabled` behavior, expanding the
+  brush result through the full document dimension.
+- `tool.secondary`: `layer` opens the layer utility; omit it to return to the
+  retained action and brush.
+
+The legacy `push`, `fill`, `texture`, and `body` secondary values, plus `tool.set`,
+`tool.selectionMode`, `tool.paintMode`, and `tool.sculptMode`, remain accepted
+compatibility commands and map into the canonical controls. `state.get`
+reports `editor.action`, `editor.brush`, `editor.mirrors`, `editor.wholeAxes`, and
+`editor.secondaryTool` alongside the compatibility fields.
 
 `settings.update` accepts the persisted field `previewRenderer`: `standard` (default)
 or `cube-sprites`. Despite the field name, Cube sprites applies in both model Edit

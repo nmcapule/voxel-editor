@@ -13,6 +13,7 @@ export interface Dimensions extends Vec3 {}
 
 export type FillShape = 'box' | 'sphere' | 'cylinder'
 export type ResizeAnchor = 'origin' | 'center'
+export type WriteScope = 'replace' | 'empty' | 'occupied'
 
 export interface PaletteMaterial {
   name: string
@@ -333,12 +334,12 @@ export class VoxelDocument {
     this.replaceChunk(id, [...layers].map(([layerId, chunk]) => ({ layerId, data: chunk })))
   }
 
-  fillChunkRegion(id: number, from: Vec3, to: Vec3, color: number, layerId = this.activeLayerId) {
+  fillChunkRegion(id: number, from: Vec3, to: Vec3, color: number, layerId = this.activeLayerId, scope: WriteScope = 'replace') {
     if (color) this.paletteOccupied[color] = 1
     let layers = this.chunks.get(id)
     let chunk = layers?.get(layerId)
     if (!chunk) {
-      if (color === 0) return false
+      if (color === 0 || scope === 'occupied') return false
       layers ??= new Map<number, Uint8Array>()
       chunk = new Uint8Array(CHUNK_VOLUME)
       layers.set(layerId, chunk)
@@ -350,6 +351,7 @@ export class VoxelDocument {
         for (let x = from.x; x <= to.x; x++) {
           const index = chunkIndex(x, y, z)
           const before = chunk[index]
+          if ((scope === 'empty' && before) || (scope === 'occupied' && !before)) continue
           if (before === color) continue
           chunk[index] = color
           if (before === 0) this.voxelCount++
@@ -525,8 +527,10 @@ export class EditSession {
     return Boolean(layer?.visible && !layer.locked)
   }
 
-  set(x: number, y: number, z: number, color: number) {
+  set(x: number, y: number, z: number, color: number, scope: WriteScope = 'replace') {
     if (!this.editable() || !this.document.contains(x, y, z)) return false
+    const before = this.document.getLayerVoxel(x, y, z, this.layerId)
+    if ((scope === 'empty' && before) || (scope === 'occupied' && !before)) return false
     const id = this.document.idAt(x, y, z)
     this.capture(id)
     if (!this.document.setVoxel(x, y, z, color, this.layerId)) return false
@@ -547,7 +551,7 @@ export class EditSession {
     }
   }
 
-  fill(min: Vec3, max: Vec3, color: number) {
+  fill(min: Vec3, max: Vec3, color: number, scope: WriteScope = 'replace') {
     if (!this.editable()) return
     const from = {
       x: Math.max(0, Math.min(min.x, max.x)),
@@ -575,16 +579,16 @@ export class EditSession {
             y: Math.min(15, to.y - cy * CHUNK_SIZE),
             z: Math.min(15, to.z - cz * CHUNK_SIZE),
           }
-          if (this.document.fillChunkRegion(id, localFrom, localTo, color, this.layerId)) this.changed.add(id)
+          if (this.document.fillChunkRegion(id, localFrom, localTo, color, this.layerId, scope)) this.changed.add(id)
         }
       }
     }
   }
 
-  fillShape(min: Vec3, max: Vec3, color: number, shape: FillShape, axis: keyof Vec3 = 'y') {
-    if (shape === 'box') { this.fill(min, max, color); return }
+  fillShape(min: Vec3, max: Vec3, color: number, shape: FillShape, axis: keyof Vec3 = 'y', scope: WriteScope = 'replace') {
+    if (shape === 'box') { this.fill(min, max, color, scope); return }
     if (!this.editable()) return
-    for (const cell of fillShapeVoxels(min, max, shape, axis, this.document.dimensions)) this.set(cell.x, cell.y, cell.z, color)
+    for (const cell of fillShapeVoxels(min, max, shape, axis, this.document.dimensions)) this.set(cell.x, cell.y, cell.z, color, scope)
   }
 
   commit(): EditCommand | undefined {

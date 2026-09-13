@@ -5,9 +5,37 @@ import { SKYBOX_PRESETS } from '../../shared/rendering/settings'
 export const materialCube = `<svg class="material-cube" viewBox="0 0 64 64" aria-hidden="true"><path class="preview-top" d="m32 8 23 13-23 13L9 21 32 8Z"/><path class="preview-left" d="M9 21l23 13v26L9 47V21Z"/><path class="preview-right" d="m32 34 23-13v26L32 60V34Z"/></svg>`
 
 export function modelMarkup(externalViewport: boolean, menuActions: { action: string; label: string; hidden?: boolean }[] = []) {
+  const actions = [['attach', 'attach', 'Attach', 'T'], ['erase', 'erase', 'Erase', 'R'], ['paint', 'paint', 'Paint', 'G'], ['select', 'select', 'Select', 'N'], ['move', 'move', 'Move', '']] as const
+  const actionButtons = actions
+    .map(([value, glyph, label, key]) => `<button type="button" data-model-action="${value}" aria-pressed="false" title="${label}${key ? ` (${key})` : ' (Ctrl/Command-drag)'}">${icon(glyph)}<span>${label}</span>${key ? `<kbd>${key}</kbd>` : ''}</button>`).join('')
+  const brushes = [['voxel', 'voxel', 'Voxel', 'V'], ['face', 'face', 'Face', 'F'], ['box', 'box', 'Box', 'B'], ['line', 'line', 'Line', 'L'], ['center', 'center', 'Center', 'C'], ['texture', 'pattern', 'Texture', ''], ['body', 'box', 'Body', ''], ['pattern', 'pattern', 'Pattern', 'P']] as const
+  const brushButtons = brushes
+    .map(([value, glyph, label, key]) => `<button type="button" data-brush="${value}" aria-pressed="false" title="${value === 'box' ? 'Box brush: drag between opposite 3D corners' : `${label} brush`}${key ? ` (${key})` : ''}" ${value === 'pattern' ? 'disabled' : ''}>${icon(glyph)}<span>${label}</span>${key ? `<kbd>${key}</kbd>` : ''}</button>`).join('')
+  const mobileWheel = (kind: 'brush' | 'action', choices: typeof brushes | typeof actions, selected: string) => {
+    const [, glyph, label] = choices.find(([value]) => value === selected)!
+    return `<div class="mobile-wheel-picker" data-mobile-wheel="${kind}">
+      <button id="mobile-${kind}-trigger" class="mobile-wheel-trigger" type="button" aria-haspopup="listbox" aria-controls="mobile-${kind}-wheel" aria-expanded="false" aria-label="Choose ${kind}, ${label} selected" data-wheel-trigger><span id="mobile-${kind}-icon" class="mobile-wheel-icon">${icon(glyph)}</span><span class="${kind === 'brush' ? 'sr-only' : 'mobile-tool-value'}"><span>${kind === 'brush' ? 'Brush' : 'Action'}</span><strong id="mobile-${kind}-value">${label}</strong></span></button>
+      <div class="mobile-wheel-panel instrument" data-wheel-panel hidden>
+        <div id="mobile-${kind}-wheel" class="wheel-drum" role="listbox" tabindex="0" aria-label="${kind === 'brush' ? 'Brush' : 'Action'} wheel" aria-describedby="mobile-wheel-help">
+          ${choices.map(([value, glyph, label]) => `<button id="mobile-${kind}-${value}" type="button" role="option" tabindex="-1" data-wheel-value="${value}" aria-selected="${value === selected}" ${value === 'pattern' ? 'disabled aria-disabled="true"' : ''}>${icon(glyph)}<span>${label}</span></button>`).join('')}
+        </div>
+      </div>
+    </div>`
+  }
+  const operationButtons = (mobile = false) => `
+    <button type="button" data-auxiliary="pick" aria-pressed="false" title="Eyedropper (Alt-click)">${icon('pick')}<span>${mobile ? 'Eyedropper' : 'Pick'}</span></button>
+    <button ${mobile ? 'data-mobile-layer-trigger' : 'id="layer-tool-trigger"'} type="button" data-secondary-tool="layer" popovertarget="layer-panel" aria-pressed="false" title="Layers">${icon('layers')}<span>Layer</span></button>`
+  const mirrorButtons = (['x', 'y', 'z'] as const).map((axis, index) => `<button type="button" class="axis-button" data-mirror="${axis}" aria-label="Mirror ${axis.toUpperCase()}" aria-pressed="false" title="Mirror ${axis.toUpperCase()} (${index + 1})">${axis.toUpperCase()}</button>`).join('')
+  const wholeAxisButtons = (['x', 'y', 'z'] as const).map((axis, index) => `<button type="button" class="axis-button" data-whole-axis="${axis}" aria-label="Whole ${axis.toUpperCase()} axis" aria-pressed="false" title="Whole ${axis.toUpperCase()} axis (Ctrl/Command ${index + 1})">${axis.toUpperCase()}</button>`).join('')
+  const clipboardButtons = (mobile = false) => `
+    <button type="button" data-clipboard-action="cut" aria-label="Cut" title="Cut (Ctrl/Command X)">${icon('cut')}${mobile ? '<span>Cut</span>' : ''}</button>
+    <button type="button" data-clipboard-action="copy" aria-label="Copy" title="Copy (Ctrl/Command C)">${icon('copy')}${mobile ? '<span>Copy</span>' : ''}</button>
+    <button type="button" data-clipboard-action="paste" aria-label="Paste" title="Paste (Ctrl/Command V)">${icon('paste')}${mobile ? '<span>Paste</span>' : ''}</button>`
+  const materialButton = (mobile = false) => `<button class="active-swatch deck-swatch" type="button" data-action="palette" aria-label="Open active material in palette">${materialCube}${mobile ? '<span>Palette</span>' : ''}</button>`
+
   return `
 
-    <main class="model-editor" data-render-mode="false" data-tool="select">
+    <main class="model-editor" data-render-mode="false" data-tool="attach">
       ${externalViewport ? '' : '<div id="viewport" class="viewport"></div>'}
 
       <div class="top-chrome" role="toolbar" aria-label="Project controls">
@@ -36,7 +64,7 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
           <button type="button" data-action="undo" aria-label="Undo" title="Undo (Ctrl/Command Z)">${icon('undo')}</button>
           <button type="button" data-action="redo" aria-label="Redo" title="Redo (Ctrl/Command Shift Z)">${icon('redo')}</button>
           <span class="instrument-rule"></span>
-          <button type="button" data-action="frame" aria-label="Frame model" title="Frame model (F)">${icon('frame')}</button>
+          <button type="button" data-action="frame" aria-label="Frame model" title="Frame model">${icon('frame')}</button>
           <button type="button" data-action="render" aria-label="Toggle render mode" aria-pressed="false" title="Render mode">${icon('render')}</button>
           <button type="button" data-action="panel" aria-label="Open stage settings" aria-expanded="false" title="Stage settings">${icon('sliders')}</button>
         </div>
@@ -45,8 +73,8 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
       <section id="welcome" class="welcome-panel instrument" aria-labelledby="welcome-title">
         <button type="button" class="welcome-close" data-action="dismiss-guide" aria-label="Dismiss guide">${icon('close')}</button>
         <span class="welcome-cube" aria-hidden="true">${icon('logo')}</span>
-        <h1 id="welcome-title">Choose how you shape.</h1>
-        <p>Select, place, sculpt, or switch layers with one focused tool at a time.</p>
+        <h1 id="welcome-title">Action meets brush.</h1>
+        <p>Choose what happens, then choose the shape. Attach with Box is ready.</p>
         <button type="button" class="primary" data-action="dismiss-guide">Start shaping</button>
       </section>
 
@@ -61,74 +89,54 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
       </div>
 
       <div id="context-dock" class="context-dock instrument">
-        <div class="context-summary"><strong id="context-title">Select</strong><span id="context-copy">Click a connected surface.</span></div>
-        <div id="fill-options" class="tool-options fill-options" role="group" aria-label="Fill shape" hidden>
-          <button type="button" data-fill-shape="box" aria-label="Box fill" aria-pressed="true">${icon('box')}<span>Box</span></button>
-          <button type="button" data-fill-shape="sphere" aria-label="Sphere fill" aria-pressed="false">${icon('sphere')}<span>Sphere</span></button>
-          <button type="button" data-fill-shape="cylinder" aria-label="Cylinder fill" aria-pressed="false">${icon('cylinder')}<span>Cylinder</span></button>
-          <label class="fill-depth" title="Depth for Space or Enter fills; dragging uses two 3D corners"><span>Key depth</span><input id="fill-depth" type="number" min="1" max="256" value="1" inputmode="numeric" aria-label="Keyboard fill depth"></label>
-        </div>
+        <div class="context-summary"><strong id="context-title">Attach · Box</strong><span id="context-copy">Drag between surface or guide-grid cells to span X, Y, and Z.</span></div>
       </div>
 
-      <aside id="select-tool-popup" class="tool-popup instrument" popover aria-labelledby="select-popup-title">
-        <header><strong id="select-popup-title">Select mode</strong><span>Choose what a gesture resolves</span></header>
-        <div class="tool-mode-list" role="group" aria-label="Select mode">
-          <button type="button" data-selection-mode="point" aria-pressed="true"><span><strong>Point</strong><small>One voxel or a box drag</small></span><kbd>Q 1</kbd></button>
-          <button type="button" data-selection-mode="surface" aria-pressed="false"><span><strong>Surface</strong><small>Connected exposed faces</small></span><kbd>Q 2</kbd></button>
-          <button type="button" data-selection-mode="texture" aria-pressed="false"><span><strong>Texture</strong><small>Contiguous voxels with one texture</small></span><kbd>Q 3</kbd></button>
-          <button type="button" data-selection-mode="body" aria-pressed="false"><span><strong>Body</strong><small>One contiguous voxel body</small></span><kbd>Q 4</kbd></button>
+      <nav class="tool-dock edit-deck desktop-tool-deck instrument" aria-label="Voxel editing tools">
+        <div class="deck-strip action-strip" role="group" aria-label="Actions">
+          <span class="deck-label">Action</span>
+          ${actionButtons}
+          <span class="deck-divider"></span>
+          ${operationButtons()}
         </div>
-        <div class="popup-actions">
-          <span class="popup-section-label">Clipboard</span>
-          <div class="tool-mode-list" role="group" aria-label="Clipboard actions">
-            <button type="button" data-clipboard-action="cut" aria-keyshortcuts="Control+X Meta+X">${icon('cut')}<span><strong>Cut</strong><small>Remove and hold selection</small></span><kbd>⌘/Ctrl X</kbd></button>
-            <button type="button" data-clipboard-action="copy" aria-keyshortcuts="Control+C Meta+C">${icon('copy')}<span><strong>Copy</strong><small>Hold a duplicate of selection</small></span><kbd>⌘/Ctrl C</kbd></button>
-            <button type="button" data-clipboard-action="paste" aria-keyshortcuts="Control+V Meta+V">${icon('paste')}<span><strong>Paste</strong><small>Place with the Move tool</small></span><kbd>⌘/Ctrl V</kbd></button>
-          </div>
-        </div>
-      </aside>
-
-      <aside id="paint-tool-popup" class="tool-popup instrument" popover aria-labelledby="paint-popup-title">
-        <header><strong id="paint-popup-title">Volume operation</strong><span>Paint, fill, or remove voxels</span></header>
-        <div class="tool-mode-list" role="group" aria-label="Volume operation">
-          <button type="button" data-paint-mode="paint" aria-pressed="true">${icon('paint')}<span><strong>Paint</strong><small>Use the current Select scope</small></span><kbd>W 1</kbd></button>
-          <button type="button" data-paint-mode="fill" aria-pressed="false">${icon('fill')}<span><strong>Fill</strong><small>Create a solid voxel volume</small></span><kbd>W 2</kbd></button>
-          <button type="button" data-auxiliary="pick" aria-pressed="false">${icon('pick')}<span><strong>Eyedropper</strong><small>Pick material from a voxel</small></span><kbd>W 3</kbd></button>
-          <button type="button" data-sculpt-mode="erase" aria-pressed="false">${icon('erase')}<span><strong>Erase</strong><small>Remove the resolved selection</small></span><kbd>W 4</kbd></button>
-        </div>
-        <div class="popup-materials">
-          <span class="popup-section-label">Material</span>
-          <button class="active-swatch popup-active-material" type="button" data-action="palette" aria-label="Open palette">${materialCube}<span><strong id="paint-material-name">Gold</strong><small id="paint-material-value">#F2C14E</small></span>${icon('chevron')}</button>
-          <div id="paint-quick-palette" class="quick-palette popup-material-grid" role="group" aria-label="Recent materials"></div>
-        </div>
-      </aside>
-
-      <aside id="sculpt-tool-popup" class="tool-popup instrument" popover aria-labelledby="sculpt-popup-title">
-        <header><strong id="sculpt-popup-title">Sculpt mode</strong><span>Choose how the model changes</span></header>
-        <div class="tool-mode-list" role="group" aria-label="Sculpt mode">
-          <button type="button" data-sculpt-mode="push" aria-pressed="true">${icon('push')}<span><strong>Push/Pull</strong><small>Add or remove complete layers</small></span><kbd>S 1</kbd></button>
-          <button type="button" data-sculpt-mode="move" aria-pressed="false">${icon('move')}<span><strong>Move</strong><small>Translate the current selection</small></span><kbd>S 2</kbd></button>
-        </div>
-      </aside>
-
-      <nav class="tool-dock instrument" aria-label="Voxel tools">
-        <div class="tool-slot">
-          <button type="button" class="tool-expand" data-tool-popup="select" popovertarget="select-tool-popup" aria-label="Expand Select options" title="Select options">${icon('chevron')}</button>
-          <button type="button" data-tool="select" aria-pressed="false">${icon('select')}<span class="tool-label"><strong>Select</strong><small id="select-tool-mode">Point</small></span><kbd>Q</kbd></button>
-        </div>
-        <div class="tool-slot">
-          <button type="button" class="tool-expand" data-tool-popup="paint" popovertarget="paint-tool-popup" aria-label="Expand Volume options" title="Volume options">${icon('chevron')}</button>
-          <button type="button" data-tool="paint" aria-pressed="false">${icon('paint')}<span class="tool-label"><strong>Volume</strong><small><i id="paint-tool-swatch"></i><span id="paint-tool-mode">Paint</span></small></span><kbd>W</kbd></button>
-        </div>
-        <div class="tool-slot">
-          <button type="button" class="tool-expand" data-tool-popup="sculpt" popovertarget="sculpt-tool-popup" aria-label="Expand Sculpt options" title="Sculpt options">${icon('chevron')}</button>
-          <button type="button" data-tool="sculpt" aria-pressed="false">${icon('push')}<span class="tool-label"><strong>Sculpt</strong><small id="sculpt-tool-mode">Push/Pull</small></span><kbd>S</kbd></button>
-        </div>
-        <div class="tool-slot">
-          <button type="button" class="tool-expand" data-tool-popup="layer" popovertarget="layer-panel" aria-label="Expand Layer options" title="Layer options">${icon('chevron')}</button>
-          <button type="button" data-tool="layer" aria-pressed="false">${icon('layers')}<span class="tool-label"><strong>Layer</strong><small id="layer-tool-mode">Layer 1</small></span><kbd>R</kbd></button>
+        <div class="deck-strip brush-strip" role="group" aria-label="Brushes and modifiers">
+          <span class="deck-label">Brush</span>
+          ${brushButtons}
+          <span class="deck-divider"></span>
+          <span class="axis-group" role="group" aria-label="Mirror axes"><span>${icon('mirror')}<b>Mirror</b></span>${mirrorButtons}</span>
+          <span class="axis-group" role="group" aria-label="Whole axes"><span>${icon('axis')}<b>Axis</b></span>${wholeAxisButtons}</span>
+          <span class="deck-divider"></span>
+          <span class="clipboard-group" role="group" aria-label="Clipboard">
+            ${clipboardButtons()}
+          </span>
+          ${materialButton()}
         </div>
       </nav>
+
+      <nav class="tool-dock mobile-tool-shelf instrument" aria-label="Current voxel tools">
+        <div class="mobile-tool-summary" role="group" aria-label="Retained action and brush">
+          ${mobileWheel('brush', brushes, 'box')}
+          ${mobileWheel('action', actions, 'attach')}
+          <button class="all-tools-trigger" type="button" popovertarget="all-tools-panel" aria-label="Open all tools">${icon('sliders')}<span><strong>All tools</strong><small id="mobile-operation-value" hidden></small></span></button>
+        </div>
+        <span id="mobile-wheel-help" class="sr-only">Swipe up or down, then release to choose. Or use arrow keys and Enter. Escape cancels.</span>
+      </nav>
+
+      <aside id="all-tools-panel" class="tool-popup all-tools-panel instrument" popover aria-labelledby="all-tools-title">
+        <header>
+          <div><strong id="all-tools-title">All tools</strong><span>Shape, select, and transform</span></div>
+          <button type="button" popovertarget="all-tools-panel" popovertargetaction="hide" aria-label="Close all tools">${icon('close')}</button>
+        </header>
+        <div class="all-tools-body">
+          <section class="all-tools-group" aria-labelledby="all-tools-action-title"><h2 id="all-tools-action-title">Action</h2><div class="all-tools-grid" role="group" aria-labelledby="all-tools-action-title">${actionButtons}</div></section>
+          <section class="all-tools-group brush-tools-group" aria-labelledby="all-tools-brush-title"><h2 id="all-tools-brush-title">Brush</h2><div class="all-tools-grid" role="group" aria-labelledby="all-tools-brush-title">${brushButtons}</div></section>
+          <section class="all-tools-group utility-tools-group" aria-labelledby="all-tools-utilities-title"><h2 id="all-tools-utilities-title">Utilities</h2><div class="all-tools-grid" role="group" aria-labelledby="all-tools-utilities-title">${operationButtons(true)}</div></section>
+          <section class="all-tools-group axis-tools-group" aria-labelledby="all-tools-mirror-title"><h2 id="all-tools-mirror-title">Mirror axes</h2><div class="all-tools-grid" role="group" aria-labelledby="all-tools-mirror-title">${mirrorButtons}</div></section>
+          <section class="all-tools-group axis-tools-group" aria-labelledby="all-tools-axis-title"><h2 id="all-tools-axis-title">Whole axes</h2><div class="all-tools-grid" role="group" aria-labelledby="all-tools-axis-title">${wholeAxisButtons}</div></section>
+          <section class="all-tools-group clipboard-tools-group" aria-labelledby="all-tools-clipboard-title"><h2 id="all-tools-clipboard-title">Clipboard</h2><div class="all-tools-grid" role="group" aria-labelledby="all-tools-clipboard-title">${clipboardButtons(true)}</div></section>
+          <section class="all-tools-group material-tools-group" aria-labelledby="all-tools-material-title"><h2 id="all-tools-material-title">Material</h2><div class="all-tools-grid" role="group" aria-labelledby="all-tools-material-title">${materialButton(true)}</div></section>
+        </div>
+      </aside>
 
       <aside id="layer-panel" class="layer-panel instrument" popover aria-labelledby="layer-panel-title">
         <header>

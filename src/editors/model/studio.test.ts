@@ -7,6 +7,69 @@ import { DEFAULT_SETTINGS } from '../../shared/rendering/settings'
 const settings = { ...DEFAULT_SETTINGS }
 
 describe('studio command kernel', () => {
+  test('tracks actions, brushes and axis modifiers while mapping legacy tools', () => {
+    const studio = new Studio(new VoxelDocument(), settings)
+    expect(studio.stateSnapshot().editor).toMatchObject({ action: 'attach', brush: 'box', activeTool: 'paint', paintMode: 'fill' })
+
+    studio.execute({ type: 'tool.action', action: 'erase' })
+    studio.execute({ type: 'tool.brush', brush: 'line' })
+    studio.execute({ type: 'tool.mirror', axis: 'x' })
+    studio.execute({ type: 'tool.wholeAxis', axis: 'z', enabled: true })
+    expect(studio.stateSnapshot().editor).toMatchObject({
+      action: 'erase', brush: 'line', mirrors: { x: true, y: false, z: false }, wholeAxes: { x: false, y: false, z: true }, activeTool: 'sculpt', sculptMode: 'erase',
+    })
+
+    studio.execute({ type: 'tool.set', tool: 'paint' })
+    studio.execute({ type: 'tool.paintMode', mode: 'fill' })
+    expect(studio.stateSnapshot().editor).toMatchObject({ action: 'paint', secondaryTool: 'fill', activeTool: 'paint', paintMode: 'fill' })
+
+    studio.execute({ type: 'tool.action', action: 'attach' })
+    studio.execute({ type: 'tool.secondary', tool: 'layer' })
+    studio.execute({ type: 'tool.brush', brush: 'line' })
+    expect(studio.stateSnapshot().editor).toMatchObject({ action: 'attach', brush: 'line', secondaryTool: null, activeTool: 'paint', paintMode: 'fill' })
+    studio.execute({ type: 'tool.auxiliary', tool: 'pick' })
+    studio.execute({ type: 'tool.brush', brush: 'line' })
+    expect(studio.stateSnapshot().editor).toMatchObject({ auxiliaryTool: null, activeTool: 'paint' })
+
+    studio.execute({ type: 'tool.secondary', tool: 'texture' })
+    expect(studio.stateSnapshot().editor).toMatchObject({ action: 'select', brush: 'texture', secondaryTool: null, activeTool: 'select', selectionMode: 'texture' })
+    studio.execute({ type: 'tool.brush', brush: 'body' })
+    expect(studio.stateSnapshot().editor).toMatchObject({ action: 'select', brush: 'body', secondaryTool: null, activeTool: 'select', selectionMode: 'body' })
+    studio.execute({ type: 'tool.selectionMode', mode: 'point' })
+    expect(studio.stateSnapshot().editor).toMatchObject({ action: 'select', brush: 'voxel', secondaryTool: null, activeTool: 'select', selectionMode: 'point' })
+  })
+
+  test('applies empty and occupied write scopes as single undoable edits', () => {
+    const document = new VoxelDocument()
+    document.setVoxel(1, 1, 1, 5)
+    const studio = new Studio(document, settings)
+
+    expect(studio.execute({ type: 'edit.setVoxels', scope: 'empty', voxels: [
+      { x: 1, y: 1, z: 1, color: 6 }, { x: 2, y: 1, z: 1, color: 6 },
+    ] }).result.voxelCount).toBe(1)
+    expect(document.getVoxel(1, 1, 1)).toBe(5)
+    expect(document.getVoxel(2, 1, 1)).toBe(6)
+
+    expect(studio.execute({ type: 'edit.paint', scope: 'occupied', cells: [{ x: 1, y: 1, z: 1 }, { x: 3, y: 1, z: 1 }], color: 7 }).result.voxelCount).toBe(1)
+    expect(document.getVoxel(1, 1, 1)).toBe(7)
+    expect(document.getVoxel(3, 1, 1)).toBe(0)
+    studio.execute({ type: 'history.undo' })
+    expect(document.getVoxel(1, 1, 1)).toBe(5)
+
+    const chunks = document.chunks.size
+    expect(studio.execute({ type: 'edit.fill', min: { x: 16, y: 16, z: 16 }, max: { x: 20, y: 20, z: 20 }, shape: 'box', scope: 'occupied' }).changed).toBe(false)
+    expect(document.chunks.size).toBe(chunks)
+  })
+
+  test('enables Pattern only after copying a selection', () => {
+    const studio = new Studio(new VoxelDocument(), settings)
+    expect(() => studio.execute({ type: 'tool.brush', brush: 'pattern' })).toThrow(StudioCommandError)
+    studio.execute({ type: 'edit.setVoxels', voxels: [{ x: 1, y: 1, z: 1, color: 5 }] })
+    studio.execute({ type: 'selection.set', cells: [{ x: 1, y: 1, z: 1 }] })
+    studio.execute({ type: 'clipboard.copy' })
+    expect(studio.execute({ type: 'tool.brush', brush: 'pattern' })).toMatchObject({ changed: true, result: { brush: 'pattern' } })
+  })
+
   test('miniature settings preview and save without changing render mode, projection or voxel history', () => {
     const studio = new Studio(new VoxelDocument(), settings)
     const original = studio.document

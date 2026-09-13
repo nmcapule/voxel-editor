@@ -2,6 +2,7 @@ import './style.css'
 import { icon } from '../../shared/ui/icons'
 import { materialCube, modelMarkup } from './ui'
 import { bindToolPopups } from './tool-popups'
+import { bindMobileWheels } from './mobile-wheels'
 import { escapeHtml, listen } from '../../shared/ui/dom'
 import { DEFAULT_SETTINGS, type ViewSettings } from '../../shared/rendering/settings'
 import { StudioCommandError } from '../../shared/errors'
@@ -12,6 +13,8 @@ import { SerialCommandQueue, type RemoteCommand } from './protocol'
 import { VoxelRenderer } from './renderer'
 import { type CameraSnapshot, type ModelPreviewPlugin } from '../../shared/rendering/contracts'
 import { Studio, type AuxiliaryTool, type PaintMode, type PbrMap, type SculptMode, type SelectionMode, type SelectionState, type StudioCommand, type StudioEffects, type StudioOutcome, type Tool } from './studio'
+import type { AxisToggles, BrushMode, ModelAction } from './brush'
+import type { SecondaryTool } from './studio'
 import { loadProject, saveProjectSnapshot, snapshotProject } from './storage'
 import { type LibraryLink } from '../../shared/library/types'
 import { exportVox, importVox, VOX_EXPORT_WARNING } from '../../shared/voxel/vox'
@@ -77,12 +80,17 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
   const isSelectionMode = (value: unknown): value is SelectionMode => typeof value === 'string' && ['point', 'surface', 'texture', 'body'].includes(value)
   const isPaletteColor = (value: unknown): value is number => voxelDocument.hasPaletteColor(value)
   const defaultActiveColor = voxelDocument.hasPaletteColor(5) ? 5 : Math.max(1, voxelDocument.palette.findIndex((_color, index) => voxelDocument.hasPaletteColor(index)))
-  let activeTool: Tool = 'select'
-  let paintMode: PaintMode = 'paint'
+  let activeTool: Tool = 'paint'
+  let paintMode: PaintMode = 'fill'
   let sculptMode: SculptMode = 'push'
   let fillShape: FillShape = 'box'
   let fillDepth = 1
   let auxiliaryTool: AuxiliaryTool | undefined
+  let action: ModelAction = 'attach'
+  let brush: BrushMode = 'box'
+  let mirrors: AxisToggles = { x: false, y: false, z: false }
+  let wholeAxes: AxisToggles = { x: false, y: false, z: false }
+  let secondaryTool: SecondaryTool | undefined
   let selectionMode: SelectionMode = isSelectionMode(storedToolState.selectionMode) ? storedToolState.selectionMode : 'point'
   let activeColor = isPaletteColor(storedToolState.activeColor) ? storedToolState.activeColor : defaultActiveColor
   let paletteView: 'grid' | 'list' = readLocalStorage('voxel-studio-palette-view') === 'list' ? 'list' : 'grid'
@@ -105,26 +113,52 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
   // Erase uses the sculpt engine but belongs to Volume in the palette.
   const sessionTools = new WeakMap<Studio, { volume: PaintMode | 'erase'; sculpt: Exclude<SculptMode, 'erase'> }>()
 
+  function syncRendererTools(reason: RemoteCommand | 'document' | 'session' | 'initial') {
+    if (typeof renderer.setBrushState === 'function') {
+      renderer.setBrushState(action, brush, mirrors, wholeAxes, secondaryTool, clipboard)
+      renderer.setAuxiliary(auxiliaryTool)
+      return
+    }
+    if (reason === 'initial') {
+      renderer.setSelectionMode(selectionMode)
+      renderer.setToolState(activeTool, paintMode, auxiliaryTool)
+    } else if (reason === 'session') {
+      renderer.setToolState(activeTool, paintMode, auxiliaryTool)
+      renderer.setSculptMode(sculptMode)
+      renderer.setSelectionMode(selectionMode)
+    } else if (reason !== 'document') {
+      if (reason.type === 'tool.set' || reason.type === 'tool.paintMode' || reason.type === 'tool.auxiliary' || reason.type === 'clipboard.paste.begin') renderer.setToolState(activeTool, paintMode, auxiliaryTool)
+      if (reason.type === 'tool.sculptMode' || reason.type === 'clipboard.paste.begin') renderer.setSculptMode(sculptMode)
+      if (reason.type === 'tool.selectionMode') renderer.setSelectionMode(selectionMode)
+    }
+  }
+
   app.innerHTML = modelMarkup(Boolean(options.viewportRoot), options.menuActions)
 
   const studio = app.querySelector<HTMLElement>('.model-editor')!
   const projectName = app.querySelector<HTMLInputElement>('#project-name')!
   const stagePanel = app.querySelector<HTMLElement>('#stage-panel')!
   const layerPanel = app.querySelector<HTMLElement>('#layer-panel')!
+  const allToolsPanel = app.querySelector<HTMLElement>('#all-tools-panel')!
+  const allToolsTrigger = app.querySelector<HTMLButtonElement>('.all-tools-trigger')!
+  const mobileActionValue = app.querySelector<HTMLElement>('#mobile-action-value')!
+  const mobileBrushValue = app.querySelector<HTMLElement>('#mobile-brush-value')!
+  const mobileBrushTrigger = app.querySelector<HTMLButtonElement>('#mobile-brush-trigger')!
+  const mobileBrushIcon = app.querySelector<HTMLElement>('#mobile-brush-icon')!
+  const mobileActionTrigger = app.querySelector<HTMLButtonElement>('#mobile-action-trigger')!
+  const mobileActionIcon = app.querySelector<HTMLElement>('#mobile-action-icon')!
+  const mobileOperationValue = app.querySelector<HTMLElement>('#mobile-operation-value')!
   const toast = app.querySelector<HTMLElement>('#toast')!
   const announcer = app.querySelector<HTMLElement>('#announcer')!
   const welcome = app.querySelector<HTMLElement>('#welcome')!
   const saveStatus = app.querySelector<HTMLElement>('#save-status')!
   const resizeForm = app.querySelector<HTMLFormElement>('#resize-form')!
   const fileInput = app.querySelector<HTMLInputElement>('#file-input')!
-  const fillOptions = app.querySelector<HTMLElement>('#fill-options')!
   const layerList = app.querySelector<HTMLElement>('#layer-list')!
   const layerCounts = new Map<number, number>()
   const toolPopups = [...app.querySelectorAll<HTMLElement>('.tool-popup, .layer-panel')]
   const resetToolPopups = bindToolPopups(app, lifetime.signal, () => visible && !disposed && !disposal && !renderMode && !options.busy?.())
   let toastTimer: ReturnType<typeof setTimeout> | undefined
-  let shortcutPrefix: 'q' | 'w' | 's' | undefined
-  let shortcutTimer: ReturnType<typeof setTimeout> | undefined
 
   if (readLocalStorage('voxel-studio-guide') === 'seen') welcome.hidden = true
 
@@ -217,6 +251,11 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     fillShape = studioController.fillShape
     fillDepth = studioController.fillDepth
     auxiliaryTool = studioController.auxiliaryTool
+    action = studioController.action
+    brush = studioController.brush
+    mirrors = studioController.mirrors
+    wholeAxes = studioController.wholeAxes
+    secondaryTool = studioController.secondaryTool
     selectionMode = studioController.selectionMode
     activeColor = studioController.activeColor
     recentColors = studioController.recentColors
@@ -244,10 +283,11 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
   function applyStudioEffects(command: RemoteCommand, outcome: StudioOutcome, source: CommandSource) {
     if (disposed) return
     const effects = outcome.effects
+    if (effects.toolsChanged || effects.documentReplaced) closeMobileWheels()
     if (effects.documentReplaced || effects.dirtyChunks?.length) renderer.viewport.trackEdit()
     syncStudioState(command)
-    if (command.type === 'tool.set' || command.type === 'tool.paintMode' || command.type === 'tool.auxiliary' || command.type === 'clipboard.paste.begin') {
-      renderer.setToolState(activeTool, paintMode, auxiliaryTool)
+    if (command.type.startsWith('tool.') || command.type.startsWith('clipboard.')) {
+      syncRendererTools(command)
     } else if (outcome.changed && (command.type.startsWith('layer.') || command.type.startsWith('history.'))) renderer.refreshLayerScope()
     if (effects.documentReplaced && command.type !== 'document.resize') {
       libraryLink = undefined
@@ -261,6 +301,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
       if (effects.clearPbrMaps) sessionMaps.get(studioController)?.clear()
       renderer.setDocument(voxelDocument, effects.preserveMaterials)
       renderer.setActiveColor(activeColor)
+      syncRendererTools('document')
     } else {
       if (effects.dirtyChunks) renderer.markDirty(effects.dirtyChunks)
       if (effects.paletteChanged) renderer.updatePalette()
@@ -269,8 +310,6 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     if (effects.settingsChanged) renderer.setSettings(settings)
     if (effects.activeColorChanged) renderer.setActiveColor(activeColor)
     if (effects.selectionChanged && !(source === 'renderer' && command.type === 'selection.set') && !effects.documentReplaced) renderer.applySelection(selection, effects.selectionFocus)
-    if (command.type === 'tool.sculptMode' || command.type === 'clipboard.paste.begin') renderer.setSculptMode(sculptMode)
-    if (command.type === 'tool.selectionMode') renderer.setSelectionMode(selectionMode)
     if (command.type === 'tool.fill') { renderer.setFillShape(fillShape); renderer.setFillDepth(fillDepth) }
     if (command.type === 'renderMode.set') {
       closeToolPopups()
@@ -505,25 +544,14 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     app.querySelector<HTMLInputElement>('#color-input')!.value = value
     app.querySelector<HTMLInputElement>('#hex-input')!.value = value.toUpperCase()
     app.querySelector<HTMLInputElement>('#material-name')!.value = activeMaterial.name
-    app.querySelector('#paint-material-name')!.textContent = activeMaterial.name
-    app.querySelector('#paint-material-value')!.textContent = value.toUpperCase()
-    app.querySelector<HTMLElement>('#paint-tool-swatch')!.style.background = value
+    const paintMaterialName = app.querySelector('#paint-material-name')
+    const paintMaterialValue = app.querySelector('#paint-material-value')
+    const paintToolSwatch = app.querySelector<HTMLElement>('#paint-tool-swatch')
+    if (paintMaterialName) paintMaterialName.textContent = activeMaterial.name
+    if (paintMaterialValue) paintMaterialValue.textContent = value.toUpperCase()
+    if (paintToolSwatch) paintToolSwatch.style.background = value
     renderMaterialPreview()
     renderToolControls()
-  }
-
-  const toolCopy: Record<Tool, [string, string]> = {
-    select: ['Select', 'Choose voxels before changing them.'],
-    paint: ['Volume', 'Paint, fill, or remove voxels.'],
-    sculpt: ['Sculpt', 'Reshape the current selection.'],
-    layer: ['Layer', 'Choose the active layer from the model.'],
-  }
-
-  const selectionCopy: Record<SelectionMode, string> = {
-    point: 'Click one voxel or drag a 3D box.',
-    surface: 'Click a connected exposed surface.',
-    texture: 'Click contiguous voxels with the same texture.',
-    body: 'Click a contiguous voxel body.',
   }
 
   const selectionLabels: Record<SelectionMode, string> = {
@@ -532,28 +560,39 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     texture: 'Texture',
     body: 'Body',
   }
-
-  const paintLabels: Record<PaintMode, string> = {
-    paint: 'Paint',
-    fill: 'Fill',
-  }
-
-  const sculptCopy: Record<SculptMode, [string, string]> = {
-    push: ['Push/Pull', 'Drag along a face normal to add or remove complete layers.'],
-    move: ['Move', 'Drag along a face normal. Overlapping voxels are replaced on release.'],
-    erase: ['Erase', 'Remove the resolved selection.'],
-  }
+  const brushIcons: Record<BrushMode, string> = { voxel: 'voxel', face: 'face', box: 'box', line: 'line', center: 'center', texture: 'pattern', body: 'box', pattern: 'pattern' }
 
   function renderToolControls() {
-    const retained = retainedTools()
-    const category = auxiliaryTool || activeTool === 'sculpt' && sculptMode === 'erase' ? 'paint' : activeTool
-    studio.dataset.tool = category
-    app.querySelector('#context-title')!.textContent = auxiliaryTool ? 'Eyedropper' : toolCopy[category][0]
-    app.querySelectorAll<HTMLButtonElement>('button[data-tool]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.tool === category)))
-    app.querySelectorAll<HTMLButtonElement>('[data-selection-mode]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.selectionMode === selectionMode)))
-    app.querySelectorAll<HTMLButtonElement>('[data-paint-mode]').forEach(button => button.setAttribute('aria-pressed', String(!auxiliaryTool && button.dataset.paintMode === retained.volume)))
-    app.querySelectorAll<HTMLButtonElement>('[data-sculpt-mode]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.sculptMode === 'erase' ? !auxiliaryTool && retained.volume === 'erase' : button.dataset.sculptMode === retained.sculpt)))
-    app.querySelectorAll<HTMLButtonElement>('[data-fill-shape]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.fillShape === fillShape)))
+    studio.dataset.tool = action
+    const secondaryLabels: Record<SecondaryTool, string> = { push: 'Push/Pull', fill: 'Fill volume', layer: 'Layers', texture: 'Texture select', body: 'Body select' }
+    const actionLabel = action[0].toUpperCase() + action.slice(1)
+    const brushLabel = brush[0].toUpperCase() + brush.slice(1)
+    const operationLabel = auxiliaryTool ? 'Eyedropper' : secondaryTool ? secondaryLabels[secondaryTool] : ''
+    const title = operationLabel || `${actionLabel} · ${brushLabel}`
+    app.querySelector('#context-title')!.textContent = title
+    mobileActionValue.textContent = actionLabel
+    mobileBrushValue.textContent = brushLabel
+    mobileBrushIcon.innerHTML = icon(brushIcons[brush])
+    mobileBrushTrigger.setAttribute('aria-label', `Choose brush, ${brushLabel} selected`)
+    mobileActionIcon.innerHTML = icon(action)
+    mobileActionTrigger.setAttribute('aria-label', `Choose action, ${actionLabel} selected`)
+    mobileOperationValue.textContent = operationLabel
+    mobileOperationValue.hidden = !operationLabel
+    allToolsTrigger.dataset.activeOperation = String(Boolean(operationLabel))
+    allToolsTrigger.setAttribute('aria-label', operationLabel ? `Open all tools, ${operationLabel} active` : 'Open all tools')
+    app.querySelectorAll<HTMLButtonElement>('[data-model-action]').forEach(button => button.setAttribute('aria-pressed', String(!secondaryTool && !auxiliaryTool && button.dataset.modelAction === action)))
+    app.querySelectorAll<HTMLButtonElement>('[data-brush]').forEach(button => {
+      button.setAttribute('aria-pressed', String(!secondaryTool && button.dataset.brush === brush))
+      button.disabled = button.dataset.brush === 'pattern' && !clipboard.length
+    })
+    app.querySelectorAll<HTMLButtonElement>('[data-wheel-value]').forEach(button => {
+      button.setAttribute('aria-selected', String(button.dataset.wheelValue === brush || button.dataset.wheelValue === action))
+      button.disabled = button.dataset.wheelValue === 'pattern' && !clipboard.length
+      button.setAttribute('aria-disabled', String(button.disabled))
+    })
+    app.querySelectorAll<HTMLButtonElement>('[data-secondary-tool]').forEach(button => button.setAttribute('aria-pressed', String(!auxiliaryTool && button.dataset.secondaryTool === secondaryTool)))
+    app.querySelectorAll<HTMLButtonElement>('[data-mirror]').forEach(button => button.setAttribute('aria-pressed', String(mirrors[button.dataset.mirror as keyof AxisToggles])))
+    app.querySelectorAll<HTMLButtonElement>('[data-whole-axis]').forEach(button => button.setAttribute('aria-pressed', String(wholeAxes[button.dataset.wholeAxis as keyof AxisToggles])))
     app.querySelectorAll<HTMLButtonElement>('[data-auxiliary]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.auxiliary === auxiliaryTool)))
     const editable = voxelDocument.activeLayer.visible && !voxelDocument.activeLayer.locked
     app.querySelectorAll<HTMLButtonElement>('[data-clipboard-action]').forEach(button => {
@@ -561,21 +600,21 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
       button.disabled = action === 'paste' ? selection.floating === true || !clipboard.length || !editable
         : selection.floating === true || !selection.count || action === 'cut' && !editable
     })
-    fillOptions.hidden = activeTool !== 'paint' || paintMode !== 'fill' || Boolean(auxiliaryTool)
-    app.querySelector('#select-tool-mode')!.textContent = selectionLabels[selectionMode]
-    app.querySelector('#paint-tool-mode')!.textContent = auxiliaryTool ? 'Eyedropper' : retained.volume === 'erase' ? 'Erase' : retained.volume === 'paint' ? voxelDocument.materials[activeColor].name : paintLabels[retained.volume]
-    app.querySelector('#sculpt-tool-mode')!.textContent = sculptCopy[retained.sculpt][0]
-    app.querySelector('#layer-tool-mode')!.textContent = voxelDocument.activeLayer.name
-    app.querySelector('button[data-tool="paint"] > svg')!.outerHTML = icon(auxiliaryTool ? 'pick' : retained.volume)
-    app.querySelector('button[data-tool="sculpt"] > svg')!.outerHTML = icon(retained.sculpt)
     const count = formatNumber(selection.count)
     const copy = selection.floating ? `${count} pasted ${selection.count === 1 ? 'voxel' : 'voxels'} · drag to place or press Escape to cancel`
       : auxiliaryTool === 'pick' ? 'Choose a color directly from the model.'
-      : activeTool === 'select' ? selection.count ? `${count} selected` : selectionCopy[selectionMode]
-      : activeTool === 'paint' && paintMode === 'fill' ? `${fillShape} · drag between opposite 3D corners on the model or guide grids`
-      : activeTool === 'paint' ? selection.count ? `${count} selected · click to paint` : `${selectionLabels[selectionMode]} scope · release to select and paint`
-      : activeTool === 'layer' ? 'Click/tap a voxel to activate its layer. Drag to pan.'
-      : selection.count ? `${count} selected · ${sculptCopy[sculptMode][0]}` : `${selectionMode} · select before ${sculptCopy[sculptMode][0]}`
+      : secondaryTool === 'fill' ? `${fillShape} · drag between opposite 3D corners on the model or guide grids`
+      : secondaryTool === 'push' ? selection.count ? `${count} selected · drag a face to reshape` : 'Select voxels, then drag a face to push or pull.'
+      : secondaryTool === 'layer' ? `Active: ${voxelDocument.activeLayer.name} · click a voxel to change layer`
+      : action === 'move' ? selection.count ? `${count} selected · drag to move`
+        : brush === 'box' ? 'Drag between surface or guide-grid cells to choose an XYZ box, then drag it to move.'
+        : 'Choose voxels, then drag; Ctrl/Command-drag moves immediately.'
+      : action === 'select' ? selection.count ? `${count} selected`
+        : brush === 'box' ? 'Drag between surface or guide-grid cells to select an XYZ box; Shift or touch adds or removes.'
+        : `${brush[0].toUpperCase() + brush.slice(1)} selection · Shift adds or removes.`
+      : brush === 'box' ? 'Drag between surface or guide-grid cells to span X, Y, and Z.'
+      : brush === 'face' && (action === 'attach' || action === 'erase') ? `Drag along the face normal to ${action === 'attach' ? 'add' : 'remove'} voxel depth.`
+      : `${action[0].toUpperCase() + action.slice(1)} with ${brush} · drag to shape, Alt-click to pick material.`
     app.querySelector('#context-copy')!.textContent = copy
   }
 
@@ -604,17 +643,20 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
 
   function closeToolPopups() {
     resetToolPopups()
+    closeMobileWheels()
     for (const popup of toolPopups) if (popup.matches(':popover-open')) popup.hidePopover()
   }
 
-  function showToolPopup(tool: Tool) {
-    const trigger = app.querySelector<HTMLButtonElement>(`.tool-dock button[data-tool-popup="${tool}"]`)
-    const popup = trigger?.popoverTargetElement
-    if (!trigger || !(popup instanceof HTMLElement)) return
-    trigger.focus({ preventScroll: true })
-    if (!popup.matches(':popover-open')) popup.showPopover()
-    ;(popup.querySelector<HTMLElement>('.tool-mode-list [aria-pressed="true"]')
-      ?? popup.querySelector<HTMLElement>('button:not(:disabled), input:not(:disabled)'))?.focus({ preventScroll: true })
+  const closeMobileWheels = bindMobileWheels(app, lifetime.signal, () => visible && !disposed && !disposal && !activating && !renderMode && !options.busy?.(), () => {
+    closePanel()
+    resetToolPopups()
+    for (const popup of toolPopups) if (popup.matches(':popover-open')) popup.hidePopover()
+  }, (kind, value) => kind === 'brush' ? setBrush(value as BrushMode) : setAction(value as ModelAction))
+
+  function openLayerPanelFromTools() {
+    closeToolPopups()
+    layerPanel.showPopover()
+    requestAnimationFrame(() => layerList.querySelector<HTMLButtonElement>('[data-active="true"] [data-layer-action="select"]')?.focus({ preventScroll: true }))
   }
 
   function setTool(tool: Tool) {
@@ -642,48 +684,23 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     runStudioCommand({ type: 'tool.sculptMode', mode })
   }
 
-  function setFillShape(shape: FillShape) {
-    runStudioCommand({ type: 'tool.fill', shape })
-  }
-
   function setAuxiliary(tool?: AuxiliaryTool) {
     runStudioCommand({ type: 'tool.auxiliary', tool })
   }
 
-  function clearShortcutPrefix() {
-    if (shortcutTimer) clearTimeout(shortcutTimer)
-    shortcutTimer = undefined
-    shortcutPrefix = undefined
+  function setAction(next: ModelAction) {
+    closeMobileWheels()
+    closePanel()
+    runStudioCommand({ type: 'tool.action', action: next })
   }
 
-  function armShortcut(prefix: 'q' | 'w' | 's') {
-    clearShortcutPrefix()
-    shortcutPrefix = prefix
-    shortcutTimer = setTimeout(clearShortcutPrefix, 1500)
-    announce(prefix === 'q' ? 'Select selected. Press 1 for Point, 2 for Surface, 3 for Texture, or 4 for Body.'
-      : prefix === 'w' ? 'Volume selected. Press 1 for Paint, 2 for Fill, 3 for Eyedropper, or 4 for Erase.'
-      : 'Sculpt selected. Press 1 for Push Pull or 2 for Move.')
+  function setBrush(next: BrushMode) {
+    closeMobileWheels()
+    runStudioCommand({ type: 'tool.brush', brush: next })
   }
 
-  function runShortcutChord(prefix: 'q' | 'w' | 's', key: string) {
-    if (prefix === 'q') {
-      const mode = ({ 1: 'point', 2: 'surface', 3: 'texture', 4: 'body' } as const)[key as '1' | '2' | '3' | '4']
-      if (!mode) return false
-      runStudioCommand({ type: 'tool.selectionMode', mode })
-      return true
-    }
-    if (prefix === 'w') {
-      if (key === '1') setPaintMode('paint')
-      else if (key === '2') setPaintMode('fill')
-      else if (key === '3') setAuxiliary('pick')
-      else if (key === '4') { setSculptMode('erase'); setTool('sculpt') }
-      else return false
-      return true
-    }
-    if (key === '1') setSculptMode('push')
-    else if (key === '2') setSculptMode('move')
-    else return false
-    return true
+  function setSecondaryTool(next?: SecondaryTool) {
+    runStudioCommand({ type: 'tool.secondary', tool: next })
   }
 
   function renderDocumentFacts(recount = true) {
@@ -827,8 +844,6 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     closePanel()
     void runStudioCommand({ type: 'clipboard.paste.begin' }).then(outcome => {
       if (!outcome?.changed) return
-      studio.dataset.tool = activeTool
-      app.querySelector('#context-title')!.textContent = toolCopy[activeTool][0]
       closeToolPopups()
       renderer.focusViewport()
     })
@@ -845,6 +860,12 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     },
     onPaint: fillSelection,
     onErase: eraseSelection,
+    onBrushCommit(nextAction, cells) {
+      dismissGuide()
+      if (nextAction === 'erase') { runStudioCommand({ type: 'edit.erase', cells }, 'renderer'); return }
+      if (nextAction === 'paint') { runStudioCommand({ type: 'edit.paint', cells, scope: 'occupied' }, 'renderer'); return }
+      runStudioCommand({ type: 'edit.setVoxels', scope: 'empty', voxels: cells.map(cell => ({ ...cell, color: cell.color ?? activeColor })) }, 'renderer')
+    },
     onFillCommit(min, max, normal, shape) {
       dismissGuide()
       const axis = (['x', 'y', 'z'] as const).find(name => normal[name] !== 0) ?? 'y'
@@ -926,9 +947,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
       renderer.setActive(true)
       renderer.setView(session.view)
       renderer.setActiveColor(activeColor)
-      renderer.setToolState(activeTool, paintMode, auxiliaryTool)
-      renderer.setSculptMode(sculptMode)
-      renderer.setSelectionMode(selectionMode)
+      syncRendererTools('session')
       renderer.setFillShape(fillShape)
       renderer.setFillDepth(fillDepth)
       renderer.applySelection(selection, false)
@@ -946,14 +965,15 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
   }
 
   function contextChanged() {
-    editorGeneration++; libraryGeneration++; rendererViewVersion++; clearShortcutPrefix()
+    closeMobileWheels()
+    editorGeneration++; libraryGeneration++; rendererViewVersion++
   }
 
   function setVisible(value: boolean) {
     visible = value
     studio.hidden = !value
     studio.inert = !value
-    if (!value) { closeToolPopups(); closePanel(); clearShortcutPrefix(); modelLibrary.close() }
+    if (!value) { closeToolPopups(); closePanel(); modelLibrary.close() }
     app.querySelector<HTMLDetailsElement>('#project-menu')!.open = false
   }
 
@@ -974,6 +994,13 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     stagePanel.setAttribute('aria-hidden', 'true')
     app.querySelector<HTMLButtonElement>('[data-action="panel"]')!.setAttribute('aria-expanded', 'false')
   }
+
+  on(allToolsPanel, 'beforetoggle', event => {
+    if ((event as ToggleEvent).newState !== 'open') return
+    closeMobileWheels()
+    closePanel()
+    allToolsPanel.querySelector<HTMLElement>('.all-tools-body')!.scrollTop = 0
+  })
 
   function download(data: BlobPart, filename: string, type: string) {
     const url = URL.createObjectURL(new Blob([data], { type }))
@@ -1003,7 +1030,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     const next = !renderMode
     const button = app.querySelector<HTMLButtonElement>('[data-action="render"]')!
     const focusFromTool = toolPopups.some(popup => popup.contains(document.activeElement)) || Boolean((document.activeElement as HTMLElement | null)?.closest('.tool-dock'))
-    if (next) { clearShortcutPrefix(); closeToolPopups(); if (focusFromTool) button.focus({ preventScroll: true }) }
+    if (next) { closeToolPopups(); if (focusFromTool) button.focus({ preventScroll: true }) }
     runStudioCommand({ type: 'renderMode.set', enabled: next })
     studio.dataset.renderMode = String(renderMode)
     app.querySelectorAll<HTMLElement>('.tool-dock, .context-dock').forEach(element => { element.inert = renderMode })
@@ -1071,12 +1098,43 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
       announce(`${selectionLabels[selectionMode]} selection mode`)
       return
     }
+    const actionButton = target.closest<HTMLButtonElement>('[data-model-action]')
+    if (actionButton) {
+      setAction(actionButton.dataset.modelAction as ModelAction)
+      return
+    }
+    const brushButton = target.closest<HTMLButtonElement>('[data-brush]')
+    if (brushButton) {
+      setBrush(brushButton.dataset.brush as BrushMode)
+      return
+    }
+    const mirrorButton = target.closest<HTMLButtonElement>('[data-mirror]')
+    if (mirrorButton) {
+      runStudioCommand({ type: 'tool.mirror', axis: mirrorButton.dataset.mirror as keyof AxisToggles })
+      return
+    }
+    const wholeAxisButton = target.closest<HTMLButtonElement>('[data-whole-axis]')
+    if (wholeAxisButton) {
+      runStudioCommand({ type: 'tool.wholeAxis', axis: wholeAxisButton.dataset.wholeAxis as keyof AxisToggles })
+      return
+    }
+    const secondaryButton = target.closest<HTMLButtonElement>('[data-secondary-tool]')
+    if (secondaryButton) {
+      const next = secondaryButton.dataset.secondaryTool as SecondaryTool
+      if (secondaryButton.dataset.mobileLayerTrigger !== undefined) {
+        event.preventDefault()
+        setSecondaryTool('layer')
+        openLayerPanelFromTools()
+        return
+      }
+      setSecondaryTool(secondaryTool === next ? undefined : next)
+      return
+    }
     const paintButton = target.closest<HTMLButtonElement>('[data-paint-mode]')
     if (paintButton) {
       const mode = paintButton.dataset.paintMode as PaintMode
       setPaintMode(mode)
       paintButton.closest<HTMLElement>('[popover]')?.hidePopover()
-      if (mode === 'fill' && event.detail === 0) requestAnimationFrame(() => fillOptions.querySelector<HTMLButtonElement>('button')?.focus())
       return
     }
     const sculptButton = target.closest<HTMLButtonElement>('[data-sculpt-mode]')
@@ -1086,14 +1144,8 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
       sculptButton.closest<HTMLElement>('[popover]')?.hidePopover()
       return
     }
-    const fillShapeButton = target.closest<HTMLButtonElement>('[data-fill-shape]')
-    if (fillShapeButton) {
-      setFillShape(fillShapeButton.dataset.fillShape as FillShape)
-      return
-    }
     const auxiliaryButton = target.closest<HTMLButtonElement>('[data-auxiliary]')
     if (auxiliaryButton) {
-      if (activeTool !== 'paint' && !(activeTool === 'sculpt' && sculptMode === 'erase')) activateTool('paint')
       setAuxiliary(auxiliaryButton.dataset.auxiliary as AuxiliaryTool)
       auxiliaryButton.closest<HTMLElement>('[popover]')?.hidePopover()
       return
@@ -1123,7 +1175,6 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
       return
     }
     if (action === 'save-model' || action === 'browse-models') {
-      clearShortcutPrefix()
       closeToolPopups()
       modelLibrary.open(action === 'save-model')
     }
@@ -1301,31 +1352,19 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     void runStudioCommand({ type: 'settings.update', patch }).then(outcome => { if (!outcome && !disposed) renderSettings() })
   })
 
-  on(app.querySelector<HTMLInputElement>('#fill-depth')!, 'input', event => {
-    const input = event.target as HTMLInputElement
-    if (!input.value) return
-    runStudioCommand({ type: 'tool.fill', depth: Number(input.value) })
-    if (Number(input.value) !== fillDepth) input.value = String(fillDepth)
-  })
-
-  on(app.querySelector<HTMLInputElement>('#fill-depth')!, 'change', event => {
-    const input = event.target as HTMLInputElement
-    input.value = String(fillDepth)
-  })
-
   on(options.keyboardRoot ?? app, 'keydown', event => {
     if (!visible || disposed || disposal || options.busy?.() || event.defaultPrevented || (event.target as Element)?.closest('.voxel-assistant, dialog, [contenteditable]:not([contenteditable="false"])')) return
     const editingText = event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement || event.target instanceof HTMLTextAreaElement
     const key = event.key.toLowerCase()
-    if (event.key === 'Escape' && toolPopups.some(popup => popup.matches(':popover-open'))) { clearShortcutPrefix(); return }
-    if (event.key === 'Escape' && shortcutPrefix) {
-      event.preventDefault()
-      clearShortcutPrefix()
-      return
-    }
+    if (event.key === 'Escape' && toolPopups.some(popup => popup.matches(':popover-open'))) return
     if (event.key === 'Escape' && auxiliaryTool) {
       event.preventDefault()
       setAuxiliary()
+      return
+    }
+    if (event.key === 'Escape' && secondaryTool) {
+      event.preventDefault()
+      setSecondaryTool()
       return
     }
     if (event.key === 'Escape' && pendingPaste) {
@@ -1339,54 +1378,48 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
       runStudioCommand({ type: 'selection.clear', focus: true })
       return
     }
+    if ((event.metaKey || event.ctrlKey) && ['1', '2', '3'].includes(key) && !editingText && !renderMode) {
+      event.preventDefault()
+      if (!event.repeat) runStudioCommand({ type: 'tool.wholeAxis', axis: ({ 1: 'x', 2: 'y', 3: 'z' } as const)[key as '1' | '2' | '3'] })
+      return
+    }
     if ((event.metaKey || event.ctrlKey) && (key === 'z' || key === 'y') && !editingText) {
       event.preventDefault()
-      clearShortcutPrefix()
       event.shiftKey || key === 'y' ? redo() : undo()
       return
     }
     if ((event.metaKey || event.ctrlKey) && ['x', 'c', 'v'].includes(key) && !editingText && !renderMode) {
       event.preventDefault()
-      clearShortcutPrefix()
       if (key === 'x') cutSelection()
       if (key === 'c') copySelection()
       if (key === 'v') pasteSelection()
       return
     }
-    if (editingText || event.metaKey || event.ctrlKey || event.altKey) { clearShortcutPrefix(); return }
-    if (shortcutPrefix) {
-      const prefix = shortcutPrefix
-      clearShortcutPrefix()
-      if (runShortcutChord(prefix, key)) {
-        event.preventDefault()
-        closeToolPopups()
-        return
-      }
-    }
-    const shortcuts: Record<string, Tool> = { q: 'select', w: 'paint', s: 'sculpt' }
-    const tool = shortcuts[key]
-    if (tool && !renderMode) {
+    if (editingText || event.metaKey || event.ctrlKey || event.altKey) return
+    const actionShortcut = ({ t: 'attach', r: 'erase', g: 'paint', n: 'select' } as const)[key as 't' | 'r' | 'g' | 'n']
+    if (actionShortcut && !renderMode) {
       event.preventDefault()
       closeToolPopups()
-      activateTool(tool)
-      armShortcut(key as 'q' | 'w' | 's')
-      showToolPopup(tool)
+      setAction(actionShortcut)
       return
     }
-    if (key === 'r' && !renderMode) {
+    const brushShortcut = ({ v: 'voxel', f: 'face', b: 'box', l: 'line', c: 'center', p: 'pattern' } as const)[key as 'v' | 'f' | 'b' | 'l' | 'c' | 'p']
+    if (brushShortcut && !renderMode) {
       event.preventDefault()
       closeToolPopups()
-      setTool('layer')
-      showToolPopup('layer')
+      setBrush(brushShortcut)
       return
     }
-    if (key === 'f') { event.preventDefault(); void dispatchApplicationCommand({ type: 'view.frame' }).catch(commandFailed) }
+    if (['1', '2', '3'].includes(key) && !renderMode) {
+      event.preventDefault()
+      if (!event.repeat) runStudioCommand({ type: 'tool.mirror', axis: ({ 1: 'x', 2: 'y', 3: 'z' } as const)[key as '1' | '2' | '3'] })
+      return
+    }
     if (event.key === '?') { welcome.hidden = false }
   })
 
   renderer.setActiveColor(activeColor)
-  renderer.setSelectionMode(selectionMode)
-  renderer.setToolState(activeTool, paintMode, auxiliaryTool)
+  syncRendererTools('initial')
   renderer.setFillShape(fillShape)
   renderer.setFillDepth(fillDepth)
   renderPalette()
@@ -1426,7 +1459,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
           await localQueue.dispatch({ command: { type: 'save.flush' }, source: 'ui', editorGeneration })
           resetToolPopups()
           disposed = true; contextChanged(); lifetime.abort()
-          clearTimeout(saveTimer); clearTimeout(toastTimer); clearTimeout(shortcutTimer)
+          clearTimeout(saveTimer); clearTimeout(toastTimer)
           modelLibrary.dispose(); renderer.dispose(); app.replaceChildren()
         } finally {
           if (!disposed) { app.inert = inert; viewportRoot.inert = viewportInert }

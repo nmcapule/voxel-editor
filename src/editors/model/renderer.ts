@@ -4,11 +4,12 @@ import { castsRealtimeShadow } from '../../shared/rendering/stage'
 import type { CameraSnapshot, SceneContent, ModelPreviewPlugin, ModelPreviewRenderer } from '../../shared/rendering/contracts'
 import type { MeshData } from '../../shared/voxel/mesher'
 import { CHUNK_SIZE, chunkCoords, connectedBodyVoxels, connectedSurfaceVoxels, dirtyChunks, fillShapeVoxels, moveRange, occupiedVoxels, pushPullFaces, pushPullRange, surfaceVoxels, type FillShape, type Vec3, type VoxelDocument } from '../../shared/voxel/document'
-import type { AuxiliaryTool, PaintMode, PbrMap, SculptMode, SelectionMode, SelectionState, Tool } from './studio'
+import type { AuxiliaryTool, PaintMode, PbrMap, SculptMode, SecondaryTool, SelectionMode, SelectionState, Tool } from './studio'
 import type { ViewSettings } from '../../shared/rendering/settings'
 import { faceViews, projectFaces, type FaceView } from '../../shared/voxel/projections'
 import { defaultInspectionViews, type InspectionView } from './inspection'
 import { ModelOcclusion } from './occlusion'
+import { applyBrushModifiers, centerBrushCells, lineBrushCells, normalizePattern, placePattern, noAxes, type AxisToggles, type BrushMode, type ModelAction, type PatternVoxel } from './brush'
 
 
 export interface ToolTarget {
@@ -41,6 +42,7 @@ export interface RendererCallbacks {
   onSelectionChange: (selection: SelectionState) => void
   onPaint: (cells: Vec3[]) => void
   onErase: (cells: Vec3[]) => void
+  onBrushCommit?: (action: Exclude<ModelAction, 'select' | 'move'>, cells: (Vec3 & { color?: number })[]) => void
   onFillCommit: (min: Vec3, max: Vec3, normal: Vec3, shape: FillShape) => void
   onPushPullCommit: (cells: Vec3[], normal: Vec3, distance: number, move: boolean, floating: boolean) => void
   onPushPullPreview: (cells?: number, distance?: number, move?: boolean) => void
@@ -234,6 +236,19 @@ interface MarqueeDrag {
   moved: boolean
   action?: 'paint' | 'erase' | 'fill'
 }
+
+interface BrushDrag {
+  pointerId: number
+  startX: number
+  startY: number
+  target: ToolTarget
+  end: Vec3
+  moved: boolean
+  additive: boolean
+  stroke?: Map<number, Vec3>
+  lastSample?: { target: ToolTarget; anchor: Vec3; clientX: number; clientY: number }
+  face?: { cells: Vec3[]; normal: Vec3; depth: number; max: number; screenX: number; screenY: number }
+}
 export class VoxelRenderer {
   readonly viewport: Viewport
   private ownsViewport: boolean
@@ -277,7 +292,7 @@ export class VoxelRenderer {
     this.model.matrixAutoUpdate = false
     this.content = {
       root: this.root, bounds: new THREE.Box3(), stage: 'bounded',
-      label: 'Voxel editing viewport. Arrow keys move the keyboard cursor, Page Up and Page Down change height, Space applies the active tool, and Shift Space reverses Push Pull or Move.',
+      label: 'Voxel editing viewport. Arrow keys move the keyboard cursor, Page Up and Page Down change height, and Space applies the active tool.',
       whenReady: () => this.whenMeshIdle(),
       isReady: () => !this.inFlight && !this.queued.size,
       focusTarget: () => this.selection.size ? this.focusCenter() : this.viewport.controls.target.clone(),
@@ -299,9 +314,9 @@ export class VoxelRenderer {
       this.modelRenderMode = this.viewport.renderMode
       this.listeners.abort()
       const canvas = this.viewport.renderer.domElement
-      for (const id of new Set([this.activePointer, this.paintPointer, this.layerClick?.pointerId, ...this.touchPointers])) if (id !== undefined && canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id)
+      for (const id of new Set([this.activePointer, this.paintPointer, this.brushDrag?.pointerId, this.layerClick?.pointerId, ...this.touchPointers])) if (id !== undefined && canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id)
       if (this.viewport.content === this.content) this.viewport.setSceneContent(undefined)
-      this.cancelPaint(); this.cancelPushPull(); this.cancelMarquee()
+      this.cancelPaint(); this.cancelPushPull(); this.cancelMarquee(); this.cancelBrush()
       this.hover.visible = false
       this.touchPointers.clear(); this.orbitTouch = undefined; this.layerClick = undefined
       this.suspendModelMeshes()
@@ -355,7 +370,7 @@ export class VoxelRenderer {
       this.modelRenderMode = this.viewport.renderMode
       this.layerClick = undefined
       this.orbitTouch = undefined
-      this.cancelPaint(); this.cancelPushPull(); this.cancelMarquee()
+      this.cancelPaint(); this.cancelPushPull(); this.cancelMarquee(); this.cancelBrush()
       this.hover.visible = false
       if (this.selectionPreview) this.selectionPreview.visible = !this.viewport.renderMode
     }
@@ -426,6 +441,13 @@ export class VoxelRenderer {
 
   private settings: ViewSettings
   private tool: Tool = 'select'
+  private primaryMode = false
+  private action: ModelAction = 'attach'
+  private brush: BrushMode = 'box'
+  private mirrors: AxisToggles = noAxes()
+  private wholeAxes: AxisToggles = noAxes()
+  private secondaryTool?: SecondaryTool
+  private pattern: PatternVoxel[] = []
 
   private paintMode: PaintMode = 'paint'
   private sculptMode: SculptMode = 'push'
@@ -450,6 +472,7 @@ export class VoxelRenderer {
   private selectionPreview?: THREE.InstancedMesh
 
   private marqueeDrag?: MarqueeDrag
+  private brushDrag?: BrushDrag
   private pushPullDrag?: PushPullDrag
 
   private fillPreview?: THREE.InstancedMesh
@@ -508,7 +531,7 @@ export class VoxelRenderer {
       this.layerClick = undefined
       // Capture runs before OrbitControls; projection changes replace the controls object.
       const controls = this.viewport.controls
-      const pan = !this.viewport.renderMode && this.tool === 'layer' && !this.auxiliary
+      const pan = !this.viewport.renderMode && this.tool === 'layer' && !this.auxiliary && !event.altKey
       controls.mouseButtons.LEFT = pan ? THREE.MOUSE.PAN : -1 as THREE.MOUSE
       if (event.pointerType !== 'touch') return
       const orbit = !this.viewport.renderMode && shouldOrbitTouch(this.touchTargetActionable(this.targetAt(event)), this.touchPointers.size)
@@ -524,22 +547,29 @@ export class VoxelRenderer {
           this.cancelPaint()
           this.cancelPushPull()
           this.cancelMarquee()
+          this.cancelBrush()
           return
         }
       }
       if (event.button !== 0) return
       if (this.viewport.renderMode) return
-      const target = this.targetAt(event)
-      if (this.tool === 'layer' && !this.auxiliary) {
+      const picking = event.altKey || this.auxiliary === 'pick'
+      const target = this.targetAt(event, picking)
+      if (picking) {
+        event.preventDefault()
+        if (target?.occupied) this.callbacks.onPick(target.color)
+        return
+      }
+      if (this.tool === 'layer') {
         event.preventDefault()
         this.layerClick = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, moved: false,
           layerId: target?.occupied ? this.document.getVisibleVoxelLayer(target.cell.x, target.cell.y, target.cell.z) : undefined }
         return
       }
       if (event.pointerType === 'touch' && shouldOrbitTouch(this.touchTargetActionable(target), 0)) return
-      if (this.auxiliary === 'pick') {
+      if (this.primaryMode && !this.secondaryTool) {
         event.preventDefault()
-        if (target?.occupied) this.callbacks.onPick(target.color)
+        this.startBrushInteraction(event, target)
         return
       }
       if (this.tool === 'select') {
@@ -603,6 +633,10 @@ export class VoxelRenderer {
         this.moveMarquee(event)
         return
       }
+      if (this.brushDrag?.pointerId === event.pointerId) {
+        this.moveBrush(event)
+        return
+      }
       if (this.pushPullDrag && this.activePointer === event.pointerId) {
         this.movePushPull(event)
         return
@@ -629,7 +663,14 @@ export class VoxelRenderer {
         this.setSelection([])
         return
       }
-      if (this.marqueeDrag && this.activePointer === event.pointerId) {
+      if (this.brushDrag?.pointerId === event.pointerId) {
+        const drag = this.brushDrag
+        try {
+          if (this.brush === 'voxel' || this.brush === 'box' || drag.face) this.moveBrush(event)
+          this.commitBrush(this.resolveBrushDragCells(drag), drag.additive)
+        }
+        finally { this.cancelBrush() }
+      } else if (this.marqueeDrag && this.activePointer === event.pointerId) {
         const action = this.marqueeDrag.action
         try {
           if (action === 'fill') {
@@ -663,14 +704,15 @@ export class VoxelRenderer {
       this.cancelPaint()
       this.cancelPushPull()
       this.cancelMarquee()
+      this.cancelBrush()
     }, options)
     const cancelAbandonedDrag = () => {
-      if (this.modelSuspended || this.paintPointer === undefined && !this.marqueeDrag && !this.pushPullDrag && !this.layerClick && !this.orbitTouch) return
+      if (this.modelSuspended || this.paintPointer === undefined && !this.brushDrag && !this.marqueeDrag && !this.pushPullDrag && !this.layerClick && !this.orbitTouch) return
       this.touchPointers.clear(); this.orbitTouch = undefined; this.layerClick = undefined
-      this.cancelPaint(); this.cancelPushPull(); this.cancelMarquee()
+      this.cancelPaint(); this.cancelPushPull(); this.cancelMarquee(); this.cancelBrush()
     }
     canvas.addEventListener('lostpointercapture', event => {
-      if (this.paintPointer === event.pointerId || this.activePointer === event.pointerId || this.layerClick?.pointerId === event.pointerId || this.orbitTouch?.pointerId === event.pointerId) cancelAbandonedDrag()
+      if (this.paintPointer === event.pointerId || this.activePointer === event.pointerId || this.brushDrag?.pointerId === event.pointerId || this.layerClick?.pointerId === event.pointerId || this.orbitTouch?.pointerId === event.pointerId) cancelAbandonedDrag()
     }, options)
     canvas.addEventListener('webglcontextlost', cancelAbandonedDrag, options)
     const ownerDocument = canvas.ownerDocument
@@ -685,6 +727,7 @@ export class VoxelRenderer {
     canvas.addEventListener('pointerleave', () => {
       if (this.modelSuspended) return
       this.hover.visible = false
+      if (!this.brushDrag) this.clearFillPreview()
       this.callbacks.onHover()
       this.viewport.render()
     }, options)
@@ -708,6 +751,10 @@ export class VoxelRenderer {
       const target = { cell: { ...this.keyboardCell }, normal: { x: 0, y: 1, z: 0 }, occupied: color > 0 || this.floatingSelection && this.selectionContains(this.keyboardCell), color }
       if (this.auxiliary === 'pick') { if (color) this.callbacks.onPick(color); return }
        if (this.tool === 'layer') { if (color) this.callbacks.onLayerSelect(this.document.getVisibleVoxelLayer(target.cell.x, target.cell.y, target.cell.z)); return }
+      if (this.primaryMode && !this.secondaryTool && this.action !== 'move') {
+        this.commitBrush(this.resolveBrushCells(target), event.shiftKey)
+        return
+      }
       if (this.tool === 'select') {
         this.selectTarget(target, event.shiftKey)
         return
@@ -747,8 +794,223 @@ export class VoxelRenderer {
     this.callbacks.onHover(this.keyboardCell)
   }
 
+  private startBrushInteraction(event: PointerEvent, target?: ToolTarget) {
+    if (!target) {
+      if (this.action === 'select' || this.action === 'move') this.setSelection([])
+      return
+    }
+    const moving = this.action === 'move' || event.ctrlKey || event.metaKey
+    if (moving && target.occupied && (event.ctrlKey || event.metaKey || this.selectionContains(target.cell))) {
+      if (!this.selectionContains(target.cell)) {
+        const cells = this.resolveBrushCells(target, undefined, false, 'select')
+        if (!cells.length) return
+        this.setSelection(cells)
+      }
+      if (!this.startPushPull(event, target, true)) return
+      this.activePointer = event.pointerId
+      this.viewport.renderer.domElement.setPointerCapture(event.pointerId)
+      return
+    }
+
+    let face: BrushDrag['face']
+    if (this.brush === 'face' && (this.action === 'attach' || this.action === 'erase') && target.occupied) {
+      const cells = connectedSurfaceVoxels(this.document, target.cell, target.normal, undefined, this.action === 'attach' ? undefined : this.document.activeLayerId)
+      const axis = axisNames.find(name => target.normal[name] !== 0)!
+      const max = this.action === 'attach'
+        ? Math.min(...cells.map(cell => target.normal[axis] > 0 ? this.document.dimensions[axis] - 1 - cell[axis] : cell[axis]))
+        : pushPullRange(this.document, cells, target.normal).push
+      if (cells.length && max > 0) face = { cells, normal: { ...target.normal }, depth: 1, max, ...this.screenNormal(target) }
+    }
+    const draggable = event.pointerType === 'touch' || Boolean(face) || this.brush === 'voxel' || this.brush === 'box' || this.brush === 'line' || this.brush === 'center'
+    if (draggable) {
+      const start = this.brushAnchor(target, this.action)
+      if (!start) return
+      const stroke = this.brush === 'voxel' ? new Map([[this.selectionKey(start), start]]) : undefined
+      this.brushDrag = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        target,
+        end: start,
+        moved: false,
+        additive: event.shiftKey || event.pointerType === 'touch',
+        stroke,
+        lastSample: stroke ? { target, anchor: start, clientX: event.clientX, clientY: event.clientY } : undefined,
+        face,
+      }
+      this.syncRasterInteraction()
+      this.viewport.renderer.domElement.setPointerCapture(event.pointerId)
+      this.updateBrushPreview(this.resolveBrushDragCells(this.brushDrag, true))
+      return
+    }
+    this.commitBrush(this.resolveBrushCells(target), event.shiftKey || event.pointerType === 'touch')
+  }
+
+  private moveBrush(event: PointerEvent) {
+    const drag = this.brushDrag
+    if (!drag) return
+    if (drag.stroke) {
+      this.sampleVoxelStroke(event, drag)
+      return
+    }
+    if (drag.face) {
+      const { screenX, screenY, max } = drag.face
+      const distance = Math.round(((event.clientX - drag.startX) * screenX + (event.clientY - drag.startY) * screenY) / (screenX * screenX + screenY * screenY))
+      const depth = THREE.MathUtils.clamp(1 + (this.action === 'attach' ? distance : -distance), 1, max)
+      if (depth === drag.face.depth) return
+      drag.face.depth = depth
+      drag.moved = true
+      this.updateBrushPreview(this.resolveBrushDragCells(drag, true))
+      return
+    }
+    if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 5) return
+    const anchor = this.brushAnchor(drag.target, this.action)
+    if (!anchor) return
+    const endTarget = this.brush === 'box' ? this.targetAt(event) : this.planeTargetAt(event, anchor, drag.target.normal)
+    const end = endTarget && (this.brush === 'box' ? this.brushAnchor(endTarget, this.action) : endTarget.cell)
+    if (!end) return
+    drag.end = end
+    drag.moved = true
+    this.updateBrushPreview(this.resolveBrushCells(drag.target, end, true))
+  }
+
+  private sampleVoxelStroke(event: PointerEvent, drag: BrushDrag) {
+    const before = drag.stroke!.size
+    const pointer = drag.lastSample
+    const samples = pointer ? Math.max(1, Math.ceil(Math.hypot(event.clientX - pointer.clientX, event.clientY - pointer.clientY))) : 1
+    for (let step = 1; step <= samples; step++) {
+      const clientX = pointer ? pointer.clientX + (event.clientX - pointer.clientX) * step / samples : event.clientX
+      const clientY = pointer ? pointer.clientY + (event.clientY - pointer.clientY) * step / samples : event.clientY
+      const target = this.targetAt(step === samples ? event : { clientX, clientY } as PointerEvent)
+      const anchor = target && this.brushAnchor(target, this.action)
+      if (!target || !anchor) {
+        drag.lastSample = undefined
+        continue
+      }
+      const previous = drag.lastSample
+      const sameSurface = previous && previous.target.occupied === target.occupied
+        && axisNames.every(name => previous.target.normal[name] === target.normal[name])
+      if (sameSurface) {
+        const axis = axisNames.find(name => target.normal[name] !== 0)!
+        const segment = lineBrushCells(previous.anchor, anchor, target.normal)
+        const min = Math.min(previous.anchor[axis], anchor[axis]), max = Math.max(previous.anchor[axis], anchor[axis])
+        for (const [index, cell] of segment.slice(1, -1).entries()) {
+          const expected = previous.anchor[axis] + (anchor[axis] - previous.anchor[axis]) * (index + 1) / (segment.length - 1)
+          const resolved = Array.from({ length: max - min + 1 }, (_, offset) => min + offset)
+            .sort((a, b) => Math.abs(a - expected) - Math.abs(b - expected))
+            .map(coordinate => ({ ...cell, [axis]: coordinate }))
+            .find(candidate => this.voxelStrokeCellVisible(candidate, target))
+          if (!resolved) break
+          drag.stroke!.set(this.selectionKey(resolved), resolved)
+        }
+      }
+      drag.stroke!.set(this.selectionKey(anchor), anchor)
+      drag.moved ||= axisNames.some(name => drag.end[name] !== anchor[name])
+      drag.end = anchor
+      drag.lastSample = { target, anchor, clientX, clientY }
+    }
+    if (drag.stroke!.size !== before) this.updateBrushPreview(this.resolveBrushDragCells(drag, true))
+  }
+
+  private voxelStrokeCellVisible(cell: Vec3, target: ToolTarget) {
+    if (!target.occupied) return this.action === 'attach' && !this.document.getVisibleVoxel(cell.x, cell.y, cell.z)
+    if (this.action === 'attach') {
+      const source = { x: cell.x - target.normal.x, y: cell.y - target.normal.y, z: cell.z - target.normal.z }
+      return Boolean(this.document.getVisibleVoxel(source.x, source.y, source.z)) && !this.document.getVisibleVoxel(cell.x, cell.y, cell.z)
+    }
+    return Boolean(this.document.getLayerVoxel(cell.x, cell.y, cell.z))
+      && !this.document.getLayerVoxel(cell.x + target.normal.x, cell.y + target.normal.y, cell.z + target.normal.z)
+  }
+
+  private brushAnchor(target: ToolTarget, action: ModelAction = this.action) {
+    const cell = action === 'attach' && target.occupied ? {
+      x: target.cell.x + target.normal.x,
+      y: target.cell.y + target.normal.y,
+      z: target.cell.z + target.normal.z,
+    } : { ...target.cell }
+    return this.document.contains(cell.x, cell.y, cell.z) ? cell : undefined
+  }
+
+  private resolveBrushCells(target: ToolTarget, end?: Vec3, preview = false, action: ModelAction = this.action): (Vec3 & { color?: number })[] {
+    if (action !== 'select' && !this.activeLayerEditable()) return []
+    if (action !== 'attach' && (!target.occupied || !this.activeTarget(target))) return []
+    const anchor = this.brushAnchor(target, action)
+    if (!anchor) return []
+    const finish = end ?? anchor
+    let cells: (Vec3 & { color?: number })[]
+    if (this.brush === 'face') {
+      if (!target.occupied) return []
+      cells = connectedSurfaceVoxels(this.document, target.cell, target.normal, undefined, action === 'attach' ? undefined : this.document.activeLayerId)
+      if (action === 'attach') cells = cells.map(cell => ({ x: cell.x + target.normal.x, y: cell.y + target.normal.y, z: cell.z + target.normal.z }))
+    } else if (this.brush === 'texture' || this.brush === 'body') {
+      if (!target.occupied) return []
+      cells = connectedBodyVoxels(this.document, target.cell, this.brush === 'texture' ? target.color : undefined, action === 'attach' ? undefined : this.document.activeLayerId)
+      if (action === 'attach') cells = cells.map(cell => ({ x: cell.x + target.normal.x, y: cell.y + target.normal.y, z: cell.z + target.normal.z }))
+    } else if (this.brush === 'box') {
+      const { min, max } = boxBounds(anchor, finish, target.normal)
+      cells = [...fillShapeVoxels(min, max, 'box', 'y', this.document.dimensions)]
+    } else if (this.brush === 'line') {
+      cells = lineBrushCells(anchor, finish, target.normal)
+    } else if (this.brush === 'center') {
+      cells = centerBrushCells(anchor, finish, target.normal, this.document.dimensions)
+    } else if (this.brush === 'pattern') {
+      cells = placePattern(preview ? this.pattern.slice(0, MAX_FILL_GHOSTS) : this.pattern, anchor, this.document.dimensions)
+    } else cells = [anchor]
+
+    return this.resolveBrushMask(cells, preview, action)
+  }
+
+  private resolveBrushDragCells(drag: BrushDrag, preview = false) {
+    if (drag.face) {
+      const cells = pushPullGhostVoxels(drag.face.cells, drag.face.normal, (this.action === 'attach' ? 1 : -1) * drag.face.depth, false)
+      return this.resolveBrushMask(cells, preview, this.action)
+    }
+    if (!drag.stroke) return this.resolveBrushCells(drag.target, drag.end, preview)
+    if (this.action !== 'select' && !this.activeLayerEditable()) return []
+    if (this.action !== 'attach' && (!drag.target.occupied || !this.activeTarget(drag.target))) return []
+    return this.resolveBrushMask([...drag.stroke.values()], preview, this.action)
+  }
+
+  private resolveBrushMask(cells: (Vec3 & { color?: number })[], preview: boolean, action: ModelAction) {
+    cells = applyBrushModifiers(cells, this.document.dimensions, this.mirrors, this.wholeAxes, preview ? MAX_FILL_GHOSTS : Infinity)
+    return cells.filter(cell => {
+      const occupied = Boolean(this.document.getLayerVoxel(cell.x, cell.y, cell.z))
+      return action === 'attach' ? !occupied : occupied
+    })
+  }
+
+  private commitBrush(cells: (Vec3 & { color?: number })[], additive = false) {
+    if (this.action === 'select' || this.action === 'move') {
+      if (!additive || this.action === 'move') { this.setSelection(cells); return }
+      const next = new Map(this.selection)
+      const remove = cells.length > 0 && cells.every(cell => next.has(this.selectionKey(cell)))
+      for (const cell of cells) remove ? next.delete(this.selectionKey(cell)) : next.set(this.selectionKey(cell), cell)
+      this.setSelection([...next.values()])
+      return
+    }
+    if (cells.length) this.callbacks.onBrushCommit?.(this.action, cells)
+  }
+
+  private updateBrushPreview(cells: Vec3[]) {
+    this.hover.visible = false
+    if (!cells.length) { this.clearFillPreview(); this.viewport.render(); return }
+    this.updateFillPreview(cells)
+    ;(this.fillPreview!.material as THREE.MeshBasicMaterial).color.setHex(this.action === 'erase' ? 0xd94a4a : this.action === 'select' || this.action === 'move' ? 0x2f66db : this.document.palette[this.activeColor] ?? 0x2864dc)
+    this.viewport.render()
+  }
+
+  private cancelBrush() {
+    const active = Boolean(this.brushDrag)
+    this.brushDrag = undefined
+    this.clearFillPreview()
+    if (active) {
+      this.syncRasterInteraction()
+      this.viewport.render()
+    }
+  }
+
   private syncRasterInteraction() {
-    this.viewport.setRasterInteraction('model', this.paintPointer !== undefined || !!this.marqueeDrag || !!this.pushPullDrag)
+    this.viewport.setRasterInteraction('model', this.paintPointer !== undefined || !!this.brushDrag || !!this.marqueeDrag || !!this.pushPullDrag)
   }
 
   private cancelPaint() {
@@ -896,6 +1158,7 @@ export class VoxelRenderer {
     this.cancelPaint()
     this.cancelPushPull()
     this.cancelMarquee()
+    this.cancelBrush()
     if (selection.cells[0] && selection.floating) this.keyboardCell = { ...selection.cells[0] }
     this.updateSelection(selection.cells, selection.floating === true, false, focus)
   }
@@ -968,7 +1231,7 @@ export class VoxelRenderer {
     if (state !== this.layerState) {
       this.layerState = state
       this.layerClick = undefined
-      this.cancelPaint(); this.cancelPushPull(); this.cancelMarquee()
+      this.cancelPaint(); this.cancelPushPull(); this.cancelMarquee(); this.cancelBrush()
       this.hover.visible = false
     }
     const isolated = this.selection.size ? this.isolatedLayerId() : undefined
@@ -1025,6 +1288,7 @@ export class VoxelRenderer {
 
   private touchTargetActionable(target?: ToolTarget) {
     if (this.auxiliary) return Boolean(target?.occupied)
+    if (this.primaryMode && !this.secondaryTool && target) return this.resolveBrushCells(target, undefined, true).length > 0
     if (this.tool === 'layer') return Boolean(target?.occupied)
     if (this.tool === 'select') return Boolean(target?.occupied && this.activeTarget(target))
     if (this.tool === 'paint') return this.paintMode === 'fill' ? Boolean(this.fillStartCell(target))
@@ -1047,23 +1311,10 @@ export class VoxelRenderer {
     return true
   }
 
-  private startPushPull(event: PointerEvent, target: ToolTarget) {
-    const { cells, move, range } = this.pushPullOperation(target)
+  private startPushPull(event: PointerEvent, target: ToolTarget, forceMove = false) {
+    const { cells, move, range } = this.pushPullOperation(target, forceMove)
     if (!cells.length) return false
-    const rect = this.viewport.renderer.domElement.getBoundingClientRect()
-    const center = new THREE.Vector3(
-      target.cell.x - this.document.dimensions.x / 2 + 0.5,
-      target.cell.y + 0.5,
-      target.cell.z - this.document.dimensions.z / 2 + 0.5,
-    )
-    const tip = center.clone().add(new THREE.Vector3(target.normal.x, target.normal.y, target.normal.z))
-    center.project(this.viewport.camera)
-    tip.project(this.viewport.camera)
-    let screenX = (tip.x - center.x) * rect.width / 2
-    let screenY = (center.y - tip.y) * rect.height / 2
-    const length = Math.hypot(screenX, screenY)
-    if (length < 0.01) { screenX = 0; screenY = -24 }
-    else if (length < 12) { screenX *= 12 / length; screenY *= 12 / length }
+    const { screenX, screenY } = this.screenNormal(target)
     this.pushPullDrag = {
       cells,
       normal: { ...target.normal },
@@ -1087,13 +1338,31 @@ export class VoxelRenderer {
     return true
   }
 
+  private screenNormal(target: ToolTarget) {
+    const rect = this.viewport.renderer.domElement.getBoundingClientRect()
+    const center = new THREE.Vector3(
+      target.cell.x - this.document.dimensions.x / 2 + 0.5,
+      target.cell.y + 0.5,
+      target.cell.z - this.document.dimensions.z / 2 + 0.5,
+    )
+    const tip = center.clone().add(new THREE.Vector3(target.normal.x, target.normal.y, target.normal.z))
+    center.project(this.viewport.camera)
+    tip.project(this.viewport.camera)
+    let screenX = (tip.x - center.x) * rect.width / 2
+    let screenY = (center.y - tip.y) * rect.height / 2
+    const length = Math.hypot(screenX, screenY)
+    if (length < 0.01) { screenX = 0; screenY = -24 }
+    else if (length < 12) { screenX *= 12 / length; screenY *= 12 / length }
+    return { screenX, screenY }
+  }
+
   private pushPullCells(target: ToolTarget) {
     if (!target.occupied || !this.selectionContains(target.cell)) return []
     return [...this.selection.values()]
   }
 
-  private pushPullOperation(target: ToolTarget) {
-    if (this.sculptMode === 'push') {
+  private pushPullOperation(target: ToolTarget, forceMove = false) {
+    if (this.sculptMode === 'push' && !forceMove) {
       const cells = this.pushPullCells(target)
       return { cells, move: false, range: pushPullRange(this.document, cells, target.normal) }
     }
@@ -1210,9 +1479,9 @@ export class VoxelRenderer {
     }
   }
 
-  private targetAt(event: MouseEvent): ToolTarget | undefined {
+  private targetAt(event: MouseEvent, allVisibleLayers = false): ToolTarget | undefined {
     const ray = this.gridRay(event)
-    if (this.floatingSelection && this.selectionPreview) {
+    if (!allVisibleLayers && this.floatingSelection && this.selectionPreview) {
       const hit = this.raycaster.intersectObject(this.selectionPreview)[0]
       const cell = hit?.instanceId === undefined ? undefined : [...this.selection.values()][hit.instanceId]
       if (cell && hit.face) return {
@@ -1222,7 +1491,7 @@ export class VoxelRenderer {
         color: 0,
       }
     }
-    return traceGridRay(this.document, ray.origin, ray.direction, this.raycaster.far, this.isolatedLayerId())
+    return traceGridRay(this.document, ray.origin, ray.direction, this.raycaster.far, allVisibleLayers ? undefined : this.isolatedLayerId())
   }
 
   private planeTargetAt(event: PointerEvent, cell: Vec3, normal: Vec3): ToolTarget | undefined {
@@ -1232,6 +1501,13 @@ export class VoxelRenderer {
   }
 
   private showHover(target?: ToolTarget) {
+    if (this.primaryMode && !this.secondaryTool && !this.auxiliary) {
+      const cells = target ? this.resolveBrushCells(target, undefined, true) : []
+      this.updateBrushPreview(cells)
+      const cell = target ? this.brushAnchor(target) : undefined
+      this.callbacks.onHover(cell)
+      return
+    }
     const cell = this.tool === 'paint' && this.paintMode === 'fill' && !this.auxiliary ? this.fillStartCell(target)
       : target?.occupied ? target.cell : undefined
     if (!cell || this.viewport.renderMode) {
@@ -1551,6 +1827,7 @@ export class VoxelRenderer {
     this.cancelPaint()
     this.cancelPushPull()
     this.cancelMarquee()
+    this.cancelBrush()
     this.document = document
     this.preview?.setDocument(document)
     this.layerState = ''
@@ -1592,6 +1869,8 @@ export class VoxelRenderer {
     this.cancelPaint()
     this.cancelPushPull()
     this.cancelMarquee()
+    this.cancelBrush()
+    this.primaryMode = false
     this.tool = tool
     this.paintMode = paintMode
     this.auxiliary = auxiliary
@@ -1620,11 +1899,47 @@ export class VoxelRenderer {
   }
 
   setAuxiliary(tool?: AuxiliaryTool) {
+    if (this.primaryMode) {
+      this.cancelPaint(); this.cancelPushPull(); this.cancelMarquee(); this.cancelBrush()
+      this.auxiliary = tool
+      this.hover.visible = false
+      this.refreshLayerScope()
+      this.viewport.render()
+      return
+    }
     this.setToolState(this.tool, this.paintMode, tool)
   }
 
   setSelectionMode(mode: SelectionMode) {
     this.selectionMode = mode
+  }
+
+  setBrushState(action: ModelAction, brush: BrushMode, mirrors: AxisToggles, wholeAxes: AxisToggles, secondaryTool?: SecondaryTool, pattern: PatternVoxel[] = []) {
+    this.layerClick = undefined
+    this.orbitTouch = undefined
+    if (!this.modelSuspended) {
+      this.viewport.controls.mouseButtons.LEFT = -1 as THREE.MOUSE
+      this.viewport.controls.touches.ONE = -1 as THREE.TOUCH
+    }
+    this.cancelPaint(); this.cancelPushPull(); this.cancelMarquee(); this.cancelBrush()
+    this.primaryMode = true
+    this.action = action
+    this.brush = brush
+    this.mirrors = { ...mirrors }
+    this.wholeAxes = { ...wholeAxes }
+    this.secondaryTool = secondaryTool
+    this.pattern = normalizePattern(pattern)
+    this.auxiliary = undefined
+    if (secondaryTool === 'fill') { this.tool = 'paint'; this.paintMode = 'fill' }
+    else if (secondaryTool === 'push') { this.tool = 'sculpt'; this.sculptMode = 'push' }
+    else if (secondaryTool === 'layer') this.tool = 'layer'
+    else if (secondaryTool === 'texture' || secondaryTool === 'body') { this.tool = 'select'; this.selectionMode = secondaryTool }
+    else if (action === 'select') { this.tool = 'select'; this.selectionMode = brush === 'face' ? 'surface' : brush === 'texture' || brush === 'body' ? brush : 'point' }
+    else if (action === 'attach' || action === 'paint') { this.tool = 'paint'; this.paintMode = action === 'paint' ? 'paint' : 'fill' }
+    else { this.tool = 'sculpt'; this.sculptMode = action }
+    this.hover.visible = false
+    this.refreshLayerScope()
+    this.viewport.render()
   }
 
   clearSelection() {

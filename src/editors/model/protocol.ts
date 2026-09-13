@@ -77,6 +77,10 @@ function optionalCells(input: RecordValue) {
   return optional(input.cells, value => cells(value, 'command.cells'))
 }
 
+function optionalScope(input: RecordValue) {
+  return optional(input.scope, value => oneOf(value, 'command.scope', ['replace', 'empty', 'occupied'] as const))
+}
+
 export function parseRequest(value: unknown): RemoteRequest {
   const request = record(value, 'request')
   if (request.protocol !== PROTOCOL) throw new StudioCommandError('unsupported_version', `protocol must be ${PROTOCOL}.`)
@@ -92,10 +96,10 @@ export function parseCommand(value: unknown): RemoteCommand {
     case 'document.new': return { type, dimensions: optional(input.dimensions, value => dimensions(value, 'command.dimensions')), name: optional(input.name, value => stringValue(value, 'command.name', 60, true)) }
     case 'document.rename': return { type, name: stringValue(input.name, 'command.name', 60, true) }
     case 'document.resize': return { type, dimensions: dimensions(input.dimensions, 'command.dimensions'), anchor: oneOf(input.anchor, 'command.anchor', ['origin', 'center'] as const), allowCrop: optional(input.allowCrop, value => booleanValue(value, 'command.allowCrop')) }
-    case 'edit.paint': return { type, cells: optionalCells(input), color: optional(input.color, value => integer(value, 'command.color', 1, 255)), layerId: optionalLayer(input) }
+    case 'edit.paint': return { type, cells: optionalCells(input), color: optional(input.color, value => integer(value, 'command.color', 1, 255)), layerId: optionalLayer(input), scope: optionalScope(input) }
     case 'edit.erase': return { type, cells: optionalCells(input), layerId: optionalLayer(input) }
-    case 'edit.setVoxels': return { type, voxels: voxels(input.voxels, 'command.voxels'), layerId: optionalLayer(input) }
-    case 'edit.fill': return { type, min: vec3(input.min, 'command.min'), max: vec3(input.max, 'command.max'), color: optional(input.color, value => integer(value, 'command.color', 1, 255)), shape: oneOf(input.shape, 'command.shape', ['box', 'sphere', 'cylinder'] as const), axis: optional(input.axis, value => oneOf(value, 'command.axis', ['x', 'y', 'z'] as const)), layerId: optionalLayer(input) }
+    case 'edit.setVoxels': return { type, voxels: voxels(input.voxels, 'command.voxels'), layerId: optionalLayer(input), scope: optionalScope(input) }
+    case 'edit.fill': return { type, min: vec3(input.min, 'command.min'), max: vec3(input.max, 'command.max'), color: optional(input.color, value => integer(value, 'command.color', 1, 255)), shape: oneOf(input.shape, 'command.shape', ['box', 'sphere', 'cylinder'] as const), axis: optional(input.axis, value => oneOf(value, 'command.axis', ['x', 'y', 'z'] as const)), layerId: optionalLayer(input), scope: optionalScope(input) }
     case 'edit.move': return { type, cells: optionalCells(input), normal: normal(input.normal, 'command.normal'), distance: integer(input.distance, 'command.distance', -256, 256), layerId: optionalLayer(input) }
     case 'edit.pushPull': return { type, cells: optionalCells(input), normal: normal(input.normal, 'command.normal'), distance: integer(input.distance, 'command.distance', -256, 256), layerId: optionalLayer(input) }
     case 'history.undo': case 'history.redo': case 'clipboard.copy': case 'clipboard.cut': case 'clipboard.paste.begin': case 'clipboard.paste.cancel': case 'state.get': case 'project.snapshot.get': case 'view.get': case 'view.frame': case 'view.capture': case 'io.vox.export': case 'save.flush': return { type }
@@ -114,6 +118,11 @@ export function parseCommand(value: unknown): RemoteCommand {
     case 'palette.setColor': return { type, index: integer(input.index, 'command.index', 1, 255), color: integer(input.color, 'command.color', 0, 0xffffff) }
     case 'material.update': return { type, index: integer(input.index, 'command.index', 1, 255), patch: materialPatch(input.patch) }
     case 'tool.set': return { type, tool: oneOf(input.tool, 'command.tool', ['select', 'paint', 'sculpt', 'layer'] as const) }
+    case 'tool.action': return { type, action: oneOf(input.action, 'command.action', ['attach', 'erase', 'paint', 'select', 'move'] as const) }
+    case 'tool.brush': return { type, brush: oneOf(input.brush, 'command.brush', ['voxel', 'face', 'box', 'line', 'center', 'texture', 'body', 'pattern'] as const) }
+    case 'tool.mirror': return { type, axis: oneOf(input.axis, 'command.axis', ['x', 'y', 'z'] as const), enabled: optional(input.enabled, value => booleanValue(value, 'command.enabled')) }
+    case 'tool.wholeAxis': return { type, axis: oneOf(input.axis, 'command.axis', ['x', 'y', 'z'] as const), enabled: optional(input.enabled, value => booleanValue(value, 'command.enabled')) }
+    case 'tool.secondary': return { type, tool: optional(input.tool, value => oneOf(value, 'command.tool', ['push', 'fill', 'layer', 'texture', 'body'] as const)) }
     case 'tool.selectionMode': return { type, mode: oneOf(input.mode, 'command.mode', ['point', 'surface', 'texture', 'body'] as const) }
     case 'tool.paintMode': return { type, mode: oneOf(input.mode, 'command.mode', ['paint', 'fill'] as const) }
     case 'tool.sculptMode': return { type, mode: oneOf(input.mode, 'command.mode', ['push', 'move', 'erase'] as const) }

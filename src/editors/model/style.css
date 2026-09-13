@@ -86,16 +86,6 @@
 :where(.model-editor) .context-dock > div { display: grid; gap: 1px; }
 :where(.model-editor) .context-dock strong { font-size: 0.79rem; }
 :where(.model-editor) .context-dock span { color: var(--muted); font-size: 0.7rem; white-space: nowrap; }
-:where(.model-editor) .context-dock > .tool-options { display: flex; gap: 2px; padding: 3px; border-radius: 10px; background: #ecefed; }
-:where(.model-editor) .tool-options[hidden] { display: none; }
-:where(.model-editor) .tool-options button { min-height: 32px; padding: 0 9px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 0.68rem; font-weight: 700; }
-:where(.model-editor) .tool-options button { display: flex; align-items: center; gap: 6px; }
-:where(.model-editor) .tool-options svg { width: 17px; height: 17px; }
-:where(.model-editor) .tool-options kbd { color: inherit; opacity: 0.55; font: 600 0.58rem/1 inherit; }
-:where(.model-editor) .tool-options button:hover { color: var(--ink); background: rgba(255, 255, 255, 0.55); }
-:where(.model-editor) .tool-options button[aria-pressed="true"] { color: var(--ink); background: var(--paper); box-shadow: 0 2px 5px rgba(36, 45, 52, 0.11); }
-:where(.model-editor) .fill-depth { min-height: 32px; padding: 0 5px 0 8px; display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 0.68rem; font-weight: 700; }
-:where(.model-editor) .fill-depth input { width: 46px; height: 26px; padding: 0 4px; border: 1px solid #d7dcdb; border-radius: 6px; background: var(--paper); color: var(--ink); text-align: center; font-size: 0.7rem; font-variant-numeric: tabular-nums; }
 :where(.model-editor) #paint-tool-swatch { flex: 0 0 7px; width: 7px; height: 7px; border: 1px solid rgba(32, 38, 44, 0.2); border-radius: 50%; }
 :where(.model-editor) .tool-dock button[aria-pressed="true"] #paint-tool-swatch { border-color: rgba(255, 255, 255, 0.6); }
 :where(.model-editor) .tool-dock { bottom: var(--tool-dock-bottom); }
@@ -331,13 +321,8 @@
 :where(.model-editor) .save-status { padding: 0 4px; }
 :where(.model-editor) .scene-status #mesh-status { display: none; }
 :where(.model-editor) .scene-status .status-rule:last-of-type { display: none; }
-:where(.model-editor) .context-dock { width: max-content; max-width: calc(100vw - 20px); min-height: 40px; padding: 6px; flex-wrap: wrap; justify-content: center; gap: 4px; }
-:where(.model-editor) .context-dock:has(> .fill-options[hidden]) { display: none; }
+:where(.model-editor) .context-dock { display: none; }
 :where(.model-editor) .context-summary { display: none !important; }
-:where(.model-editor) .tool-options { order: 2; }
-:where(.model-editor) .tool-options button { min-width: 44px; min-height: 44px; justify-content: center; }
-:where(.model-editor) .fill-depth { min-height: 44px; }
-:where(.model-editor) .tool-options kbd { display: none; }
 :where(.model-editor) .layer-panel { width: calc(100vw - 20px); max-width: none; border-radius: 22px; }
 .model-editor .stage-panel { bottom: var(--tool-popup-bottom); height: min(570px, calc(100dvh - var(--tool-popup-bottom) - 18px)); }
 :where(.model-editor) .palette-view-bar button { min-height: 44px; }
@@ -351,7 +336,128 @@
 :where(.model-editor) .save-status { display: none; }
 }
 @media (max-width: 410px) {
-:where(.model-editor) .context-dock { width: auto; }
-:where(.model-editor) .fill-options button span { display: none; }
 :where(.model-editor) .welcome-cube { width: 58px; height: 58px; margin-bottom: 16px; }
+}
+
+/* Action x brush deck: the model editor keeps MagicaVoxel's explicit matrix without adopting its chrome. */
+.model-editor { --tool-height: 112px; --tool-popup-bottom: calc(var(--tool-dock-bottom) + var(--tool-height) + 12px); }
+:where(.model-editor) .tool-dock.edit-deck {
+  width: min(1120px, calc(100vw - 28px));
+  padding: 7px;
+  display: grid;
+  gap: 5px;
+  border-radius: 18px;
+  overflow: hidden;
+}
+:where(.model-editor) .edit-deck .deck-strip { min-width: 0; display: flex; align-items: center; gap: 3px; overflow-x: auto; scrollbar-width: none; }
+:where(.model-editor) .edit-deck .deck-strip::-webkit-scrollbar { display: none; }
+:where(.model-editor) .edit-deck .deck-label { flex: 0 0 42px; padding-left: 5px; color: var(--muted); font-size: 0.56rem; font-weight: 800; letter-spacing: 0.09em; text-transform: uppercase; }
+:where(.model-editor) .edit-deck button {
+  flex: 0 0 auto;
+  min-width: 58px;
+  width: auto;
+  height: 46px;
+  padding: 4px 8px;
+  display: grid;
+  grid-template-columns: 20px auto;
+  grid-template-rows: 1fr;
+  gap: 6px;
+  border-radius: 11px;
+  font-size: 0.66rem;
+}
+:where(.model-editor) .edit-deck button > svg { width: 19px; height: 19px; margin: 0; }
+:where(.model-editor) .edit-deck button > span { white-space: nowrap; }
+:where(.model-editor) .edit-deck button[aria-pressed="true"] { color: #fff; background: var(--cobalt); box-shadow: 0 3px 8px rgba(47, 102, 219, 0.22); }
+:where(.model-editor) .edit-deck .deck-divider { flex: 0 0 1px; width: 1px; height: 28px; margin: 0 4px; background: var(--line); }
+:where(.model-editor) .edit-deck .axis-group { flex: 0 0 auto; height: 42px; padding: 3px; display: flex; align-items: center; gap: 2px; border-radius: 10px; background: #ecefed; }
+:where(.model-editor) .edit-deck .axis-group > span { height: 34px; padding: 0 5px; display: flex; align-items: center; gap: 4px; color: var(--muted); }
+:where(.model-editor) .edit-deck .axis-group > span svg { width: 15px; height: 15px; }
+:where(.model-editor) .edit-deck .axis-group b { font-size: 0.56rem; }
+:where(.model-editor) .edit-deck button.axis-button { min-width: 30px; width: 30px; height: 34px; padding: 0; display: grid; place-items: center; border-radius: 8px; font-size: 0.61rem; }
+:where(.model-editor) .edit-deck .clipboard-group { flex: 0 0 auto; display: flex; gap: 2px; }
+:where(.model-editor) .edit-deck .clipboard-group button { min-width: 38px; width: 38px; grid-template-columns: 1fr; }
+:where(.model-editor) .edit-deck .deck-swatch { min-width: 46px; width: 46px; height: 42px; padding: 2px; display: grid; grid-template-columns: 1fr; border-radius: 11px; }
+:where(.model-editor) .edit-deck .deck-swatch .material-cube { width: 36px; height: 36px; }
+:where(.model-editor) #layer-tool-trigger { anchor-name: --layer-tool; }
+:where(.model-editor) .mobile-tool-shelf { display: none; }
+:where(.model-editor) .context-dock { max-width: calc(100vw - 24px); }
+
+@media (min-width: 841px) {
+  :where(.model-editor) .scene-status { bottom: var(--tool-popup-bottom); }
+}
+
+@media (max-width: 840px) {
+  .model-editor { --tool-height: 64px; }
+  :where(.model-editor) .tool-dock.desktop-tool-deck { display: none; }
+  :where(.model-editor) .tool-dock.mobile-tool-shelf { width: min(520px, calc(100vw - 20px)); padding: 5px; display: block; border-radius: 18px; }
+  :where(.model-editor) .mobile-tool-summary { min-width: 0; display: grid; grid-template-columns: 52px minmax(0, 1fr) 108px; align-items: stretch; }
+  :where(.model-editor) .mobile-wheel-picker { position: relative; min-width: 0; border-right: 1px solid var(--line); }
+  :where(.model-editor) .mobile-tool-shelf .mobile-wheel-trigger { min-width: 0; width: 100%; height: 52px; padding: 0 10px; display: flex; justify-content: flex-start; gap: 8px; border-radius: 12px; touch-action: none; user-select: none; }
+  :where(.model-editor) .mobile-tool-shelf #mobile-brush-trigger { width: 52px; padding: 0; justify-content: center; color: var(--cobalt-dark); background: #e9effc; }
+  :where(.model-editor) .mobile-tool-shelf .mobile-wheel-trigger[aria-expanded="true"], :where(.model-editor) #mobile-brush-trigger[aria-expanded="true"] { color: #fff; background: var(--cobalt); }
+  :where(.model-editor) .mobile-wheel-icon { display: grid; place-items: center; flex-shrink: 0; }
+  :where(.model-editor) .mobile-wheel-icon > svg { width: 22px; height: 22px; margin: 0; }
+  :where(.model-editor) .mobile-wheel-panel { position: absolute; left: -5px; bottom: calc(100% + 11px); width: 176px; padding: 4px; border-radius: 18px; background: var(--porcelain); user-select: none; }
+  :where(.model-editor) .mobile-wheel-panel[hidden] { display: none; }
+  :where(.model-editor) .wheel-drum { position: relative; height: 220px; overflow: hidden; border-radius: 14px; perspective: 500px; touch-action: none; }
+  :where(.model-editor) .wheel-drum:focus-visible { outline: 3px solid var(--cobalt-dark); outline-offset: 5px; }
+  :where(.model-editor) .wheel-drum::before { content: ""; position: absolute; inset: calc(50% - 22px) 2px auto; height: 44px; border-block: 1px solid var(--line); border-radius: 10px; background: #e9effc; pointer-events: none; }
+  :where(.model-editor) .mobile-tool-shelf .wheel-drum > button { position: absolute; top: calc(50% - 22px); left: 2px; min-width: 0; width: calc(100% - 4px); height: 44px; padding: 0 12px; display: grid; grid-template: 1fr / 22px 1fr; place-items: center start; gap: 10px; border-radius: 10px; background: transparent; font-size: 0.84rem; touch-action: none; }
+  :where(.model-editor) .wheel-drum > button > svg { width: 20px; height: 20px; margin: 0; }
+  :where(.model-editor) .wheel-drum > button[data-centered="true"] { color: var(--cobalt-dark); font-weight: 800; }
+  .model-editor:has(.mobile-wheel-panel:not([hidden])) .mobile-tool-shelf { z-index: 30; }
+  :where(.model-editor) .mobile-tool-value { min-width: 0; display: grid; align-content: center; justify-items: start; gap: 2px; }
+  :where(.model-editor) .mobile-tool-value > span { color: var(--muted); font-size: 0.53rem; font-weight: 800; letter-spacing: 0.09em; text-transform: uppercase; }
+  :where(.model-editor) .mobile-tool-value > strong { overflow: hidden; font-size: 0.76rem; line-height: 1.1; text-overflow: ellipsis; white-space: nowrap; }
+  :where(.model-editor) .mobile-wheel-trigger[aria-expanded="true"] .mobile-tool-value > span { color: inherit; }
+  :where(.model-editor) .mobile-tool-shelf .all-tools-trigger { min-width: 0; width: 100%; height: 52px; padding: 5px 8px; display: grid; grid-template: 1fr / 20px minmax(0, 1fr); place-items: center start; gap: 7px; border-radius: 12px; }
+  :where(.model-editor) .all-tools-trigger > svg { width: 19px; height: 19px; margin: 0; }
+  :where(.model-editor) .all-tools-trigger > span { min-width: 0; display: grid; justify-items: start; gap: 1px; }
+  :where(.model-editor) .all-tools-trigger strong { font-size: 0.68rem; white-space: nowrap; }
+  :where(.model-editor) .all-tools-trigger small { max-width: 100%; overflow: hidden; font-size: 0.54rem; line-height: 1.1; opacity: 0.72; text-overflow: ellipsis; white-space: nowrap; }
+  :where(.model-editor) .all-tools-trigger[data-active-operation="true"] { color: var(--cobalt-dark); background: #e9effc; }
+  .model-editor:has(#all-tools-panel:popover-open) .all-tools-trigger { color: #fff; background: var(--cobalt); }
+
+  :where(.model-editor) .all-tools-panel:popover-open {
+    inset: auto max(10px, env(safe-area-inset-right)) var(--tool-popup-bottom) max(10px, env(safe-area-inset-left));
+    width: auto;
+    max-width: none;
+    max-height: min(70dvh, calc(100dvh - var(--tool-popup-bottom) - max(82px, calc(env(safe-area-inset-top) + 72px))));
+    padding: 8px;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    overflow: hidden;
+    border-radius: 22px;
+    transform: none;
+  }
+  :where(.model-editor) .all-tools-panel > header { min-height: 52px; padding: 4px 4px 7px 10px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  :where(.model-editor) .all-tools-panel > header > div { min-width: 0; display: grid; gap: 2px; }
+  :where(.model-editor) .all-tools-panel > header button { flex: 0 0 44px; width: 44px; height: 44px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 11px; background: transparent; }
+  :where(.model-editor) .all-tools-panel > header button:hover { background: #ecefec; }
+  :where(.model-editor) .all-tools-panel > header button svg { width: 18px; height: 18px; }
+  :where(.model-editor) .all-tools-body { min-height: 0; padding: 10px 2px 3px; display: grid; gap: 14px; overflow-x: clip; overflow-y: auto; overscroll-behavior-y: contain; }
+  :where(.model-editor) .all-tools-group { min-width: 0; display: grid; gap: 6px; }
+  :where(.model-editor) .all-tools-group h2 { margin: 0 3px; color: var(--muted); font-size: 0.58rem; font-weight: 800; letter-spacing: 0.09em; text-transform: uppercase; }
+  :where(.model-editor) .all-tools-grid { min-width: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(54px, 1fr)); gap: 4px; }
+  :where(.model-editor) .brush-tools-group .all-tools-grid { grid-template-columns: repeat(4, minmax(54px, 1fr)); }
+  :where(.model-editor) .utility-tools-group .all-tools-grid { grid-template-columns: repeat(2, minmax(72px, 100px)); }
+  :where(.model-editor) :is(.axis-tools-group, .clipboard-tools-group) .all-tools-grid { grid-template-columns: repeat(3, minmax(44px, 1fr)); }
+  :where(.model-editor) .material-tools-group .all-tools-grid { grid-template-columns: minmax(92px, 126px); }
+  :where(.model-editor) .all-tools-grid > button { min-width: 0; width: 100%; height: 54px; padding: 4px 5px; display: grid; grid-template: 22px 16px / 1fr; place-items: center; gap: 2px; border: 0; border-radius: 10px; background: transparent; font-size: 0.64rem; font-weight: 750; }
+  :where(.model-editor) .all-tools-grid > button:hover { background: #ecefec; }
+  :where(.model-editor) .all-tools-grid > button[aria-pressed="true"] { color: #fff; background: var(--cobalt); box-shadow: 0 3px 8px rgba(47, 102, 219, 0.22); }
+  :where(.model-editor) .all-tools-grid > button > svg { width: 19px; height: 19px; margin: 0; }
+  :where(.model-editor) .all-tools-grid > button > span { max-width: 100%; overflow: hidden; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
+  :where(.model-editor) .all-tools-grid > button > kbd { display: none; }
+  :where(.model-editor) .all-tools-grid > button.axis-button { grid-template: 1fr / 1fr; font-size: 0.72rem; }
+  :where(.model-editor) .all-tools-grid > .deck-swatch { grid-template: 1fr / 38px auto; justify-content: start; gap: 7px; padding-inline: 8px; }
+  :where(.model-editor) .all-tools-grid > .deck-swatch .material-cube { width: 36px; height: 36px; }
+  .model-editor .stage-panel { bottom: calc(var(--tool-height) + var(--tool-dock-bottom) + 10px); }
+}
+
+@media (orientation: landscape) and (max-height: 500px) and (max-width: 840px) {
+  :where(.model-editor) .wheel-drum { height: 132px; }
+  :where(.model-editor) .all-tools-panel:popover-open { max-height: calc(100dvh - var(--tool-popup-bottom) - max(72px, calc(env(safe-area-inset-top) + 62px))); }
+  :where(.model-editor) .all-tools-body { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 12px; }
+  :where(.model-editor) .material-tools-group { grid-column: 1 / -1; }
 }

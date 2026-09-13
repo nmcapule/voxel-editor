@@ -14,7 +14,7 @@ plus a Bun/SQLite server for shared model and scene libraries.
 
 ## Users
 
-Voxel artists and game creators working on a desktop or tablet who want to make,
+Voxel artists and game creators working on a desktop, tablet, or phone who want to make,
 inspect, and render voxel models and compose them into scenes without installing
 desktop software.
 
@@ -35,13 +35,12 @@ It should feel like drawing in space rather than operating a traditional desktop
 ## Operating Context
 
 Creators work in one full-screen 3D viewport using a mouse and keyboard, pen, or
-touch. In the model editor they retain a point, surface, texture, or body selection
-mode while using four primary tools: Select, Volume, Sculpt, and Layer. Volume
-(formerly Place) holds Paint, Fill (the former Volume operation), a momentary
-Eyedropper, and Erase (moved from Sculpt); Paint and Erase reuse the selection mode.
-Sculpt holds Push/Pull and Move. Layer activates the owner of a tapped or clicked
-voxel on release and pans the viewport on drag. Creators can also navigate the
-camera, adjust the palette and lighting, and import or export files.
+touch. In the model editor they independently choose an action (Attach, Erase,
+Paint, Select, or Move) and a brush (Voxel, Face, Box, Line, Center, Texture, Body,
+or Pattern). Mirror and whole-axis modifiers apply on X, Y, and Z. Eyedropper and
+Layer remain explicit utilities; Layer activates the owner of a tapped or clicked voxel on release and pans the
+viewport on drag. Creators can also navigate the camera, adjust the palette and
+lighting, and import or export files.
 
 The scene editor plugin is available under Plugins in the project menu and loads
 only when explicitly opened. Startup always restores the standalone model, even
@@ -64,35 +63,37 @@ to the composition without replacing the standalone model workspace.
 - Named voxel layers with one active layer, visibility and locking controls,
   overlapping per-layer voxels, and local persistence. The highest visible layer
   wins at each coordinate; a stationary tap or click on a visible voxel with the
-  Layer tool activates its owner on release. Left-button, pen, and one-finger drags
+  Layer utility activates its owner on release. Left-button, pen, and one-finger drags
   pan the viewport over voxels or background; right-button orbit, middle-button
   pan, and two-finger navigation remain unchanged. VOX export flattens visible
   layers into one model.
-- Point clicks and occupied 3D box drags, connected-surface, contiguous same-texture,
-  contiguous-body, and marquee selection with Volume's Paint and Erase plus
-  Sculpt's Push/Pull and Move. In Point mode, Paint and Erase preview the dragged
-  box and commit on release; clicking either operation within the current selection
-  applies it to the full selection, while clicking elsewhere resolves a new scope.
-  Push/Pull and Move first select an unselected target
-  and apply on the next drag. Push/Pull reshapes the whole selection along the
-  clicked face normal, preserving staggered face depths rather than restricting
-  edits to one plane. It supports multiple voxel-depth steps per drag and pulls
-  through occupied destinations, replacing colors on the active
-  layer. Select, Paint, Erase, and Sculpt retain active-layer-only picking, but show
-  other visible layers as faint, noninteractive context only while a selection
-  exists. Without a selection, or during Fill, Layer, Eyedropper, Render, or model
-  inspection, the full visible composition is shown. Move overwrites occupied destinations on the active
-  layer while preserving overlapping voxels on other layers. The Select popup and
-  standard keyboard shortcuts provide Cut, Copy, and movable ghost Paste. The editor also includes a momentary eyedropper,
-  undo and redo with matching selection and layer restoration, and
-  selection-centered camera orbit. Deselecting leaves the camera target and
-  position unchanged and stops any in-flight selection-focus animation. The main
-  Select tile clears the current selection; expand, swipe, hover, and selection-mode
-  choice do not. Right-drag remains dedicated to camera orbit.
-- Volume's Fill operation provides box, sphere, and cylinder shapes with
-  two dragged 3D corners to create undoable volumes in the active material and
-  layer. Corners snap outside model faces or onto the floor and visible side
-  grids of the guide volume. Explicit depth remains available for keyboard fills.
+- Primary brush gestures share one spatial preview and commit path. Voxel draws a
+  one-cell-wide freehand stroke, resampling fast pointer movement across stepped
+  heights, face changes, and visible document layers while starting a new segment
+  at genuine surface gaps. Face resolves a connected exposed surface; Attach and
+  Erase drags add or remove its contiguous voxel depth along the face normal. Texture
+  resolves a connected same-color region, Body resolves the complete connected
+  region, and Box spans X,
+  Y, and Z between opposite
+  surface or guide-grid cells, while Line and Center remain planar. Pattern places
+  a centered copy of clipboard voxels and is disabled until voxels have been copied
+  or cut. Mirror reflects the result across the document midpoint and whole-axis
+  expands it through a complete X, Y, or Z span. Attach writes only empty
+  active-layer cells, Paint recolors only occupied active-layer cells, and Erase
+  removes only occupied active-layer cells. Each gesture commits as one undoable edit.
+- Select uses the same brush geometry, with Shift or touch adding or removing a
+  scope. Move translates a selected region; Ctrl/Command-drag resolves the current
+  brush and moves it immediately. Move overwrites destinations on the active layer
+  while preserving overlaps on other layers. Cut, Copy, movable ghost Paste, and a momentary
+  Eyedropper remain available beside the brush controls.
+- Paint, Erase, Select, and Move use active-layer-only editing and
+  picking. Attach may anchor to any visible surface but writes only the active layer.
+  Other visible layers appear as faint, noninteractive context while a selection
+  exists. Without a selection, or during Attach, Layer, Eyedropper, Render,
+  or model inspection, the full visible composition is shown. Undo and redo restore
+  matching selection and layer state. Deselecting leaves the camera target and
+  position unchanged and stops any in-flight selection-focus animation. Right-drag
+  remains dedicated to camera orbit.
 - Orthographic and perspective camera modes, editing-grid, voxel-face-grid, and
   shadow and ambient-occlusion controls, an FPS readout, palette-scoped
   roughness, metalness, emissive intensity, opacity, transmission, refraction, albedo, normal,
@@ -132,7 +133,12 @@ to the composition without replacing the standalone model workspace.
   Scene history is separate from model-content history, bounded, and may evict
   undo entries. Histories do not survive refresh or library/file round trips.
 - Selection scope plus active and recent materials persist across refreshes.
-- Desktop-first interaction with pen and touch support and a mobile-safe layout.
+- Desktop-first interaction with pen and touch support. On phones, a compact tool
+  shelf exposes brush and action wheel pickers. Press either control and swipe
+  vertically to turn its wheel; release commits the centered mode. A tap opens the
+  wheel for option taps or arrow-key selection, with Escape canceling. One labeled disclosure
+  exposes every action, brush, utility, modifier, clipboard action, and material control without
+  relying on hidden horizontal scrolling.
 - Animation, per-voxel material metadata, cloud sync,
   and collaboration are outside the first release.
 - A 256-cubed document is a supported coordinate volume. Pathological models
@@ -165,4 +171,6 @@ third-party artwork are available and none should be fabricated.
 
 Use semantic controls, visible keyboard focus, text-backed tool state, keyboard
 shortcuts, live coordinate announcements, reduced-motion support, 44-pixel touch
-targets, and a layout that remains usable at 320 pixels wide.
+targets, and a layout that remains usable at 320 pixels wide. Responsive tool
+disclosures support keyboard opening, Escape and explicit closing, light dismissal,
+and predictable focus restoration.

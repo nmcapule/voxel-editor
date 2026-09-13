@@ -434,9 +434,248 @@ function modelGestureProbe(fail = false) {
       const event = { ...pointer, ...patch }
       for (const { listener } of [...events.get(type) ?? []].sort((a, b) => Number(b.capture) - Number(a.capture))) listener({ ...event, pageX: event.clientX, pageY: event.clientY })
     },
-    dispose() { probe.cancelPaint(); probe.cancelPushPull(); probe.cancelMarquee(); probe.clearSelectionPreview(); probe.hover.geometry.dispose(); probe.hover.material.dispose(); probe.marqueePreview.geometry.dispose(); probe.marqueePreview.material.dispose() },
+    dispose() { probe.cancelPaint(); probe.cancelPushPull(); probe.cancelMarquee(); probe.cancelBrush(); probe.clearSelectionPreview(); probe.hover.geometry.dispose(); probe.hover.material.dispose(); probe.marqueePreview.geometry.dispose(); probe.marqueePreview.material.dispose() },
   }
 }
+
+test('primary action gestures commit the same modified brush mask shown by the preview', () => {
+  const gesture = modelGestureProbe(), { probe, emit, target } = gesture
+  const commit = probe.callbacks.onBrushCommit = mock()
+  const pick = probe.callbacks.onPick = mock()
+  try {
+    probe.setBrushState('attach', 'voxel', { x: true, y: false, z: false }, { x: false, y: false, z: false })
+    emit('pointermove')
+    expect(probe.fillPreview.count).toBe(2)
+    emit('pointerdown')
+    expect(commit).not.toHaveBeenCalled()
+    emit('pointerup')
+    expect(commit).toHaveBeenCalledWith('attach', [
+      { x: target.cell.x, y: target.cell.y + 1, z: target.cell.z },
+      { x: probe.document.dimensions.x - 1 - target.cell.x, y: target.cell.y + 1, z: target.cell.z },
+    ])
+    expect(commit).toHaveBeenCalledTimes(1)
+
+    emit('pointerdown', { altKey: true })
+    expect(pick).toHaveBeenCalledWith(target.color)
+    expect(commit).toHaveBeenCalledTimes(1)
+  } finally { gesture.dispose() }
+})
+
+test('Face Attach and Erase drag through voxel depth for mouse, pen, and touch', () => {
+  for (const pointerType of ['mouse', 'pen', 'touch']) {
+    for (const action of ['attach', 'erase'] as const) {
+      const gesture = modelGestureProbe(), { probe, emit, target } = gesture
+      const commit = probe.callbacks.onBrushCommit = mock()
+      probe.screenNormal = () => ({ screenX: 10, screenY: 0 })
+      if (action === 'erase') {
+        probe.document.setVoxel(target.cell.x, target.cell.y - 1, target.cell.z, 1)
+        probe.document.setVoxel(target.cell.x, target.cell.y - 2, target.cell.z, 1)
+      }
+      try {
+        probe.setBrushState(action, 'face', { x: false, y: false, z: false }, { x: false, y: false, z: false })
+        emit('pointerdown', { pointerId: 1, pointerType, clientX: 50 })
+        emit('pointermove', { pointerId: 1, pointerType, clientX: action === 'attach' ? 70 : 30 })
+        expect(probe.fillPreview.count).toBe(3)
+        expect(commit).not.toHaveBeenCalled()
+        emit('pointerup', { pointerId: 1, pointerType, clientX: action === 'attach' ? 70 : 30 })
+        expect(commit).toHaveBeenCalledTimes(1)
+        expect(commit).toHaveBeenCalledWith(action, [1, 2, 3].map(depth => ({
+          x: target.cell.x,
+          y: target.cell.y + (action === 'attach' ? depth : 1 - depth),
+          z: target.cell.z,
+        })))
+      } finally { gesture.dispose() }
+    }
+  }
+})
+
+test('Texture and Body brushes resolve connected color and body masks for every action', () => {
+  const gesture = modelGestureProbe(), { probe, target } = gesture
+  const coords = (cells: { x: number; y: number; z: number }[]) => cells.map(({ x, y, z }) => `${x},${y},${z}`).sort()
+  probe.document.setVoxel(3, 2, 2, 1)
+  probe.document.setVoxel(4, 2, 2, 2)
+  probe.document.setVoxel(8, 2, 2, 1)
+  try {
+    probe.setBrushState('paint', 'texture', { x: false, y: false, z: false }, { x: false, y: false, z: false })
+    expect(coords(probe.resolveBrushCells(target))).toEqual(['2,2,2', '3,2,2'])
+
+    probe.setBrushState('attach', 'texture', { x: false, y: false, z: false }, { x: false, y: false, z: false })
+    expect(coords(probe.resolveBrushCells(target))).toEqual(['2,3,2', '3,3,2'])
+
+    probe.setBrushState('erase', 'body', { x: false, y: false, z: false }, { x: false, y: false, z: false })
+    expect(coords(probe.resolveBrushCells(target))).toEqual(['2,2,2', '3,2,2', '4,2,2'])
+  } finally { gesture.dispose() }
+})
+
+test('Voxel strokes interpolate fast surface movement for mouse, pen, and touch and commit once on release', () => {
+  for (const pointerType of ['mouse', 'pen', 'touch']) {
+    const gesture = modelGestureProbe(), { probe, emit } = gesture
+    const commit = probe.callbacks.onBrushCommit = mock()
+    for (let x = 3; x <= 6; x++) probe.document.setVoxel(x, 2, 2, 1)
+    probe.targetAt = (event: PointerEvent) => ({
+      cell: { x: 2 + Math.round((event.clientX - 50) / 10), y: 2, z: 2 },
+      normal: { x: 0, y: 1, z: 0 }, occupied: true, color: 1,
+    })
+    try {
+      probe.setBrushState('attach', 'voxel', { x: false, y: false, z: false }, { x: false, y: false, z: false })
+      emit('pointerdown', { pointerId: 1, pointerType, clientX: 50 })
+      emit('pointermove', { pointerId: 1, pointerType, clientX: 80 })
+      expect(probe.fillPreview.count).toBe(4)
+      expect(commit).not.toHaveBeenCalled()
+      emit('pointerup', { pointerId: 1, pointerType, clientX: 90 })
+      expect(commit).toHaveBeenCalledTimes(1)
+      expect(commit).toHaveBeenCalledWith('attach', [2, 3, 4, 5, 6].map(x => ({ x, y: 3, z: 2 })))
+      expect(probe.brushDrag).toBeUndefined()
+      expect(probe.fillPreview).toBeUndefined()
+    } finally { gesture.dispose() }
+  }
+})
+
+test('Voxel strokes interpolate across visible document layers and stepped surface heights', () => {
+  const gesture = modelGestureProbe(), { probe, emit, target } = gesture
+  const commit = probe.callbacks.onBrushCommit = mock()
+  const activeLayer = probe.document.activeLayerId
+  const upperLayer = probe.document.createLayer()
+  for (let x = 3; x <= 5; x++) probe.document.setVoxel(x, 2, 2, 1, activeLayer)
+  for (let x = 6; x <= 8; x++) probe.document.setVoxel(x, 3, 2, 1, upperLayer.id)
+  probe.document.setActiveLayer(activeLayer)
+  probe.targetAt = (event: PointerEvent) => event.clientX >= 90
+    ? { cell: { x: 8, y: 3, z: 2 }, normal: { x: 0, y: 1, z: 0 }, occupied: true, color: 1 }
+    : target
+  try {
+    probe.setBrushState('attach', 'voxel', { x: false, y: false, z: false }, { x: false, y: false, z: false })
+    emit('pointerdown', { clientX: 50 })
+    emit('pointerup', { clientX: 90 })
+    expect(commit).toHaveBeenCalledWith('attach', [
+      { x: 2, y: 3, z: 2 }, { x: 3, y: 3, z: 2 }, { x: 4, y: 3, z: 2 }, { x: 5, y: 3, z: 2 },
+      { x: 6, y: 4, z: 2 }, { x: 7, y: 4, z: 2 }, { x: 8, y: 4, z: 2 },
+    ])
+  } finally { gesture.dispose() }
+})
+
+test('Voxel strokes sample fast pointer movement across changing visible surfaces', () => {
+  const gesture = modelGestureProbe(), { probe, emit, target } = gesture
+  const commit = probe.callbacks.onBrushCommit = mock()
+  probe.document.setVoxel(4, 2, 2, 1)
+  probe.document.setVoxel(4, 3, 2, 1)
+  probe.document.setVoxel(4, 4, 2, 1)
+  probe.document.setVoxel(4, 5, 2, 1)
+  probe.targetAt = (event: PointerEvent) => {
+    if (event.clientX <= 50) return target
+    if (event.clientX <= 80) return {
+      cell: { x: 4, y: 2 + Math.floor((event.clientX - 51) / 10), z: 2 },
+      normal: { x: -1, y: 0, z: 0 }, occupied: true, color: 1,
+    }
+    return { cell: { x: 4, y: 5, z: 2 }, normal: { x: 0, y: 1, z: 0 }, occupied: true, color: 1 }
+  }
+  try {
+    probe.setBrushState('paint', 'voxel', { x: false, y: false, z: false }, { x: false, y: false, z: false })
+    emit('pointerdown', { clientX: 50 })
+    emit('pointerup', { clientX: 90 })
+    expect(commit).toHaveBeenCalledWith('paint', [
+      target.cell,
+      { x: 4, y: 2, z: 2 }, { x: 4, y: 3, z: 2 }, { x: 4, y: 4, z: 2 }, { x: 4, y: 5, z: 2 },
+    ])
+  } finally { gesture.dispose() }
+})
+
+test('Voxel strokes break interpolation across surface gaps, corners, and missing targets', () => {
+  const gesture = modelGestureProbe(), { probe, emit } = gesture
+  const commit = probe.callbacks.onBrushCommit = mock()
+  for (const cell of [{ x: 3, y: 2, z: 2 }, { x: 6, y: 2, z: 2 }, { x: 7, y: 2, z: 2 }, { x: 6, y: 2, z: 4 }]) probe.document.setVoxel(cell.x, cell.y, cell.z, 1)
+  const top = (x: number) => ({ cell: { x, y: 2, z: 2 }, normal: { x: 0, y: 1, z: 0 }, occupied: true, color: 1 })
+  probe.targetAt = (event: PointerEvent) => event.clientX <= 50 ? top(2)
+    : event.clientX < 60 ? top(3)
+    : event.clientX < 70 ? undefined
+    : event.clientX === 70 ? top(6)
+    : event.clientX <= 75 ? { cell: { x: 6, y: 2, z: 4 }, normal: { x: 0, y: 0, z: 1 }, occupied: true, color: 1 }
+    : event.clientX < 90 ? undefined
+    : top(7)
+  try {
+    probe.setBrushState('attach', 'voxel', { x: false, y: false, z: false }, { x: false, y: false, z: false })
+    emit('pointerdown', { clientX: 50 })
+    emit('pointermove', { clientX: 70 })
+    expect(probe.fillPreview.count).toBe(3)
+    emit('pointermove', { clientX: 75 })
+    expect(probe.fillPreview.count).toBe(4)
+    emit('pointermove', { clientX: 80 })
+    emit('pointerup', { clientX: 90 })
+    expect(commit).toHaveBeenCalledWith('attach', [
+      { x: 2, y: 3, z: 2 }, { x: 3, y: 3, z: 2 }, { x: 6, y: 3, z: 2 },
+      { x: 6, y: 2, z: 5 }, { x: 7, y: 3, z: 2 },
+    ])
+
+    commit.mockClear()
+    emit('pointerdown', { clientX: 50 })
+    emit('pointermove', { clientX: 70 })
+    probe.applySelection({ cells: [], count: 0 }, false)
+    emit('pointerup', { clientX: 70 })
+    expect(commit).not.toHaveBeenCalled()
+    expect(probe.brushDrag).toBeUndefined()
+  } finally { gesture.dispose() }
+})
+
+test('Box brush previews and commits the volume between opposite picked 3D corners', () => {
+  const gesture = modelGestureProbe(), { probe, emit, target } = gesture
+  const commit = probe.callbacks.onBrushCommit = mock()
+  const moved = { cell: { x: 5, y: 5, z: 4 }, normal: { x: 1, y: 0, z: 0 }, occupied: true, color: 1 }
+  const released = { cell: { x: 4, y: 6, z: 5 }, normal: { x: 0, y: 1, z: 0 }, occupied: false, color: 0 }
+  probe.targetAt = (event: PointerEvent) => event.clientX >= 80 ? released : event.clientX >= 70 ? moved : target
+  probe.planeTargetAt = () => { throw new Error('Box must not project onto the starting plane') }
+  try {
+    probe.setBrushState('attach', 'box', { x: false, y: false, z: false }, { x: false, y: false, z: false })
+    emit('pointerdown', { clientX: 50 })
+    emit('pointermove', { clientX: 70 })
+    expect(probe.fillPreview.count).toBe(45)
+    emit('pointerup', { clientX: 80 })
+    const expected = [...fillShapeVoxels({ x: 2, y: 3, z: 2 }, released.cell, 'box', 'y', probe.document.dimensions)]
+    expect(commit).toHaveBeenCalledTimes(1)
+    expect(commit).toHaveBeenCalledWith('attach', expected)
+
+    commit.mockClear()
+    const samePlane = { cell: { x: 5, y: 3, z: 4 }, normal: { x: 0, y: 1, z: 0 }, occupied: false, color: 0 }
+    probe.targetAt = (event: PointerEvent) => event.clientX >= 90 ? samePlane : target
+    emit('pointerdown', { clientX: 50 })
+    emit('pointerup', { clientX: 90 })
+    expect(commit).toHaveBeenCalledTimes(1)
+    expect(commit.mock.calls[0][1].every((cell: { y: number }) => cell.y === 3)).toBe(true)
+  } finally { gesture.dispose() }
+})
+
+test('touch brushes commit on release, cancel for two-finger navigation, and retain additive selection', () => {
+  const gesture = modelGestureProbe(), { probe, emit, target } = gesture
+  const commit = probe.callbacks.onBrushCommit = mock(), selected = probe.callbacks.onSelectionChange = mock()
+  try {
+    probe.setBrushState('attach', 'voxel', { x: false, y: false, z: false }, { x: false, y: false, z: false })
+    emit('pointerdown', { pointerId: 1, pointerType: 'touch' })
+    expect(commit).not.toHaveBeenCalled()
+    emit('pointerup', { pointerId: 1, pointerType: 'touch' })
+    expect(commit).toHaveBeenCalledTimes(1)
+
+    commit.mockClear()
+    probe.document.setVoxel(3, 2, 2, 1)
+    probe.targetAt = (event: PointerEvent) => event.clientX >= 70
+      ? { ...target, cell: { x: 3, y: 2, z: 2 } } : target
+    emit('pointerdown', { pointerId: 2, pointerType: 'touch', clientX: 50 })
+    emit('pointermove', { pointerId: 2, pointerType: 'touch', clientX: 70 })
+    expect(probe.fillPreview.count).toBe(2)
+    emit('pointerdown', { pointerId: 3, pointerType: 'touch', clientX: 50 })
+    expect(probe.brushDrag).toBeUndefined()
+    expect(probe.fillPreview).toBeUndefined()
+    emit('pointerup', { pointerId: 2, pointerType: 'touch' })
+    emit('pointerup', { pointerId: 3, pointerType: 'touch' })
+    expect(commit).not.toHaveBeenCalled()
+
+    probe.targetAt = () => target
+    probe.setBrushState('select', 'box', { x: false, y: false, z: false }, { x: false, y: false, z: false })
+    probe.setSelection([target.cell], false)
+    selected.mockClear()
+    emit('pointerdown', { pointerId: 4, pointerType: 'touch' })
+    emit('pointerup', { pointerId: 4, pointerType: 'touch' })
+    expect(probe.selection.size).toBe(0)
+    expect(selected).toHaveBeenLastCalledWith({ cells: [], count: 0, floating: false })
+  } finally { gesture.dispose() }
+})
 
 test('model pointer gestures restore canvas keyboard focus unless the model is suspended', () => {
   const gesture = modelGestureProbe(), { probe, emit, target } = gesture

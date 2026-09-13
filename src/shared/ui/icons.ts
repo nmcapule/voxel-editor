@@ -30,6 +30,14 @@ const icons: Record<string, string> = {
   'cut': '<svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="m8.5 7.5 11 8.5M8.5 16.5l11-8.5"/></svg>',
   'copy': '<svg aria-hidden="true" viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h2"/></svg>',
   'paste': '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 5h6M9 3h6v4H9z"/><path d="M8 5H5v16h14V5h-3M8 12h8M8 16h5"/></svg>',
+  'attach': '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 8 6 3.5v7L9 22l-6-3.5v-7L9 8Z"/><path d="m9 15 6-3.5M9 15l-6-3.5M9 15v7M18 3v7M14.5 6.5h7"/></svg>',
+  'voxel': '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="m12 4 7 4v8l-7 4-7-4V8l7-4Z"/><path d="m12 12 7-4M12 12 5 8M12 12v8"/></svg>',
+  'face': '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="m5 8 7-4 7 4-7 4-7-4Z"/><path d="m5 12 7 4 7-4M5 16l7 4 7-4"/></svg>',
+  'line': '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 18 19 6"/><rect x="3" y="16" width="4" height="4"/><rect x="17" y="4" width="4" height="4"/></svg>',
+  'center': '<svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>',
+  'pattern': '<svg aria-hidden="true" viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6"/><rect x="14" y="4" width="6" height="6"/><rect x="4" y="14" width="6" height="6"/><path d="M14 17h6M17 14v6"/></svg>',
+  'mirror': '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v18M4 8l5-3v14l-5-3V8ZM20 8l-5-3v14l5-3V8Z"/></svg>',
+  'axis': '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 18h16M7 15l-3 3 3 3M17 15l3 3-3 3M12 18V4M9 7l3-3 3 3"/></svg>',
 }
 
 export const icon = (name: string) => icons[name] ?? ''

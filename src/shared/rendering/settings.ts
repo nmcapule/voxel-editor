@@ -24,6 +24,7 @@ export interface ViewSettings {
   fogSpread: number // Padding per side as a fraction of the longest model/scene axis.
   fogColor: string
   grid: boolean
+  gridWalls: boolean
   faceGrid: boolean
   meshVertices: boolean
   meshTriangles: boolean
@@ -38,8 +39,8 @@ export interface ViewSettings {
 }
 
 export const DEFAULT_SETTINGS: ViewSettings = {
-  skybox: 'solid', showSun: true, background: '#dfe7ec', ambient: 1.2, light: 2.4, lightAzimuth: 42,
-  ambientOcclusion: true, shadows: true, volumetricLighting: false, grid: true, faceGrid: false,
+  skybox: 'solid', showSun: false, background: '#becdc5', ambient: 1.2, light: 2.4, lightAzimuth: 42,
+  ambientOcclusion: true, shadows: true, volumetricLighting: false, grid: false, gridWalls: false, faceGrid: false,
   fogDensity: 1, fogSpread: 0.25, fogColor: '#ffffff',
   meshVertices: false, meshTriangles: false, previewRenderer: 'standard', pbrMaterials: true, projection: 'orthographic', pathTracing: true,
   tiltShift: false, tiltShiftStrength: 0.5, tiltShiftFocus: 0.5, tiltShiftWidth: 0.3,
@@ -66,6 +67,7 @@ export function settingsPatch(value: unknown): Partial<ViewSettings> {
   if (input.fogDensity !== undefined) patch.fogDensity = numberValue(input.fogDensity, 'command.patch.fogDensity', 0, 3)
   if (input.fogSpread !== undefined) patch.fogSpread = numberValue(input.fogSpread, 'command.patch.fogSpread', 0, 1)
   if (input.grid !== undefined) patch.grid = booleanValue(input.grid, 'command.patch.grid')
+  if (input.gridWalls !== undefined) patch.gridWalls = booleanValue(input.gridWalls, 'command.patch.gridWalls')
   if (input.faceGrid !== undefined) patch.faceGrid = booleanValue(input.faceGrid, 'command.patch.faceGrid')
   if (input.meshVertices !== undefined) patch.meshVertices = booleanValue(input.meshVertices, 'command.patch.meshVertices')
   if (input.meshTriangles !== undefined) patch.meshTriangles = booleanValue(input.meshTriangles, 'command.patch.meshTriangles')

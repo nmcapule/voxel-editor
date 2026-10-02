@@ -677,6 +677,50 @@ test('touch brushes commit on release, cancel for two-finger navigation, and ret
   } finally { gesture.dispose() }
 })
 
+test('mobile Paint and Erase retain a drag starting off-model until it reaches editable voxels', () => {
+  for (const action of ['paint', 'erase'] as const) for (const brush of ['voxel', 'box'] as const) {
+    const gesture = modelGestureProbe(), { probe, emit, target } = gesture
+    const commit = probe.callbacks.onBrushCommit = mock()
+    const camera = new PerspectiveCamera()
+    camera.position.set(12, 8, 12)
+    probe.viewport.camera = camera
+    Object.assign(probe.viewport, { callbacks: {}, cameraChanged() {}, setRasterInteraction() {} })
+    const controls = Reflect.get(Viewport.prototype, 'createControls').call(probe.viewport, camera)
+    probe.viewport.controls = controls
+    const axes = { x: false, y: false, z: false }
+    try {
+      probe.selection.clear()
+      probe.setBrushState(action, brush, axes, axes)
+      probe.targetAt = (event: PointerEvent) => event.clientX >= 60 ? target : undefined
+      const position = camera.position.clone(), pivot = controls.target.clone()
+      emit('pointerdown', { pointerType: 'touch', pointerId: 1, clientX: 40 })
+      expect(controls.touches.ONE).toBe(-1)
+      emit('pointermove', { pointerType: 'touch', pointerId: 1, clientX: 70 })
+      expect(probe.brushDrag).toBeDefined()
+      expect(commit).not.toHaveBeenCalled()
+      expect(camera.position.equals(position)).toBe(true)
+      expect(controls.target.equals(pivot)).toBe(true)
+      emit('pointerup', { pointerType: 'touch', pointerId: 1, clientX: 70 })
+      expect(commit).toHaveBeenCalledWith(action, [target.cell])
+      commit.mockClear()
+      for (const cancel of ['pointercancel', 'second-touch', 'blur']) {
+        emit('pointerdown', { pointerType: 'touch', pointerId: 1, clientX: 40 })
+        if (cancel === 'second-touch') emit('pointerdown', { pointerType: 'touch', pointerId: 2, clientX: 30 })
+        else emit(cancel, { pointerType: 'touch', pointerId: 1 })
+        emit('pointermove', { pointerType: 'touch', pointerId: 1, clientX: 70 })
+        emit('pointerup', { pointerType: 'touch', pointerId: 1, clientX: 70 })
+        emit('pointerup', { pointerType: 'touch', pointerId: 2, clientX: 30 })
+        expect(commit).not.toHaveBeenCalled()
+      }
+      expect(controls.touches.TWO).toBe(TOUCH.DOLLY_ROTATE)
+      probe.document.activeLayer.locked = true
+      emit('pointerdown', { pointerType: 'touch', pointerId: 1, clientX: 70 })
+      emit('pointerup', { pointerType: 'touch', pointerId: 1, clientX: 70 })
+      expect(commit).not.toHaveBeenCalled()
+    } finally { controls.dispose(); gesture.dispose() }
+  }
+})
+
 test('model pointer gestures restore canvas keyboard focus unless the model is suspended', () => {
   const gesture = modelGestureProbe(), { probe, emit, target } = gesture
   const focus = probe.viewport.renderer.domElement.focus

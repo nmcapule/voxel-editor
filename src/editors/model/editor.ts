@@ -140,6 +140,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
   const stagePanel = app.querySelector<HTMLElement>('#stage-panel')!
   const layerPanel = app.querySelector<HTMLElement>('#layer-panel')!
   const allToolsPanel = app.querySelector<HTMLElement>('#all-tools-panel')!
+  const viewPanel = app.querySelector<HTMLElement>('#view-panel')!
   const allToolsTrigger = app.querySelector<HTMLButtonElement>('.all-tools-trigger')!
   const mobileActionValue = app.querySelector<HTMLElement>('#mobile-action-value')!
   const mobileBrushValue = app.querySelector<HTMLElement>('#mobile-brush-value')!
@@ -156,7 +157,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
   const fileInput = app.querySelector<HTMLInputElement>('#file-input')!
   const layerList = app.querySelector<HTMLElement>('#layer-list')!
   const layerCounts = new Map<number, number>()
-  const toolPopups = [...app.querySelectorAll<HTMLElement>('.tool-popup, .layer-panel')]
+  const toolPopups = [...app.querySelectorAll<HTMLElement>('.tool-popup, .layer-panel, .view-panel')]
   const resetToolPopups = bindToolPopups(app, lifetime.signal, () => visible && !disposed && !disposal && !renderMode && !options.busy?.())
   let toastTimer: ReturnType<typeof setTimeout> | undefined
 
@@ -195,13 +196,16 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     const owner = options.ownerSaveStatus?.()
     if (owner) {
       saveStatus.dataset.state = owner.state
-      saveStatus.querySelector('span')!.textContent = owner.text
+      saveStatus.querySelector('span')!.textContent = owner.state === 'saving' ? 'Saving' : owner.state === 'error' ? 'Not saved' : 'Saved'
+      saveStatus.setAttribute('aria-label', owner.text)
       saveStatus.title = owner.title
       return
     }
     saveStatus.dataset.state = saveState
-    saveStatus.querySelector('span')!.textContent = saveState === 'saving' ? 'Saving locally…' : saveState === 'error' ? 'Local save failed' : libraryLink && !libraryLink.dirty ? 'Saved to server' : 'Saved locally'
-    saveStatus.title = libraryLink?.dirty ? 'Local recovery saved. Use Save model to update the server copy.' : 'Local autosave is separate from the shared server library.'
+    const description = saveState === 'saving' ? 'Saving locally' : saveState === 'error' ? 'Local save failed' : libraryLink && !libraryLink.dirty ? 'Saved to server' : 'Saved locally'
+    saveStatus.querySelector('span')!.textContent = saveState === 'saving' ? 'Saving' : saveState === 'error' ? 'Not saved' : 'Saved'
+    saveStatus.setAttribute('aria-label', description)
+    saveStatus.title = `${description}. ${libraryLink?.dirty ? 'Use Save model to update the server copy.' : 'Local autosave is separate from the shared server library.'}`
   }
 
   function queueSave(effects?: StudioEffects) {
@@ -314,7 +318,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     if (command.type === 'renderMode.set') {
       closeToolPopups()
       studio.dataset.renderMode = String(renderMode)
-      app.querySelectorAll<HTMLElement>('.tool-dock, .context-dock').forEach(element => { element.inert = renderMode })
+      app.querySelectorAll<HTMLElement>('.tool-dock, .context-dock, .all-tools-trigger, #all-tools-panel, #layer-panel').forEach(element => { element.inert = renderMode })
       app.querySelector<HTMLButtonElement>('[data-action="render"]')!.setAttribute('aria-pressed', String(renderMode))
       renderer.setRenderMode(renderMode)
     }
@@ -530,12 +534,14 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     const palette = app.querySelector<HTMLElement>('#palette-grid')!
     palette.dataset.view = paletteView
     const filteredMaterials = paletteIndices()
-    palette.innerHTML = filteredMaterials.length ? filteredMaterials.map(index => {
+    const swatchMarkup = (index: number, picker = false) => {
       const material = voxelDocument.materials[index]
-      return `<button type="button" data-color="${index}" data-transparent="${material.opacity < 1 || material.transmission > 0}" aria-label="Use ${escapeHtml(material.name)}, color ${index}, ${colorHex(index)}" aria-pressed="${index === activeColor}" style="${materialPreviewStyle(index)}">
+      return `<button type="button" data-color="${index}" ${picker ? `id="picker-material-${index}" data-wheel-value="${index}" role="option" tabindex="-1" aria-selected="${index === activeColor}"` : ''} data-transparent="${material.opacity < 1 || material.transmission > 0}" aria-label="Use ${escapeHtml(material.name)}, color ${index}, ${colorHex(index)}" aria-pressed="${index === activeColor}" style="${materialPreviewStyle(index)}">
         ${materialCube}<span class="swatch-copy"><strong>${escapeHtml(material.name)}</strong><small>${materialSummary(index)}</small></span><span class="swatch-index">${index}</span>
       </button>`
-    }).join('') : '<p class="palette-empty">No materials match this filter.</p>'
+    }
+    palette.innerHTML = filteredMaterials.length ? filteredMaterials.map(index => swatchMarkup(index)).join('') : '<p class="palette-empty">No materials match this filter.</p>'
+    app.querySelector('#material-picker-grid')!.innerHTML = paletteIndices('all').map(index => swatchMarkup(index, true)).join('')
     if (focusedColor && !focusedPalette) palette.querySelector<HTMLButtonElement>(`[data-color="${focusedColor}"]`)?.focus({ preventScroll: true })
     app.querySelectorAll<HTMLButtonElement>('[data-palette-view]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.paletteView === paletteView)))
     app.querySelectorAll<HTMLButtonElement>('[data-palette-filter]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.paletteFilter === paletteFilter)))
@@ -585,7 +591,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
       button.setAttribute('aria-pressed', String(!secondaryTool && button.dataset.brush === brush))
       button.disabled = button.dataset.brush === 'pattern' && !clipboard.length
     })
-    app.querySelectorAll<HTMLButtonElement>('[data-wheel-value]').forEach(button => {
+    app.querySelectorAll<HTMLButtonElement>('.mobile-tool-shelf [data-wheel-value]').forEach(button => {
       button.setAttribute('aria-selected', String(button.dataset.wheelValue === brush || button.dataset.wheelValue === action))
       button.disabled = button.dataset.wheelValue === 'pattern' && !clipboard.length
       button.setAttribute('aria-disabled', String(button.disabled))
@@ -649,9 +655,10 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
 
   const closeMobileWheels = bindMobileWheels(app, lifetime.signal, () => visible && !disposed && !disposal && !activating && !renderMode && !options.busy?.(), () => {
     closePanel()
+    app.querySelector<HTMLDetailsElement>('#project-menu')!.open = false
     resetToolPopups()
     for (const popup of toolPopups) if (popup.matches(':popover-open')) popup.hidePopover()
-  }, (kind, value) => kind === 'brush' ? setBrush(value as BrushMode) : setAction(value as ModelAction))
+  }, (kind, value) => kind === 'material' ? selectColor(Number(value)) : kind === 'brush' ? setBrush(value as BrushMode) : setAction(value as ModelAction))
 
   function openLayerPanelFromTools() {
     closeToolPopups()
@@ -717,6 +724,9 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
   }
 
   function renderSettings() {
+    app.querySelectorAll<HTMLInputElement>('[data-view-setting]').forEach(input => {
+      input.checked = Boolean(settings[input.dataset.viewSetting as keyof ViewSettings])
+    })
     const previewAvailable = renderer.hasPreviewRenderer
     const cubeSprites = previewAvailable && settings.previewRenderer === 'cube-sprites'
     app.querySelector<HTMLSelectElement>('#preview-renderer')!.value = cubeSprites ? 'cube-sprites' : 'standard'
@@ -735,7 +745,6 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     app.querySelector<HTMLSelectElement>('#projection')!.value = cubeSprites ? 'orthographic' : settings.projection
     app.querySelector<HTMLOptionElement>('#projection option[value="perspective"]')!.disabled = cubeSprites
     app.querySelector<HTMLSelectElement>('#skybox')!.value = settings.skybox
-    app.querySelector<HTMLInputElement>('#show-sun')!.checked = settings.showSun
     app.querySelector<HTMLElement>('#background-label')!.hidden = settings.skybox !== 'solid'
     app.querySelector<HTMLElement>('#skybox-help')!.hidden = settings.skybox === 'solid'
     app.querySelector<HTMLInputElement>('#background')!.value = settings.background
@@ -748,6 +757,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     app.querySelector<HTMLElement>('#fog-controls')!.hidden = !settings.volumetricLighting
     app.querySelector<HTMLInputElement>('#fog-color')!.value = settings.fogColor
     app.querySelector<HTMLInputElement>('#grid')!.checked = settings.grid
+    app.querySelector<HTMLInputElement>('#grid-walls')!.checked = settings.gridWalls
     app.querySelector<HTMLInputElement>('#face-grid')!.checked = settings.faceGrid
     app.querySelector<HTMLInputElement>('#mesh-vertices')!.checked = settings.meshVertices
     app.querySelector<HTMLInputElement>('#mesh-triangles')!.checked = settings.meshTriangles
@@ -957,7 +967,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
       }
       studio.dataset.tool = activeTool
       studio.dataset.renderMode = String(renderMode)
-      app.querySelectorAll<HTMLElement>('.tool-dock, .context-dock').forEach(element => { element.inert = renderMode })
+      app.querySelectorAll<HTMLElement>('.tool-dock, .context-dock, .all-tools-trigger, #all-tools-panel, #layer-panel').forEach(element => { element.inert = renderMode })
       app.querySelector<HTMLButtonElement>('[data-action="render"]')!.setAttribute('aria-pressed', String(renderMode))
       closePanel(); closeToolPopups(); dismissGuide()
       renderPalette(); renderDocumentFacts(); renderSettings(); renderPaletteMaterial(); renderToolControls(); updateSaveStatus()
@@ -978,10 +988,12 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
   }
 
   function openPanel(tab = 'model') {
+    app.querySelector<HTMLDetailsElement>('#project-menu')!.open = false
     if (layerPanel.matches(':popover-open')) layerPanel.hidePopover()
     closeToolPopups()
     studio.dataset.panelOpen = 'true'
     stagePanel.dataset.open = 'true'
+    stagePanel.inert = false
     stagePanel.setAttribute('aria-hidden', 'false')
     app.querySelector<HTMLButtonElement>('[data-action="panel"]')!.setAttribute('aria-expanded', 'true')
     app.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach(button => button.setAttribute('aria-selected', String(button.dataset.tab === tab)))
@@ -992,6 +1004,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     delete studio.dataset.panelOpen
     delete stagePanel.dataset.open
     stagePanel.setAttribute('aria-hidden', 'true')
+    stagePanel.inert = true
     app.querySelector<HTMLButtonElement>('[data-action="panel"]')!.setAttribute('aria-expanded', 'false')
   }
 
@@ -999,8 +1012,34 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     if ((event as ToggleEvent).newState !== 'open') return
     closeMobileWheels()
     closePanel()
+    app.querySelector<HTMLDetailsElement>('#project-menu')!.open = false
+    if (viewPanel.matches(':popover-open')) viewPanel.hidePopover()
     allToolsPanel.querySelector<HTMLElement>('.all-tools-body')!.scrollTop = 0
   })
+
+  for (const popup of [viewPanel, layerPanel]) on(popup, 'beforetoggle', event => {
+    if ((event as ToggleEvent).newState !== 'open') return
+    closeMobileWheels()
+    closePanel()
+    app.querySelector<HTMLDetailsElement>('#project-menu')!.open = false
+  })
+  on(app.querySelector<HTMLDetailsElement>('#project-menu')!, 'toggle', event => {
+    if ((event.target as HTMLDetailsElement).open) { closeToolPopups(); closePanel() }
+  })
+  on(app.querySelector<HTMLInputElement>('#diagnostics')!, 'input', event => {
+    app.querySelector<HTMLElement>('.scene-status')!.hidden = !(event.target as HTMLInputElement).checked
+  })
+  on(viewPanel, 'input', event => {
+    const input = (event.target as HTMLElement).closest<HTMLInputElement>('[data-view-setting]')
+    if (input) runStudioCommand({ type: 'settings.update', patch: { [input.dataset.viewSetting!]: input.checked } })
+  })
+  on(stagePanel, 'keydown', event => {
+    if (event.key !== 'Escape') return
+    event.preventDefault(); event.stopPropagation()
+    closePanel()
+    app.querySelector<HTMLButtonElement>('[data-action="panel"]')!.focus()
+  })
+  stagePanel.inert = true
 
   function download(data: BlobPart, filename: string, type: string) {
     const url = URL.createObjectURL(new Blob([data], { type }))
@@ -1033,7 +1072,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     if (next) { closeToolPopups(); if (focusFromTool) button.focus({ preventScroll: true }) }
     runStudioCommand({ type: 'renderMode.set', enabled: next })
     studio.dataset.renderMode = String(renderMode)
-    app.querySelectorAll<HTMLElement>('.tool-dock, .context-dock').forEach(element => { element.inert = renderMode })
+    app.querySelectorAll<HTMLElement>('.tool-dock, .context-dock, .all-tools-trigger, #all-tools-panel, #layer-panel').forEach(element => { element.inert = renderMode })
     button.setAttribute('aria-pressed', String(renderMode))
     if (renderMode && !matchMedia('(max-width: 840px)').matches) openPanel('render')
   }
@@ -1041,6 +1080,19 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
   on(app, 'click', async event => {
     if (!visible || disposed || disposal) return
     const target = event.target as HTMLElement
+    const faceButton = target.closest<HTMLButtonElement>('[data-view-face]')
+    if (faceButton) {
+      closeToolPopups(); closePanel()
+      const view = renderer.getView()
+      const direction = ({ front: [0, 0, 1], back: [0, 0, -1], right: [1, 0, 0], left: [-1, 0, 0], top: [0, 1, 0], bottom: [0, -1, 0] } as const)[faceButton.dataset.viewFace as 'front']
+      const distance = Math.hypot(view.position.x - view.target.x, view.position.y - view.target.y, view.position.z - view.target.z)
+      void dispatchApplicationCommand({ type: 'view.set', view: {
+        position: { x: view.target.x + direction[0] * distance, y: view.target.y + direction[1] * distance, z: view.target.z + direction[2] * distance },
+        target: view.target, up: direction[1] ? { x: 0, y: 0, z: -direction[1] } : { x: 0, y: 1, z: 0 },
+        zoom: view.zoom, orthographicSpan: view.orthographicSpan,
+      } }).catch(commandFailed)
+      return
+    }
     const clipboardButton = target.closest<HTMLButtonElement>('[data-clipboard-action]')
     if (clipboardButton) {
       const action = clipboardButton.dataset.clipboardAction
@@ -1161,6 +1213,10 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     const colorButton = target.closest<HTMLButtonElement>('[data-color]')
     if (colorButton) {
       if (colorButton.closest('#paint-tool-popup') && activeTool !== 'paint') setTool('paint')
+      if (colorButton.closest('#material-picker')) {
+        closeMobileWheels()
+        app.querySelector<HTMLButtonElement>('.dock-material')!.focus({ preventScroll: true })
+      }
       selectColor(Number(colorButton.dataset.color))
       return
     }
@@ -1181,13 +1237,12 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     if (action === 'undo') undo()
     if (action === 'redo') redo()
     if (action === 'frame') void dispatchApplicationCommand({ type: 'view.frame' }).catch(commandFailed)
+    if (action === 'lighting') openPanel('render')
     if (action === 'render') toggleRenderMode()
     if (action === 'panel') stagePanel.dataset.open ? closePanel() : openPanel('model')
     if (action === 'close-panel') closePanel()
-    if (action === 'palette') {
-      if (button.closest('#paint-tool-popup') && activeTool !== 'paint') setTool('paint')
-      openPanel('palette')
-    }
+    if (action === 'edit-materials') openPanel('palette')
+    if (action === 'palette') app.querySelector<HTMLButtonElement>('.dock-material')!.click()
     if (action === 'dismiss-guide') { dismissGuide(); renderer.focusViewport() }
     if (action === 'clear-pbr') {
       void dispatchApplicationCommand({ type: 'material.map.clear', index: activeColor }).catch(commandFailed)
@@ -1332,7 +1387,6 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     if (target.id === 'projection') patch.projection = target.value as ViewSettings['projection']
     if (target.id === 'pbr-materials') patch.pbrMaterials = (target as HTMLInputElement).checked
     if (target.id === 'skybox') patch.skybox = target.value as ViewSettings['skybox']
-    if (target.id === 'show-sun') patch.showSun = (target as HTMLInputElement).checked
     if (target.id === 'background') patch.background = target.value
     if (target.id === 'ambient') patch.ambient = Number(target.value)
     if (target.id === 'light') patch.light = Number(target.value)
@@ -1343,6 +1397,7 @@ export async function mountModelEditor(app: HTMLElement, options: ModelEditorOpt
     if (target.id === 'fogDensity' || target.id === 'fogSpread') patch[target.id] = Number(target.value)
     if (target.id === 'fog-color') patch.fogColor = target.value
     if (target.id === 'grid') patch.grid = (target as HTMLInputElement).checked
+    if (target.id === 'grid-walls') patch.gridWalls = (target as HTMLInputElement).checked
     if (target.id === 'face-grid') patch.faceGrid = (target as HTMLInputElement).checked
     if (target.id === 'mesh-vertices') patch.meshVertices = (target as HTMLInputElement).checked
     if (target.id === 'mesh-triangles') patch.meshTriangles = (target as HTMLInputElement).checked

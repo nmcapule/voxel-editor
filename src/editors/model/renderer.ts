@@ -473,6 +473,7 @@ export class VoxelRenderer {
 
   private marqueeDrag?: MarqueeDrag
   private brushDrag?: BrushDrag
+  private pendingBrushPointer?: number
   private pushPullDrag?: PushPullDrag
 
   private fillPreview?: THREE.InstancedMesh
@@ -534,7 +535,7 @@ export class VoxelRenderer {
       const pan = !this.viewport.renderMode && this.tool === 'layer' && !this.auxiliary && !event.altKey
       controls.mouseButtons.LEFT = pan ? THREE.MOUSE.PAN : -1 as THREE.MOUSE
       if (event.pointerType !== 'touch') return
-      const orbit = !this.viewport.renderMode && shouldOrbitTouch(this.touchTargetActionable(this.targetAt(event)), this.touchPointers.size)
+      const orbit = !this.viewport.renderMode && !this.touchPaintOrErase() && shouldOrbitTouch(this.touchTargetActionable(this.targetAt(event)), this.touchPointers.size)
       controls.touches.ONE = this.viewport.renderMode || pan ? THREE.TOUCH.PAN : orbit ? THREE.TOUCH.ROTATE : -1 as THREE.TOUCH
       this.orbitTouch = !pan && orbit ? { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY } : undefined
     }, { ...options, capture: true })
@@ -566,7 +567,15 @@ export class VoxelRenderer {
           layerId: target?.occupied ? this.document.getVisibleVoxelLayer(target.cell.x, target.cell.y, target.cell.z) : undefined }
         return
       }
-      if (event.pointerType === 'touch' && shouldOrbitTouch(this.touchTargetActionable(target), 0)) return
+      if (event.pointerType === 'touch' && !this.touchTargetActionable(target)) {
+        if (this.touchPaintOrErase()) {
+          // A missed first sample must not turn a painting/erasing stroke into camera navigation.
+          event.preventDefault()
+          this.pendingBrushPointer = event.pointerId
+          canvas.setPointerCapture(event.pointerId)
+        }
+        return
+      }
       if (this.primaryMode && !this.secondaryTool) {
         event.preventDefault()
         this.startBrushInteraction(event, target)
@@ -629,6 +638,14 @@ export class VoxelRenderer {
     canvas.addEventListener('pointermove', event => {
       if (this.modelSuspended) return
       if (this.touchPointers.size > 1) return
+      if (this.pendingBrushPointer === event.pointerId) {
+        const target = this.targetAt(event)
+        if (target && this.touchTargetActionable(target)) {
+          this.pendingBrushPointer = undefined
+          this.startBrushInteraction(event, target)
+        }
+        return
+      }
       if (this.marqueeDrag && this.activePointer === event.pointerId) {
         this.moveMarquee(event)
         return
@@ -650,6 +667,7 @@ export class VoxelRenderer {
         && isTouchTap(this.orbitTouch.startX, this.orbitTouch.startY, event.clientX, event.clientY)
       if (this.orbitTouch?.pointerId === event.pointerId) this.orbitTouch = undefined
       this.touchPointers.delete(event.pointerId)
+      if (this.pendingBrushPointer === event.pointerId) this.pendingBrushPointer = undefined
       if (this.layerClick?.pointerId === event.pointerId) {
         const click = this.layerClick
         this.layerClick = undefined
@@ -707,12 +725,12 @@ export class VoxelRenderer {
       this.cancelBrush()
     }, options)
     const cancelAbandonedDrag = () => {
-      if (this.modelSuspended || this.paintPointer === undefined && !this.brushDrag && !this.marqueeDrag && !this.pushPullDrag && !this.layerClick && !this.orbitTouch) return
+      if (this.modelSuspended || this.paintPointer === undefined && this.pendingBrushPointer === undefined && !this.brushDrag && !this.marqueeDrag && !this.pushPullDrag && !this.layerClick && !this.orbitTouch) return
       this.touchPointers.clear(); this.orbitTouch = undefined; this.layerClick = undefined
       this.cancelPaint(); this.cancelPushPull(); this.cancelMarquee(); this.cancelBrush()
     }
     canvas.addEventListener('lostpointercapture', event => {
-      if (this.paintPointer === event.pointerId || this.activePointer === event.pointerId || this.brushDrag?.pointerId === event.pointerId || this.layerClick?.pointerId === event.pointerId || this.orbitTouch?.pointerId === event.pointerId) cancelAbandonedDrag()
+      if (this.paintPointer === event.pointerId || this.pendingBrushPointer === event.pointerId || this.activePointer === event.pointerId || this.brushDrag?.pointerId === event.pointerId || this.layerClick?.pointerId === event.pointerId || this.orbitTouch?.pointerId === event.pointerId) cancelAbandonedDrag()
     }, options)
     canvas.addEventListener('webglcontextlost', cancelAbandonedDrag, options)
     const ownerDocument = canvas.ownerDocument
@@ -1000,6 +1018,7 @@ export class VoxelRenderer {
   }
 
   private cancelBrush() {
+    this.pendingBrushPointer = undefined
     const active = Boolean(this.brushDrag)
     this.brushDrag = undefined
     this.clearFillPreview()
@@ -1284,6 +1303,10 @@ export class VoxelRenderer {
       z: target.cell.z + target.normal.z,
     } : { ...target.cell }
     return this.document.contains(cell.x, cell.y, cell.z) ? cell : undefined
+  }
+
+  private touchPaintOrErase() {
+    return this.primaryMode && !this.secondaryTool && !this.auxiliary && (this.action === 'paint' || this.action === 'erase')
   }
 
   private touchTargetActionable(target?: ToolTarget) {

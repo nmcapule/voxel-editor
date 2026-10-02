@@ -11,13 +11,13 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
   const brushes = [['voxel', 'voxel', 'Voxel', 'V'], ['face', 'face', 'Face', 'F'], ['box', 'box', 'Box', 'B'], ['line', 'line', 'Line', 'L'], ['center', 'center', 'Center', 'C'], ['texture', 'pattern', 'Texture', ''], ['body', 'box', 'Body', ''], ['pattern', 'pattern', 'Pattern', 'P']] as const
   const brushButtons = brushes
     .map(([value, glyph, label, key]) => `<button type="button" data-brush="${value}" aria-pressed="false" title="${value === 'box' ? 'Box brush: drag between opposite 3D corners' : `${label} brush`}${key ? ` (${key})` : ''}" ${value === 'pattern' ? 'disabled' : ''}>${icon(glyph)}<span>${label}</span>${key ? `<kbd>${key}</kbd>` : ''}</button>`).join('')
-  const mobileWheel = (kind: 'brush' | 'action', choices: typeof brushes | typeof actions, selected: string) => {
+  const mobileWheel = (kind: 'brush' | 'action', choices: readonly (typeof brushes[number] | typeof actions[number])[], selected: string) => {
     const [, glyph, label] = choices.find(([value]) => value === selected)!
     return `<div class="mobile-wheel-picker" data-mobile-wheel="${kind}">
-      <button id="mobile-${kind}-trigger" class="mobile-wheel-trigger" type="button" aria-haspopup="listbox" aria-controls="mobile-${kind}-wheel" aria-expanded="false" aria-label="Choose ${kind}, ${label} selected" data-wheel-trigger><span id="mobile-${kind}-icon" class="mobile-wheel-icon">${icon(glyph)}</span><span class="${kind === 'brush' ? 'sr-only' : 'mobile-tool-value'}"><span>${kind === 'brush' ? 'Brush' : 'Action'}</span><strong id="mobile-${kind}-value">${label}</strong></span></button>
+      <button id="mobile-${kind}-trigger" class="mobile-wheel-trigger" type="button" aria-haspopup="listbox" aria-controls="mobile-${kind}-wheel" aria-expanded="false" aria-label="Choose ${kind}, ${label} selected" data-wheel-trigger><span id="mobile-${kind}-icon" class="mobile-wheel-icon">${icon(glyph)}</span><span class="sr-only"><strong id="mobile-${kind}-value">${label}</strong></span></button>
       <div class="mobile-wheel-panel instrument" data-wheel-panel hidden>
-        <div id="mobile-${kind}-wheel" class="wheel-drum" role="listbox" tabindex="0" aria-label="${kind === 'brush' ? 'Brush' : 'Action'} wheel" aria-describedby="mobile-wheel-help">
-          ${choices.map(([value, glyph, label]) => `<button id="mobile-${kind}-${value}" type="button" role="option" tabindex="-1" data-wheel-value="${value}" aria-selected="${value === selected}" ${value === 'pattern' ? 'disabled aria-disabled="true"' : ''}>${icon(glyph)}<span>${label}</span></button>`).join('')}
+        <div id="mobile-${kind}-wheel" class="wheel-drum" role="listbox" tabindex="0" aria-orientation="horizontal" aria-label="${kind === 'brush' ? 'Brush' : 'Tool'} selection" aria-describedby="mobile-wheel-help">
+          ${choices.map(([value, glyph, label]) => `<button id="mobile-${kind}-${value}" type="button" role="option" tabindex="-1" data-wheel-value="${value}" aria-label="${label}" aria-selected="${value === selected}">${icon(glyph)}<span class="option-tooltip" aria-hidden="true">${label}</span></button>`).join('')}
         </div>
       </div>
     </div>`
@@ -31,7 +31,7 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
     <button type="button" data-clipboard-action="cut" aria-label="Cut" title="Cut (Ctrl/Command X)">${icon('cut')}${mobile ? '<span>Cut</span>' : ''}</button>
     <button type="button" data-clipboard-action="copy" aria-label="Copy" title="Copy (Ctrl/Command C)">${icon('copy')}${mobile ? '<span>Copy</span>' : ''}</button>
     <button type="button" data-clipboard-action="paste" aria-label="Paste" title="Paste (Ctrl/Command V)">${icon('paste')}${mobile ? '<span>Paste</span>' : ''}</button>`
-  const materialButton = (mobile = false) => `<button class="active-swatch deck-swatch" type="button" data-action="palette" aria-label="Open active material in palette">${materialCube}${mobile ? '<span>Palette</span>' : ''}</button>`
+  const materialButton = (mobile = false) => `<button class="active-swatch deck-swatch" type="button" data-action="palette" aria-label="Open material picker">${materialCube}${mobile ? '<span>Palette</span>' : ''}</button>`
 
   return `
 
@@ -55,7 +55,6 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
               </div>
             </div>
           </details>
-          <span class="brand-mark">${icon('logo')}</span>
           <label class="project-name"><span class="sr-only">Project name</span><input id="project-name" maxlength="60" value="Untitled"></label>
           <span id="save-status" class="save-status"><i></i><span>Saved locally</span></span>
         </div>
@@ -63,14 +62,29 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
         <div class="top-actions instrument">
           <button type="button" data-action="undo" aria-label="Undo" title="Undo (Ctrl/Command Z)">${icon('undo')}</button>
           <button type="button" data-action="redo" aria-label="Redo" title="Redo (Ctrl/Command Shift Z)">${icon('redo')}</button>
-          <span class="instrument-rule"></span>
-          <button type="button" data-action="frame" aria-label="Frame model" title="Frame model">${icon('frame')}</button>
-          <button type="button" data-action="render" aria-label="Toggle render mode" aria-pressed="false" title="Render mode">${icon('render')}</button>
-          <button type="button" data-action="panel" aria-label="Open stage settings" aria-expanded="false" title="Stage settings">${icon('sliders')}</button>
+          <button type="button" data-action="panel" aria-label="Open settings" aria-expanded="false" title="Settings">${icon('settings')}</button>
         </div>
       </div>
 
-      <section id="welcome" class="welcome-panel instrument" aria-labelledby="welcome-title">
+      <div class="view-control instrument" aria-label="Camera orientation">
+        <div class="orientation-cube">
+          <button type="button" data-view-face="top" aria-label="Top view" title="Top view">Y</button>
+          <button type="button" data-view-face="right" aria-label="Right view" title="Right view">X</button>
+          <button type="button" data-view-face="front" aria-label="Front view" title="Front view">Z</button>
+        </div>
+        <button type="button" class="view-trigger" popovertarget="view-panel" aria-label="View options">View ${icon('chevron')}</button>
+      </div>
+      <aside id="view-panel" class="view-panel instrument" popover aria-label="View options">
+        <button type="button" data-action="frame" title="Frame model">${icon('frame')}Fit to scene</button>
+        <div class="view-faces" role="group" aria-label="Camera views">${['front', 'back', 'left', 'right', 'top', 'bottom'].map(face => `<button type="button" data-view-face="${face}">${face[0].toUpperCase() + face.slice(1)}</button>`).join('')}</div>
+        <label class="toggle-row"><span>Ground grid</span><input type="checkbox" data-view-setting="grid"></label>
+        <label class="toggle-row"><span>Shadows</span><input type="checkbox" data-view-setting="shadows"></label>
+        <label class="toggle-row"><span>Ambient occlusion</span><input type="checkbox" data-view-setting="ambientOcclusion"></label>
+        <button type="button" data-action="render" aria-label="Toggle render mode" aria-pressed="false">${icon('camera')}Render mode</button>
+        <button type="button" data-action="lighting">Lighting and camera settings ${icon('chevron')}</button>
+      </aside>
+
+      <section id="welcome" class="welcome-panel instrument" aria-labelledby="welcome-title" hidden>
         <button type="button" class="welcome-close" data-action="dismiss-guide" aria-label="Dismiss guide">${icon('close')}</button>
         <span class="welcome-cube" aria-hidden="true">${icon('logo')}</span>
         <h1 id="welcome-title">Action meets brush.</h1>
@@ -78,7 +92,7 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
         <button type="button" class="primary" data-action="dismiss-guide">Start shaping</button>
       </section>
 
-      <div class="scene-status instrument" role="group" aria-label="Model status">
+      <div class="scene-status instrument" role="group" aria-label="Model status" hidden>
         <span id="coordinate-status" aria-live="polite">X -- &nbsp; Y -- &nbsp; Z --</span>
         <span class="status-rule"></span>
         <span id="voxel-count">0 voxels</span>
@@ -88,39 +102,24 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
         <span id="fps-status">-- fps</span>
       </div>
 
-      <div id="context-dock" class="context-dock instrument">
+      <div id="context-dock" class="context-dock instrument" hidden>
         <div class="context-summary"><strong id="context-title">Attach · Box</strong><span id="context-copy">Drag between surface or guide-grid cells to span X, Y, and Z.</span></div>
       </div>
 
-      <nav class="tool-dock edit-deck desktop-tool-deck instrument" aria-label="Voxel editing tools">
-        <div class="deck-strip action-strip" role="group" aria-label="Actions">
-          <span class="deck-label">Action</span>
-          ${actionButtons}
-          <span class="deck-divider"></span>
-          ${operationButtons()}
-        </div>
-        <div class="deck-strip brush-strip" role="group" aria-label="Brushes and modifiers">
-          <span class="deck-label">Brush</span>
-          ${brushButtons}
-          <span class="deck-divider"></span>
-          <span class="axis-group" role="group" aria-label="Mirror axes"><span>${icon('mirror')}<b>Mirror</b></span>${mirrorButtons}</span>
-          <span class="axis-group" role="group" aria-label="Whole axes"><span>${icon('axis')}<b>Axis</b></span>${wholeAxisButtons}</span>
-          <span class="deck-divider"></span>
-          <span class="clipboard-group" role="group" aria-label="Clipboard">
-            ${clipboardButtons()}
-          </span>
-          ${materialButton()}
-        </div>
-      </nav>
-
       <nav class="tool-dock mobile-tool-shelf instrument" aria-label="Current voxel tools">
         <div class="mobile-tool-summary" role="group" aria-label="Retained action and brush">
-          ${mobileWheel('brush', brushes, 'box')}
-          ${mobileWheel('action', actions, 'attach')}
-          <button class="all-tools-trigger" type="button" popovertarget="all-tools-panel" aria-label="Open all tools">${icon('sliders')}<span><strong>All tools</strong><small id="mobile-operation-value" hidden></small></span></button>
+          ${mobileWheel('brush', brushes.slice(0, 5), 'box')}
+          ${mobileWheel('action', actions.slice(0, 3), 'attach')}
+          <div class="mobile-wheel-picker" data-mobile-wheel="material"><button class="active-swatch dock-material" type="button" data-action="palette" data-wheel-trigger aria-controls="material-picker" aria-haspopup="listbox" aria-expanded="false" aria-label="Open material picker">${materialCube}${icon('chevron')}</button></div>
         </div>
-        <span id="mobile-wheel-help" class="sr-only">Swipe up or down, then release to choose. Or use arrow keys and Enter. Escape cancels.</span>
+        <span id="mobile-wheel-help" class="sr-only">Tap to open, then tap an option. Or press, slide onto an option, and release to choose. Tap outside or press Escape to close. Arrow keys and Enter select.</span>
       </nav>
+      <button class="all-tools-trigger instrument" type="button" popovertarget="all-tools-panel" aria-label="Open all tools">${icon('more')}<span id="mobile-operation-value" class="sr-only" hidden></span></button>
+
+      <aside id="material-picker" class="material-picker instrument" hidden aria-label="Material picker">
+        <div id="material-picker-grid" class="palette-grid" data-view="grid" role="listbox" tabindex="0" aria-label="Choose material" aria-describedby="mobile-wheel-help"></div>
+        <button type="button" class="secondary full" data-action="edit-materials">Edit materials ${icon('chevron')}</button>
+      </aside>
 
       <aside id="all-tools-panel" class="tool-popup all-tools-panel instrument" popover aria-labelledby="all-tools-title">
         <header>
@@ -152,7 +151,7 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
 
       <aside id="stage-panel" class="stage-panel instrument" aria-label="Stage settings" aria-hidden="true">
         <header>
-          <div><strong>Stage</strong><span>Model, materials &amp; light</span></div>
+          <div><strong id="settings-title">Settings</strong><span>Model, materials &amp; light</span></div>
           <button type="button" data-action="close-panel" aria-label="Close stage settings">${icon('close')}</button>
         </header>
         <nav class="panel-tabs" role="tablist" aria-label="Stage sections">
@@ -162,6 +161,7 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
         </nav>
 
         <section class="panel-section" role="tabpanel" aria-labelledby="model-tab" data-panel="model">
+          <label class="toggle-row"><span>Show diagnostics</span><input id="diagnostics" type="checkbox"></label>
           <div class="section-heading"><h2>Canvas size</h2><span id="dimension-readout">32 × 32 × 32</span></div>
           <form id="resize-form" class="dimension-form">
             <label>X<input name="x" type="number" min="16" max="256" required></label>
@@ -179,6 +179,15 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
         </section>
 
         <section class="panel-section" role="tabpanel" aria-labelledby="palette-tab" data-panel="palette" hidden>
+          <div class="palette-view-bar"><strong>Palette</strong><div role="group" aria-label="Palette view"><button type="button" data-palette-view="grid" aria-pressed="true">Grid</button><button type="button" data-palette-view="list" aria-pressed="false">List</button></div></div>
+          <div class="palette-filter-bar" role="group" aria-label="Filter materials">
+            <button type="button" data-palette-filter="opaque" aria-pressed="false">Opaque</button>
+            <button type="button" data-palette-filter="transparent" aria-pressed="false">Transparent</button>
+            <button type="button" data-palette-filter="metal" aria-pressed="false">Metal</button>
+            <button type="button" data-palette-filter="emissive" aria-pressed="false">Emissive</button>
+          </div>
+          <div id="palette-grid" class="palette-grid" data-view="grid" role="group" aria-label="Document palette"></div>
+          <details class="material-properties"><summary>Edit material properties</summary>
           <div class="section-heading"><h2>Active swatch</h2><span id="active-index">Color 5</span></div>
           <div class="color-editor">
             <label id="material-preview" class="material-preview" title="Change swatch color">
@@ -192,14 +201,6 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
             <button type="button" data-action="new-swatch" aria-label="Duplicate as a new swatch">${icon('plus')}</button>
           </div>
           <p class="panel-note swatch-note">Click the cube to change color. Duplicate a swatch before making a variant.</p>
-          <div class="palette-view-bar"><strong>Palette</strong><div role="group" aria-label="Palette view"><button type="button" data-palette-view="grid" aria-pressed="true">Grid</button><button type="button" data-palette-view="list" aria-pressed="false">List</button></div></div>
-          <div class="palette-filter-bar" role="group" aria-label="Filter materials">
-            <button type="button" data-palette-filter="opaque" aria-pressed="false">Opaque</button>
-            <button type="button" data-palette-filter="transparent" aria-pressed="false">Transparent</button>
-            <button type="button" data-palette-filter="metal" aria-pressed="false">Metal</button>
-            <button type="button" data-palette-filter="emissive" aria-pressed="false">Emissive</button>
-          </div>
-          <div id="palette-grid" class="palette-grid" data-view="grid" role="group" aria-label="Document palette"></div>
           <div class="section-heading pbr-heading"><h2>Material</h2><span id="material-color">Color 5</span></div>
           <label class="range-row"><span>Roughness <output id="roughness-output">0.24</output></span><input id="roughness" aria-label="Color 5 material roughness" type="range" min="0" max="1" value="0.24" step="0.01"></label>
           <label class="range-row"><span>Metalness <output id="metalness-output">0.88</output></span><input id="metalness" aria-label="Color 5 material metalness" type="range" min="0" max="1" value="0.88" step="0.01"></label>
@@ -214,6 +215,7 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
           <label class="texture-row"><span>Roughness <small data-pbr-name="roughnessMap">No file</small></span><input type="file" data-pbr-map="roughnessMap" accept="image/*"></label>
           <label class="texture-row"><span>Metalness <small data-pbr-name="metalnessMap">No file</small></span><input type="file" data-pbr-map="metalnessMap" accept="image/*"></label>
           <button type="button" class="secondary full" data-action="clear-pbr">Clear texture maps</button>
+          </details>
         </section>
 
         <section class="panel-section" role="tabpanel" aria-labelledby="render-tab" data-panel="render" hidden>
@@ -231,8 +233,6 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
             <p id="tilt-shift-band-help" class="panel-note">Focus runs from 0% at the top to 100% at the bottom. Sharp band width is a percentage of image height.</p>
           </div>
           <label class="select-row"><span>Skybox</span><select id="skybox">${Object.entries(SKYBOX_PRESETS).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}</select></label>
-          <label class="toggle-row"><span>Show sun/moon</span><input id="show-sun" type="checkbox" aria-describedby="show-sun-help"></label>
-          <p id="show-sun-help" class="panel-note">Direction marker only; lighting is unchanged.</p>
           <label id="background-label" class="color-row"><span>Backdrop</span><input id="background" type="color"></label>
           <label class="range-row"><span>Ambient <output id="ambient-output">1.2</output></span><input id="ambient" aria-label="Ambient light" type="range" min="0" max="3" value="1.2" step="0.1"></label>
           <label class="range-row"><span>Key light <output id="light-output">2.4</output></span><input id="light" aria-label="Key light" type="range" min="0" max="5" value="2.4" step="0.1"></label>
@@ -250,6 +250,7 @@ export function modelMarkup(externalViewport: boolean, menuActions: { action: st
             <label class="color-row"><span>Fog color</span><input id="fog-color" type="color" value="#ffffff"></label>
           </div>
           <label class="toggle-row"><span>Editing grid</span><input id="grid" type="checkbox"></label>
+          <label class="toggle-row"><span>Enclosing grid guides</span><input id="grid-walls" type="checkbox"></label>
           <label class="toggle-row"><span>Voxel face grid</span><input id="face-grid" type="checkbox"></label>
           <label class="toggle-row" title="Show the merged mesh's vertices in edit mode"><span>Mesh vertices</span><input id="mesh-vertices" type="checkbox"></label>
           <label class="toggle-row" title="Show the merged mesh's triangle edges in edit mode"><span>Mesh triangles</span><input id="mesh-triangles" type="checkbox"></label>

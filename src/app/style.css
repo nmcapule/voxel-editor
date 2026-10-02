@@ -6,6 +6,7 @@ body { min-width: 320px; }
 .studio > .model-root { position: absolute; z-index: 2; inset: 0; background: transparent; }
 .studio > .model-root:has(#project-menu[open]) { z-index: 21; }
 .studio > .viewport canvas { cursor: crosshair; }
+.studio:has(.model-editor:not([hidden])) .key-light-guide { display: none; }
 .studio .menu-sheet { max-height: calc(100dvh - 100px); overflow-y: auto; }
 .plugins-menu { margin-top: 6px; border-top: 1px solid var(--line); padding-top: 6px; }
 .studio .plugins-menu > summary { display: list-item; width: auto; height: auto; min-height: 44px; padding: 12px 10px; border-radius: 9px; list-style: disclosure-closed inside; font-size: 0.88rem; }

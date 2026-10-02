@@ -85,7 +85,7 @@ to the composition without replacing the standalone model workspace.
   scope. Move translates a selected region; Ctrl/Command-drag resolves the current
   brush and moves it immediately. Move overwrites destinations on the active layer
   while preserving overlaps on other layers. Cut, Copy, movable ghost Paste, and a momentary
-  Eyedropper remain available beside the brush controls.
+  Eyedropper remain available through All tools.
 - Paint, Erase, Select, and Move use active-layer-only editing and
   picking. Attach may anchor to any visible surface but writes only the active layer.
   Other visible layers appear as faint, noninteractive context while a selection
@@ -95,10 +95,15 @@ to the composition without replacing the standalone model workspace.
   position unchanged and stops any in-flight selection-focus animation. Right-drag
   remains dedicated to camera orbit.
 - Orthographic and perspective camera modes, editing-grid, voxel-face-grid, and
-  shadow and ambient-occlusion controls, an FPS readout, palette-scoped
+  shadow and ambient-occlusion controls, an opt-in diagnostics FPS readout, palette-scoped
   roughness, metalness, emissive intensity, opacity, transmission, refraction, albedo, normal,
   roughness, and metalness maps, progressive PBR rendering with an
   ambient-occluded realtime fallback, and PNG capture.
+- The canvas defaults to muted sage (`#becdc5`) with Solid color selected; saved,
+  authored sky and background settings are preserved. The ground grid is optional,
+  off by default, and quiet when enabled; enclosing grid guides are hidden by
+  default. The model editor has no persistent sun/moon overlay, without removing
+  authored sky lighting or the night panorama's moon.
 - **PBR materials** is one saved, default-on realtime preference shared by Standard
   and Cube sprites. Off uses opaque, lit palette colors without changing authored
   materials or maps; switching renderers keeps the value. Progressive PBR remains
@@ -123,6 +128,10 @@ to the composition without replacing the standalone model workspace.
   dialog. Server saves include layers, palette, material properties and lighting,
   but not texture image files, camera position or undo history. No account is
   required; the shared library is for personal or trusted-team servers.
+- The model top bar shows compact actual save state: Saved, Saving, or Not saved.
+  Accessible text and a tooltip retain local/server detail rather than implying
+  local autosave updates the server copy. At narrow widths the visible text can
+  collapse to a state dot without losing that accessible detail.
 - Scenes have separate local recovery, explicit scene-library saves, and streaming
   `.vscene` import/export. A recovered manifest may still need online access to
   uncached chunks; it is not a guarantee of a complete offline scene. Texture
@@ -133,12 +142,39 @@ to the composition without replacing the standalone model workspace.
   Scene history is separate from model-content history, bounded, and may evict
   undo entries. Histories do not survive refresh or library/file round trips.
 - Selection scope plus active and recent materials persist across refreshes.
-- Desktop-first interaction with pen and touch support. On phones, a compact tool
-  shelf exposes brush and action wheel pickers. Press either control and swipe
-  vertically to turn its wheel; release commits the centered mode. A tap opens the
-  wheel for option taps or arrow-key selection, with Escape canceling. One labeled disclosure
-  exposes every action, brush, utility, modifier, clipboard action, and material control without
-  relying on hidden horizontal scrolling.
+- Mobile Paint and Erase reserve one-finger drags for editing, including drags
+  starting off-model and moving onto editable active-layer voxels. Two-finger camera
+  navigation remains available, and layer visibility and lock restrictions still apply.
+- Mouse, keyboard, pen, and touch use the same bottom-left three-button dock at
+  every screen size: Brush, Action, and active material. Press Brush or Action to
+  open a horizontal strip immediately, slide onto an enabled option, and release
+  to choose. A stationary tap keeps the popup open for option taps; tapping outside,
+  including its trigger, dismisses it. Coordinate hit testing determines slide choices;
+  sliding and releasing outside cancels. There is no hold delay or vertical wheel.
+  Keyboard activation opens a listbox with arrow-key and Home/End navigation,
+  Enter/Space selection, and Escape cancellation; focus leaving closes it.
+  Pointer cancellation, lost capture, blur, resize, and editor changes also cancel
+  without editing the canvas.
+- Quick strips offer Voxel, Face, Box, Line, and Center brushes and Attach, Erase,
+  and Paint actions. A separate bottom-right vertical-dots All tools button opens
+  a compact, vertically scrolling popup with every action, brush, utility, axis
+  modifier, clipboard action, and material control. Select, Move, Texture, Body,
+  and Pattern remain available there. Retained action and brush stay independent
+  when a utility is active; accessible names expose their state.
+- The top bar orders project menu, project name, save state, Undo, Redo, and
+  Settings gear. Settings opens a compact panel with Model, Palette, and Render
+  tabs. The top-right view cube provides Top, Right, and Front views; its View
+  popup offers Fit to scene, six axis views, Ground grid, Shadows, Ambient
+  occlusion, Render mode, and lighting/camera settings.
+- The material cube opens a separate compact material popover anchored above the dock;
+  it has no title or close button and supports the same tap and press-slide-release
+  interactions as Brush and Action, with native scrolling when tapped open.
+  choosing a material closes it and restores focus to the cube. Edit materials opens
+  the full Palette settings. Settings and tool popups
+  replace rather than overlap one another, with bounded scrolling content on
+  desktop and mobile. Show diagnostics in the Model tab opts into coordinates,
+  voxel count, mesh status, and FPS; these and the contextual instruction strip
+  are not persistent model chrome. The separate Performance monitor remains opt-in.
 - Animation, per-voxel material metadata, cloud sync,
   and collaboration are outside the first release.
 - A 256-cubed document is a supported coordinate volume. Pathological models
@@ -155,8 +191,10 @@ product must use its own colors, icons, components, copy, and identity.
 
 ## Evidence on Hand
 
-The confirmed implementation plan and Feather's public interface documentation
-are the product brief. No commercial claims, user research, customer assets, or
+The confirmed implementation plan, Feather's public interface documentation,
+and the user-pinned UI reference inform the product brief. The current implemented
+model UI uses the shared compact dock and contextual controls described above.
+No commercial claims, user research, customer assets, or
 third-party artwork are available and none should be fabricated.
 
 ## Product Principles
@@ -170,7 +208,7 @@ third-party artwork are available and none should be fabricated.
 ## Accessibility & Inclusion
 
 Use semantic controls, visible keyboard focus, text-backed tool state, keyboard
-shortcuts, live coordinate announcements, reduced-motion support, 44-pixel touch
-targets, and a layout that remains usable at 320 pixels wide. Responsive tool
+shortcuts, live coordinate announcements when diagnostics are shown, reduced-motion
+support, 44-pixel quick-picker targets, and a layout that remains usable at 320 pixels wide. Tool
 disclosures support keyboard opening, Escape and explicit closing, light dismissal,
 and predictable focus restoration.

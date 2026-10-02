@@ -142,10 +142,10 @@ test('viewport teardown cancels owned work, detaches borrowed content and dispos
 })
 
 test('bounded stage fitting preserves local cameras, light position and guide geometry without a model', () => {
-  const settings = { grid: true, background: '#dfe7ec', lightAzimuth: 42 }
+  const settings = { ...DEFAULT_SETTINGS, grid: true, background: '#dfe7ec', lightAzimuth: 42 }
   const root = new THREE.Group(), bounds = new THREE.Box3(new THREE.Vector3(-32, 0, -16), new THREE.Vector3(32, 48, 16))
   const probe = Object.assign(Object.create(Viewport.prototype), {
-    scene: new THREE.Scene(), sceneContent: { root, bounds, stage: 'bounded' }, settings,
+    scene: new THREE.Scene(), sceneContent: { root, bounds, stage: 'bounded' }, settings, host: { clientWidth: 1280, clientHeight: 800 },
     environmentTarget: { texture: new THREE.Texture() }, sunlightTarget: new THREE.Object3D(),
     camera: new THREE.OrthographicCamera(), controls: { target: new THREE.Vector3() },
     setSettings() {},
@@ -154,6 +154,8 @@ test('bounded stage fitting preserves local cameras, light position and guide ge
   probe.rebuildStage()
   try {
     expect(probe.grid.children).toHaveLength(5)
+    expect(probe.grid.children[0].userData.normal).toEqual({ x: 0, y: 1, z: 0 })
+    expect(probe.limits.visible).toBe(false)
     expect(probe.limits.box.equals(bounds)).toBe(true)
     expect(probe.scene.children.some((object: THREE.Object3D) => object instanceof THREE.Mesh)).toBe(false)
     expect(probe.sunlightTarget.position.toArray()).toEqual([0, 16, 0])
@@ -162,6 +164,10 @@ test('bounded stage fitting preserves local cameras, light position and guide ge
     probe.frameLocalBounds(new THREE.Vector3(1, 2, 3), 8)
     expect(probe.view.orthographicSpan).toBe(13.2)
     expect(probe.view.position.distanceTo(probe.view.target)).toBeCloseTo(20.8)
+    probe.host.clientWidth = 320
+    probe.frameLocalBounds(new THREE.Vector3(1, 2, 3), 8)
+    expect(probe.view.orthographicSpan).toBeCloseTo(33)
+    expect(probe.view.up).toEqual({ x: 0, y: 1, z: 0 })
     probe.sceneContent.stage = 'world'
     expect(probe.createCamera('perspective')).toMatchObject({ near: 0.5, far: 131072, fov: 34 })
     expect(probe.createCamera('orthographic')).toMatchObject({ near: -65536, far: 131072 })
@@ -210,6 +216,7 @@ test('key-light indicator refreshes even when progressive rendering is already c
   const { probe, pathTracer } = photoProbe()
   probe.keyLightIndicator = { update: mock() }
   probe.settings.skybox = 'night'
+  probe.settings.showSun = true
   probe.render()
   expect(probe.keyLightIndicator.update).toHaveBeenCalledWith(probe.camera, probe.sunlight, 'night', true)
   expect(pathTracer.reset).not.toHaveBeenCalled()
@@ -420,7 +427,7 @@ test('render mode, stage rebuilds and captures never add a floor to either works
       for (const enabled of [false, true, false, true]) {
         probe.setRenderMode(enabled)
         probe.rebuildStage()
-        probe.setSettings({ ...probe.settings, background: '#abcdef', grid: true })
+        probe.setSettings({ ...probe.settings, background: '#abcdef', grid: true, gridWalls: true })
         expect(probe.grid.visible).toBe(!enabled)
         expect(probe.limits.visible).toBe(!enabled)
         expect(probe.scene.children).toEqual([probe.sceneContent.root, probe.grid, probe.limits])

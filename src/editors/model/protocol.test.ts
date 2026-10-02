@@ -55,7 +55,7 @@ describe('scripting protocol', () => {
   })
 
   test('fog and sun marker settings round-trip with legacy defaults and no model geometry edits', () => {
-    expect(DEFAULT_SETTINGS).toMatchObject({ fogDensity: 1, fogSpread: 0.25, fogColor: '#ffffff', showSun: true })
+    expect(DEFAULT_SETTINGS).toMatchObject({ fogDensity: 1, fogSpread: 0.25, fogColor: '#ffffff', showSun: false, grid: false, background: '#becdc5' })
     const document = new VoxelDocument()
     document.setVoxel(1, 2, 3, 5)
     const studio = new Studio(document, settings), before = encodeProjectSnapshot(document, studio.settings)

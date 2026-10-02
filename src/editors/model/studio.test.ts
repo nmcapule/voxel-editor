@@ -121,7 +121,7 @@ describe('studio command kernel', () => {
       { type: 'layer.create', name: 'Details' },
       { type: 'layer.visibility', id: 2, visible: false },
       { type: 'layer.lock', id: 2, locked: true },
-      { type: 'settings.update', patch: { grid: false } },
+      { type: 'settings.update', patch: { grid: true } },
       { type: 'document.new' },
     ] satisfies StudioCommand[]) {
       const before = studio.revision

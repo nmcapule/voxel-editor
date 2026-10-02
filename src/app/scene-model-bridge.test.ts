@@ -162,7 +162,7 @@ async function integration(name: typeof cases[number]) {
     }
     querySelectorAll(selector: string) {
       if (selector === 'button') return [...this.nodes].filter(([selector]) => selector.startsWith('button')).map(([, node]) => node)
-      return selector === '.tool-dock, .context-dock' ? [this.querySelector('.tool-dock'), this.querySelector('.context-dock')] : []
+      return selector.startsWith('.tool-dock, .context-dock') ? selector.split(', ').map(part => this.querySelector(part)) : []
     }
     addEventListener(type: string, listener: (event: unknown) => unknown, options?: { signal?: AbortSignal }) {
       this.listeners.set(type, [...this.listeners.get(type) ?? [], listener])
@@ -291,6 +291,7 @@ async function integration(name: typeof cases[number]) {
       await dispatch({ type: 'tool.sculptMode', mode: 'move' })
       await dispatch({ type: 'renderMode.set', enabled: true })
       expect(modelNode('.tool-dock').inert).toBe(true)
+      expect(modelNode('.all-tools-trigger').inert).toBe(true)
       const before = currentModel(), standaloneSnapshot = encodeProjectSnapshot(before.controller.document, before.controller.settings)
       const beforeState = before.controller.stateSnapshot()
       workspace = await application.openScenePlugin()
@@ -299,6 +300,7 @@ async function integration(name: typeof cases[number]) {
       await ui.command({ type: 'instance.place', assetId, position: { x: 100, y: 0, z: 0 } })
       await enter(); await edit(17)
       expect(modelNode('.tool-dock').inert).toBe(false)
+      expect(modelNode('.all-tools-trigger').inert).toBe(false)
       expect(modelNode('.context-dock').inert).toBe(false)
       const child = currentModel().controller
       await workspace.returnToScene()

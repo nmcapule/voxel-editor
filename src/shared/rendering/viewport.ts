@@ -593,7 +593,7 @@ export class Viewport {
     if (this.renderMode === enabled) return
     this.renderMode = enabled
     this.updateWorkspaceGridVisibility()
-    if (this.limits) this.limits.visible = this.settings.grid && !enabled
+    if (this.limits) this.limits.visible = this.settings.gridWalls && !enabled
     this.sceneContent?.onViewportChange()
     if (enabled && this.settings.pathTracing && !this.previewSelected()) {
       this.pathTracingFailed = false
@@ -640,7 +640,7 @@ export class Viewport {
     this.raster.ambientOcclusion.enabled = settings.ambientOcclusion
     this.renderer.shadowMap.enabled = settings.shadows
     this.updateWorkspaceGridVisibility()
-    if (this.limits) this.limits.visible = settings.grid && !this.renderMode
+    if (this.limits) this.limits.visible = settings.gridWalls && !this.renderMode
     const stageSize = this.stageBounds.getSize(new THREE.Vector3())
     const center = this.stageBounds.getCenter(new THREE.Vector3())
     if (!this.worldScale) center.y = this.stageBounds.min.y
@@ -677,13 +677,16 @@ export class Viewport {
 
   private updateWorkspaceGridVisibility() {
     if (!this.grid) return
-    this.grid.visible = this.settings.grid && !this.renderMode
+    this.grid.visible = (this.settings.grid || this.settings.gridWalls) && !this.renderMode
     if (!this.grid.visible) return
     if (this.worldScale) return
     const dimensions = this.stageBounds.getSize(new THREE.Vector3())
     const center = this.stageBounds.getCenter(new THREE.Vector3())
     const camera = this.camera.position.clone().sub(center)
-    for (const child of this.grid.children) child.visible = workspaceGridPlaneVisible(dimensions, child.userData.normal as Vec3, camera)
+    for (const child of this.grid.children) {
+      const normal = child.userData.normal as Vec3
+      child.visible = (normal.y ? this.settings.grid : this.settings.gridWalls) && workspaceGridPlaneVisible(dimensions, normal, camera)
+    }
   }
 
   private switchProjection(projection: ViewSettings['projection']) {
@@ -729,7 +732,7 @@ export class Viewport {
     for (const normal of this.worldScale ? [] : gridNormals) {
       const geometry = new THREE.BufferGeometry()
       geometry.setAttribute('position', new THREE.BufferAttribute(workspaceGridPositions(stageSize, normal), 3))
-      const lines = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ color: 0xb8c3ca, transparent: true, opacity: 0.58 }))
+      const lines = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ color: 0xe1e9e4, transparent: true, opacity: 0.25 }))
       lines.position.set(center.x - normal.x * 0.002, sceneBounds.min.y - normal.y * 0.002, center.z - normal.z * 0.002)
       lines.userData.normal = normal
       this.grid.add(lines)
@@ -743,9 +746,9 @@ export class Viewport {
     this.limits = new THREE.Box3Helper(sceneBounds.clone(), 0x7b8993)
     const limitsMaterial = this.limits.material as THREE.LineBasicMaterial
     limitsMaterial.transparent = true
-    limitsMaterial.opacity = 0.68
+    limitsMaterial.opacity = 0.3
     limitsMaterial.depthWrite = false
-    this.limits.visible = this.settings.grid && !this.renderMode
+    this.limits.visible = this.settings.gridWalls && !this.renderMode
     this.scene.add(this.grid, this.limits)
     this.sunlightTarget.position.copy(this.worldScale ? center : new THREE.Vector3(center.x, sceneBounds.min.y + stageSize.y / 3, center.z))
     this.setSettings(this.settings)
@@ -898,7 +901,8 @@ export class Viewport {
 
   frameLocalBounds(center: THREE.Vector3, size: number) {
     const direction = new THREE.Vector3(1, 0.78, 1).normalize()
-    this.setView({ position: center.clone().addScaledVector(direction, size * 2.6), target: center, orthographicSpan: size * 1.65, zoom: 1 })
+    const fit = 1 / Math.min(1, Math.max(0.1, this.host.clientWidth / Math.max(1, this.host.clientHeight)))
+    this.setView({ position: center.clone().addScaledVector(direction, size * 2.6 * fit), target: center, up: { x: 0, y: 1, z: 0 }, orthographicSpan: size * 1.65 * fit, zoom: 1 })
   }
 
   getView(): CameraSnapshot {

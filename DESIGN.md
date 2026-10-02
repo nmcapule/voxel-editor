@@ -8,10 +8,12 @@ at the edges and reveal detail only when requested.
 
 ## Visual Language
 
-- Use a cool blue-gray drafting field (`#dfe7ec`) behind the viewport.
+- Default the canvas to muted sage (`#becdc5`) with Solid color selected. Preserve
+  saved, authored sky and background settings rather than replacing them with the default.
 - Build controls from solid porcelain (`#f9faf8`) and paper (`#ffffff`) with
-  graphite text (`#20262c`) and restrained gray linework (`#d9dddc`).
-- Reserve cobalt (`#2f66db`) for active tools and primary state. Model colors
+  graphite text (model chrome: `#29324a`; shared controls: `#20262c`) and restrained
+  gray linework (`#d9dddc`). Model instruments use opaque paper surfaces.
+- Reserve cobalt (model chrome: `#0667ff`; shared controls: `#2f66db`) for active tools and primary state. Model colors
   provide the remaining ornament.
 - Use soft, directional shadows to lift instruments without making them look
   glassy. The stage inspector is fully opaque so the model never competes with
@@ -28,10 +30,10 @@ data uses tabular figures.
 
 ## Form And Spacing
 
-- Base spacing follows an 8 px rhythm with deliberate 10, 18, and 22 px edge
-  offsets where optical balance matters.
-- Compact controls use 9-13 px radii. Floating instruments use 16 px radii and
-  the stage inspector uses 22 px radii.
+- Model chrome uses 12 px edge offsets plus safe-area insets, 56 px top bar and
+  dock heights, and 4 px gaps between dock controls.
+- Model controls use 8 px radii; the top bar, dock, and compact panels use 12 px
+  radii. Shared and scene components retain their existing shapes.
 - Maintain at least 40 px controls on desktop and 44 px touch targets where
   touch interaction is expected.
 - Prefer grouped pills, rails, and one inspector over permanent sidebars,
@@ -40,41 +42,54 @@ data uses tabular figures.
 ## Layout
 
 - The WebGL canvas fills the viewport.
-- Project controls sit top-left; camera and stage actions sit top-right.
+- The model top bar keeps this order: project menu, editable project name, compact
+  save state, Undo, Redo, Settings gear. Save text reflects the actual state as
+  **Saved**, **Saving**, or **Not saved**, not a permanent success label. Accessible
+  text and a tooltip distinguish local recovery from server-library state. At
+  380 px and below the text is visually hidden, retaining the state dot and accessible detail.
 - Model browsing opens a dedicated gallery overlay with a fixed header and search
   controls above a scrolling grid of isometric thumbnails. Preview buttons open
   the saved model; names, dimensions, save dates, and clickable tags sit below.
   Save model uses a separate compact dialog, never a form inside the gallery.
   The gallery expands on desktop and remains usable as a single-column overlay
   at 320 px, with close and search controls remaining visible while browsing.
-- On desktop, model editing uses a two-strip deck at bottom-center. The Action strip leads with
-  Attach, Erase, Paint, Select, and Move, followed by Eyedropper and Layer utilities.
-  The Brush strip leads with Voxel, Face, Box, Line, Center, Texture, Body, and Pattern, followed by Mirror
-  and whole-axis X/Y/Z toggles, clipboard actions, and the active material cube.
-  Action and brush stay independently legible; Eyedropper and Layer temporarily own
-  the interaction without erasing the retained action and brush.
-- Coordinates and mesh facts sit bottom-left.
-- Stage settings enter from the right on desktop. Between 761 and 1100 px, the
-  tool and context docks center within the remaining canvas area while the
-  inspector is open.
-- At 840 px and below, stage settings become an opaque bottom sheet above a compact
-  tool shelf. A dedicated brush icon occupies its left edge; the adjacent Action
-  control uses the same compact vertical wheel picker. Press opens the wheel above
-  the control; dragging turns the drum with curved neighboring rows and a fixed
-  center selection band. Release commits the centered mode without momentum.
-  Tapping opens it for option taps or arrow keys and Enter; Escape, pointer
-  cancellation, and editor changes discard the pending choice. Wheels keep 44 px
-  row spacing, showing fewer rows in short landscape views. The retained Action
-  stays visible beside an explicit
-  **All tools** disclosure; an active utility is named there
-  without replacing either retained value. All tools opens one nonmodal bottom
-  sheet above the shelf with labeled Action, Brush, Utilities, Mirror axes, Whole
-  axes, Clipboard, and Material groups. Controls wrap within each group and the
-  sheet scrolls vertically, never through hidden horizontal strips. Project
-  identity, undo, redo, framing, render mode, and stage settings share one compact
-  top bar. The model status sits below it on a slightly translucent surface, and
-  the active material cube opens the full Palette. Stage, All tools, and Layers
-  replace rather than overlap one another.
+- At every screen size, the model editor uses the same bottom-left three-button
+  dock: Brush, Action, and the active material cube. There is no expanded desktop
+  deck. Icons reflect the retained brush and action; accessible names identify
+  both values. Eyedropper and Layer do not erase them.
+- Brush and Action open horizontal option strips immediately on press. Brush
+  offers Voxel, Face, Box, Line, and Center; Action offers Attach, Erase, and Paint.
+  Slide onto an option and release to commit. Inspection and release use pointer
+  coordinates against enabled option bounds, not the captured event target or a
+   centered wheel position. A stationary tap leaves the popup open for option taps;
+   a later tap outside, including on its trigger, dismisses it. Sliding and releasing
+   outside cancels. There is no hold delay, vertical drum, or momentum. The inspected
+  option gets a cobalt fill and a name tooltip.
+- Keyboard or assistive activation opens a focused listbox. Arrow keys and
+  Home/End inspect enabled options; Enter or Space commits; Escape cancels and
+  restores trigger focus. Tab or focus leaving closes without committing.
+  Pointer cancellation, lost capture, window blur, resize, hidden document, and
+  editor changes discard the pending choice. Picker gestures do not edit the canvas.
+- A standalone vertical-dots **All tools** button sits bottom-right, separate from
+  the dock. Its compact nonmodal popup has a fixed header and vertically scrolling
+  body with labeled Action, Brush, Utilities, Mirror axes, Whole axes, Clipboard,
+  and Material groups. All actions and brushes remain available here, including
+  Select, Move, Texture, Body, and Pattern. It does not become a full-width mobile
+  sheet or rely on hidden horizontal strips; its accessible name identifies an active utility.
+- The Settings gear opens a compact top-right panel with Model, Palette, and
+   Render tabs. The material cube opens a separate compact material popover with a
+   callout tail above the bottom-left dock, without a title or close button. It shares
+   tap-to-open and press-slide-release selection with Brush and Action; its tapped-open
+   grid supports native scrolling. Choosing a material closes it and restores
+   focus to the cube; Edit materials opens the full Palette settings. Panels have
+  bounded heights and scrolling content at every size. Settings, material,
+  All tools, Layers, and View replace rather than stack over one another.
+- A top-right view cube below the bar provides Top, Right, and Front views. Its
+  **View** popup contains Fit to scene, all six axis views, Ground grid, Shadows,
+  Ambient occlusion, Render mode, and a link to lighting and camera settings.
+- Coordinates, voxel count, mesh facts, and FPS are hidden by default. **Show
+  diagnostics** in the Model tab reveals their compact bottom-left status surface.
+  The contextual instruction strip is not persistent chrome.
 
 ## Scene Plugin
 
@@ -111,8 +126,8 @@ data uses tabular figures.
 
 - Active tools use solid cobalt with white labels and icons.
 - Hover states use a quiet neutral fill; disabled actions lower opacity.
-- Model actions, brushes, modifiers, and utilities are direct controls on
-  desktop. Mobile uses one responsive All tools disclosure, but every tool remains
+- Model actions, brushes, modifiers, and utilities share one All tools disclosure
+  on desktop, tablet, and phone. Every tool remains
   a visible, labeled direct control inside it rather than another nested menu.
   Pressed state is visible in each independent group; Pattern is disabled until
   clipboard voxels exist. Layer alone opens its anchored manager. Scene tools retain
@@ -122,8 +137,8 @@ data uses tabular figures.
   chrome rather than replacing the workspace. It starts with the realtime
   image, then progressively refines lighting and palette-scoped PBR materials;
   camera, light, geometry, and material changes restart accumulation. The model
-  status reports measured rendered FPS without announcing every update. On
-  mobile, toggling Render mode does not summon the Stage settings sheet.
+  opt-in diagnostics report measured rendered FPS without announcing every update. On
+  mobile, toggling Render mode does not summon the Settings panel.
 - The model Render tab starts with **Renderer: Standard / Cube sprites**. The
   **PBR materials** native checkbox below it is always visible and enabled, even when
   the plugin is unavailable. It controls one saved, default-on preference shared by
@@ -159,19 +174,24 @@ data uses tabular figures.
   silhouettes. Orthographic models retain their projection but get a perspective-style
   panoramic backdrop. Night has a glowing moon and stronger actual moonlight, not
   merely a brighter icon; the other presets and global exposure remain independently controlled.
-- A default-on key-light compass, not a scene object, shows warm **Sun** for Solid color,
+- The model editor has no persistent sun/moon overlay or Show sun/moon control;
+  this does not remove authored sky lighting or the night panorama's moon.
+  The scene editor retains its optional key-light compass, not a scene object,
+  with **Show sun/moon** defaulting off for new settings. It shows warm **Sun** for Solid color,
   Daylight, Overcast, and Sunset; cool **Moon** for Night, with porcelain **Ahead/Behind** labels.
   It follows actual light and camera orientation in view space for orthographic/perspective views,
   stays stable on pan/zoom, never intercepts pointers, and leaves lighting and PNG captures unchanged.
-  It avoids the desktop Stage inspector and clears mobile chrome, dock, and safe area.
+  It avoids the scene Stage inspector and clears mobile chrome, dock, and safe area.
   A saved **Show sun/moon** checkbox beside Skybox hides only the compass, without
   turning off illumination or the night panorama's moon. The moon marker has a cool glow.
 - Render mode and PNG captures show authored geometry against the selected backdrop
   or sky, without an automatic ground plane. The editing grid remains an edit-only guide.
 - The optional voxel face grid traces exposed unit-cell boundaries in adaptive
   graphite or porcelain. Like the editing grid, it disappears in Render mode.
-- The editing grid covers the guide floor and rear side planes. Camera-side
-  planes hide as the view orbits so grid lines never sit in front of the model.
+- The model ground grid is optional, off by default, and uses quiet translucent
+  floor lines when enabled. Enclosing grid guides are hidden by default and can
+  be restored with **Enclosing grid guides** in Settings; do not
+  present rear walls or a surrounding cage as permanent model chrome.
 - Screen-space ambient occlusion adds restrained contact depth to the realtime
   viewport and raster fallback, using half-resolution effect buffers to preserve
   interaction speed. Progressive PBR relies on physically traced occlusion
@@ -201,8 +221,8 @@ data uses tabular figures.
 - Realtime PBR scales neutral environment lighting with metalness: matte
   materials avoid an added brightness wash while metals retain reflected color
   outside direct highlights.
-- Keep named voxel layers in the Layer popover at the end of the desktop Action
-  strip and in the mobile Operations group, separate from stage settings. Each
+- Keep named voxel layers in the Layer popover reached from All tools' Utilities
+  group at every screen size, separate from stage settings. Each
   layer can hold a voxel at the same coordinate;
   the highest visible layer wins, and the list shows that layer first. A stationary
   tap or click on a visible voxel with Layer makes its owner active on release.
@@ -250,7 +270,10 @@ data uses tabular figures.
   the resolved cells across the document midpoint; whole-axis expands them across
   the complete selected dimension. Selection scope and active/recent material
   choices persist across refreshes.
-- Outside Layer, a one-finger touch drag rotates the camera when the active operation
+- Paint and Erase reserve one-finger drags for editing, including when a drag starts
+  off-model and then reaches editable voxels. Two fingers navigate the camera;
+  active-layer visibility and locks still govern edits.
+- Outside Layer, Paint, and Erase, a one-finger touch drag rotates the camera when the active operation
   cannot act at its starting position. Touches on actionable voxels keep
   editing behavior; a stationary tap outside actionable voxels clears selection,
   while two-finger dolly and rotate remain available everywhere.
@@ -273,11 +296,11 @@ data uses tabular figures.
   shortcuts are V Voxel, F Face, B Box, L Line, C Center, and P Pattern. Number
   keys 1/2/3 toggle Mirror X/Y/Z; Ctrl/Command+1/2/3 toggle whole-axis X/Y/Z.
   Ctrl/Command-drag invokes Move and Alt-click invokes Eyedropper. Model Render
-  mode is toggled from the toolbar, not a keyboard shortcut.
+  mode is toggled from the View popup, not a keyboard shortcut.
 - Move translates the occupied selection along the dragged face normal, preserves
   palette colors, stops at document bounds, and overwrites destination voxels on
   the active layer without changing overlapping voxels on other layers.
-- The desktop Brush strip and mobile Clipboard group expose Cut, Copy, and Paste
+- The All tools Clipboard group exposes Cut, Copy, and Paste at every screen size
   with standard Ctrl/Command X, C, and V shortcuts. Paste switches to Move and
   shows a detached cobalt ghost that commits on click or drag; Escape cancels it
   without modifying the document.
@@ -286,17 +309,19 @@ data uses tabular figures.
   inside it. Other modes project a thin marquee onto the starting face and select
   exposed voxels on that plane. Shift and touch add or remove the active scope.
 - Motion is limited to short panel and state transitions and is effectively
-  removed when `prefers-reduced-motion` is enabled. The mobile tool sheet adds no
+  removed when `prefers-reduced-motion` is enabled. The compact All tools popup adds no
   custom entrance animation.
 
 ## Accessibility
 
 Use native buttons, inputs, selects, disclosure controls, and a semantic tab
-set. Keep tool names visible, expose pressed and selected state, label every
-viewport and render control, announce coordinate changes politely, and retain
-keyboard editing through the focused canvas. The mobile tool disclosure supports
-keyboard traversal, Escape, explicit close, light dismissal, and focus restoration;
-all touch targets remain at least 44 px. The collapsed and expanded layouts must
+set. Keep tool names visible in All tools and available through accessible names
+and inspection tooltips in the icon dock. Expose pressed and selected state, label
+every viewport and render control, announce coordinate changes politely when
+diagnostics are shown, and retain keyboard editing through the focused canvas.
+The All tools disclosure supports keyboard traversal, Escape, explicit close,
+light dismissal, and focus restoration; quick-picker options use 44 px targets.
+The collapsed and expanded layouts must
 remain usable without horizontal overflow at 320 px wide.
 
 ## Assets And Provenance
